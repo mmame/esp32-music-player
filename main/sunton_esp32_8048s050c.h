@@ -19,9 +19,10 @@
 #define SUNTON_ESP32_TOUCH_PIN_I2C_SCL          GPIO_NUM_20
 #define SUNTON_ESP32_TOUCH_PIN_I2C_SDA          GPIO_NUM_19
 #define SUNTON_ESP32_TOUCH_PIN_RST              GPIO_NUM_38
-#define SUNTON_ESP32_TOUCH_PIN_INT              GPIO_NUM_18
+// interupt pin was falsely routed to GND instead via R17 to IO18
+#define SUNTON_ESP32_TOUCH_PIN_INT              GPIO_NUM_NC
 
-// R5 is bound to VCC so GT911 should have I2C address 0x14, but GPIO18 is pulled down on init, so its 0x5D
+// interupt pin was falsely routed to GND, so its 0x5D
 #define SUNTON_ESP32_TOUCH_ADDRESS              ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS
 
 // not required, external pullups R3 / R4 in place
