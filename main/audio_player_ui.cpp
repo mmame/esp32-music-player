@@ -15,13 +15,20 @@
 static const char *TAG = "AudioPlayer";
 
 #define TRANSITION_IGNORE_MS 300  // Ignore events for 300ms after screen transition
-#define MAX_WAV_FILES 100
+#define MAX_AUDIO_FILES 50
 #define MAX_FILENAME_LEN 64
 #define I2S_BUFFER_SIZE 1024
 #define WAV_HEADER_SIZE 44
+#define MP3_BUFFER_SIZE 4096  // Max MP3 frame size (increased for safety)
 #define NVS_NAMESPACE "audio_player"
 
-// WAV file structure
+// Audio file types
+typedef enum {
+    AUDIO_TYPE_WAV,
+    AUDIO_TYPE_MP3
+} audio_type_t;
+
+// Audio file structure (supports WAV and MP3)
 typedef struct {
     char name[MAX_FILENAME_LEN];
     char path[320];  // Increased to accommodate "/sdcard/" + 255 char filename + null
@@ -29,10 +36,15 @@ typedef struct {
     uint16_t num_channels;
     uint16_t bits_per_sample;
     uint32_t data_size;
-} wav_file_t;
+    audio_type_t type;  // WAV or MP3
+} audio_file_t;
+
+// minimp3 decoder
+#define MINIMP3_IMPLEMENTATION
+#include "minimp3.h"
 
 // Audio playback state
-static wav_file_t wav_files[MAX_WAV_FILES];
+static audio_file_t *audio_files = NULL;  // Allocated on heap (~40KB)
 static int wav_file_count = 0;
 static int current_track = -1;
 static bool is_playing = false;
@@ -138,7 +150,7 @@ static void progress_bar_event_cb(lv_event_t * e)
         uint32_t percentage = (click_x * 100) / bar_width;
         
         // Calculate byte position in the audio data
-        wav_file_t *wav = &wav_files[current_track];
+        audio_file_t *wav = &audio_files[current_track];
         uint32_t target_byte = (wav->data_size * percentage) / 100;
         
         // Align to sample boundary (important for proper audio playback)
@@ -458,7 +470,7 @@ static void btn_play_event_cb(lv_event_t *e)
             // Start playing current track (or first track if none selected)
             if (wav_file_count > 0) {
                 int track = (current_track >= 0 && current_track < wav_file_count) ? current_track : 0;
-                audio_player_play(wav_files[track].name);
+                audio_player_play(audio_files[track].name);
             }
         }
     }
@@ -487,7 +499,7 @@ static void btn_next_event_cb(lv_event_t *e)
 // ========== I2S and Audio Playback Implementation ==========
 
 // Parse WAV file header
-static bool parse_wav_header(FILE *file, wav_file_t *wav_info)
+static bool parse_wav_header(FILE *file, audio_file_t *wav_info)
 {
     uint8_t header[WAV_HEADER_SIZE];
     
@@ -563,6 +575,9 @@ static bool parse_wav_header(FILE *file, wav_file_t *wav_info)
 static void audio_playback_task(void *arg)
 {
     uint8_t *buffer = (uint8_t *)heap_caps_malloc(I2S_BUFFER_SIZE, MALLOC_CAP_DMA);
+    uint8_t *mp3_buffer = NULL;
+    mp3dec_t *mp3_decoder = NULL;  // Allocate on heap, decoder is ~6KB
+    
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate DMA buffer");
         vTaskDelete(NULL);
@@ -577,11 +592,71 @@ static void audio_playback_task(void *arg)
         return;
     }
     
-    wav_file_t *wav = &wav_files[current_track];
-    uint32_t bytes_per_second = wav->sample_rate * wav->num_channels * (wav->bits_per_sample / 8);
-    uint32_t total_bytes = wav->data_size;
+    audio_file_t *audio = &audio_files[current_track];
+    
+    // Allocate PCM buffer on heap (4.5KB, too large for stack)
+    int16_t *pcm_buffer = NULL;
+    
+    // Initialize MP3 decoder if needed
+    if (audio->type == AUDIO_TYPE_MP3) {
+        ESP_LOGI(TAG, "Allocating MP3 buffers: mp3_buffer=%d, decoder=%d, pcm=%d", 
+                 MP3_BUFFER_SIZE, sizeof(mp3dec_t), MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t));
+        
+        mp3_buffer = (uint8_t *)heap_caps_malloc(MP3_BUFFER_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (!mp3_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate MP3 buffer");
+            free(buffer);
+            vTaskDelete(NULL);
+            return;
+        }
+        memset(mp3_buffer, 0, MP3_BUFFER_SIZE);  // Zero to ensure proper mapping
+        ESP_LOGI(TAG, "MP3 buffer allocated at %p", mp3_buffer);
+        
+        mp3_decoder = (mp3dec_t *)heap_caps_malloc(sizeof(mp3dec_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (!mp3_decoder) {
+            ESP_LOGE(TAG, "Failed to allocate MP3 decoder (~6KB)");
+            free(mp3_buffer);
+            free(buffer);
+            vTaskDelete(NULL);
+            return;
+        }
+        memset(mp3_decoder, 0, sizeof(mp3dec_t));  // Zero to ensure proper mapping
+        ESP_LOGI(TAG, "MP3 decoder allocated at %p (size=%d)", mp3_decoder, sizeof(mp3dec_t));
+        
+        // Allocate PCM buffer with extra safety margin
+        size_t pcm_size = MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t) + 64;  // +64 bytes safety
+        pcm_buffer = (int16_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (!pcm_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate PCM buffer");
+            free(mp3_decoder);
+            free(mp3_buffer);
+            free(buffer);
+            vTaskDelete(NULL);
+            return;
+        }
+        memset(pcm_buffer, 0, pcm_size);  // Zero to ensure proper mapping
+        ESP_LOGI(TAG, "PCM buffer allocated at %p (size=%d)", pcm_buffer, pcm_size);
+        
+        // Verify heap integrity before initializing decoder
+        if (!heap_caps_check_integrity_all(true)) {
+            ESP_LOGE(TAG, "Heap corruption detected BEFORE mp3dec_init");
+        }
+        
+        mp3dec_init(mp3_decoder);
+        ESP_LOGI(TAG, "MP3 decoder initialized");
+        
+        // Verify heap integrity after initializing decoder
+        if (!heap_caps_check_integrity_all(true)) {
+            ESP_LOGE(TAG, "Heap corruption detected AFTER mp3dec_init");
+        }
+    }
+    
+    uint32_t bytes_per_second = audio->sample_rate * audio->num_channels * (audio->bits_per_sample / 8);
+    uint32_t total_bytes = audio->data_size;
     uint32_t bytes_played = 0;
     uint32_t last_update_time = 0;
+    uint32_t mp3_buffer_pos = 0;
+    uint32_t mp3_buffer_len = 0;
     
     while (is_playing) {
         if (is_paused) {
@@ -594,36 +669,147 @@ static void audio_playback_task(void *arg)
             continue;
         }
         
-        // Handle seek request
+        // Handle seek request (simplified for MP3 - seeking is approximate)
         if (seek_position > 0) {
             uint32_t seek_pos = seek_position;
             seek_position = 0;  // Clear seek request
             
-            // Seek to the requested position in the file
-            if (fseek(current_file, wav_data_start_offset + seek_pos, SEEK_SET) == 0) {
-                bytes_played = seek_pos;
-                ESP_LOGI(TAG, "Seeked to position %lu bytes", seek_pos);
-            } else {
-                ESP_LOGE(TAG, "Seek failed");
+            if (audio->type == AUDIO_TYPE_WAV) {
+                // Seek to the requested position in the file
+                if (fseek(current_file, wav_data_start_offset + seek_pos, SEEK_SET) == 0) {
+                    bytes_played = seek_pos;
+                    ESP_LOGI(TAG, "Seeked to position %lu bytes", seek_pos);
+                } else {
+                    ESP_LOGE(TAG, "Seek failed");
+                }
+            } else if (audio->type == AUDIO_TYPE_MP3) {
+                // For MP3, approximate seek by jumping forward in file
+                // This is crude but works for basic seeking
+                long file_size = ftell(current_file);
+                fseek(current_file, 0, SEEK_END);
+                long total_file_size = ftell(current_file);
+                fseek(current_file, file_size, SEEK_SET);
+                
+                uint32_t percentage = (seek_pos * 100) / (total_bytes > 0 ? total_bytes : 1);
+                long target_pos = (total_file_size * percentage) / 100;
+                if (fseek(current_file, target_pos, SEEK_SET) == 0) {
+                    bytes_played = seek_pos;
+                    mp3_buffer_pos = 0;
+                    mp3_buffer_len = 0;
+                    ESP_LOGI(TAG, "MP3 seeked to ~%lu bytes", seek_pos);
+                } else {
+                    ESP_LOGE(TAG, "MP3 seek failed");
+                }
             }
         }
         
-        size_t bytes_read = fread(buffer, 1, I2S_BUFFER_SIZE, current_file);
+        size_t bytes_written = 0;
         
-        if (bytes_read > 0) {
-            size_t bytes_written = 0;
-            i2s_channel_write(tx_handle, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+        if (audio->type == AUDIO_TYPE_WAV) {
+            // WAV: Read PCM data directly
+            size_t bytes_read = fread(buffer, 1, I2S_BUFFER_SIZE, current_file);
             
-            bytes_played += bytes_written;
+            if (bytes_read > 0) {
+                i2s_channel_write(tx_handle, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+                bytes_played += bytes_written;
+            } else {
+                // End of WAV file
+                bytes_written = 0;
+            }
+        } else if (audio->type == AUDIO_TYPE_MP3) {
+            // MP3: Decode frames to PCM
+            // Read more MP3 data if buffer is low
+            if (mp3_buffer_len - mp3_buffer_pos < MINIMP3_MAX_SAMPLES_PER_FRAME) {
+                if (mp3_buffer_pos > 0) {
+                    // Move remaining data to start of buffer
+                    memmove(mp3_buffer, mp3_buffer + mp3_buffer_pos, mp3_buffer_len - mp3_buffer_pos);
+                    mp3_buffer_len -= mp3_buffer_pos;
+                    mp3_buffer_pos = 0;
+                }
+                
+                // Read more data
+                size_t bytes_read = fread(mp3_buffer + mp3_buffer_len, 1, 
+                                         MP3_BUFFER_SIZE - mp3_buffer_len, current_file);
+                if (bytes_read > 0) {
+                    mp3_buffer_len += bytes_read;
+                }
+            }
             
+            // Decode one MP3 frame
+            if (mp3_buffer_len - mp3_buffer_pos > 0) {
+                mp3dec_frame_info_t frame_info;
+                int samples = mp3dec_decode_frame(mp3_decoder, mp3_buffer + mp3_buffer_pos,
+                                                   mp3_buffer_len - mp3_buffer_pos, pcm_buffer, &frame_info);
+                
+                if (samples > 0) {
+                    // Update sample rate if changed
+                    if (frame_info.hz > 0 && frame_info.hz != (int)audio->sample_rate) {
+                        audio->sample_rate = frame_info.hz;
+                        audio->num_channels = frame_info.channels;
+                        bytes_per_second = audio->sample_rate * audio->num_channels * 2;  // 16-bit = 2 bytes
+                        
+                        // Reconfigure I2S
+                        ESP_LOGI(TAG, "MP3 format: %d Hz, %d ch", frame_info.hz, frame_info.channels);
+                        i2s_channel_disable(tx_handle);
+                        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio->sample_rate);
+                        i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
+                        i2s_channel_enable(tx_handle);
+                    }
+                    
+                    // Write PCM samples to I2S
+                    // samples = samples per channel (e.g., 1152 for one MP3 frame)
+                    // PCM buffer contains interleaved samples, so total = samples * channels
+                    size_t pcm_bytes = samples * frame_info.channels * sizeof(int16_t);
+                    size_t max_pcm_bytes = MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t);
+                    if (pcm_bytes > max_pcm_bytes) {
+                        ESP_LOGE(TAG, "PCM overflow detected! samples=%d, channels=%d, pcm_bytes=%d, max=%d", 
+                                 samples, frame_info.channels, pcm_bytes, max_pcm_bytes);
+                        pcm_bytes = max_pcm_bytes;
+                        
+                        // Check heap integrity on overflow
+                        if (!heap_caps_check_integrity_all(true)) {
+                            ESP_LOGE(TAG, "Heap corruption detected during PCM overflow!");
+                        }
+                    }
+                    i2s_channel_write(tx_handle, (uint8_t*)pcm_buffer, pcm_bytes, &bytes_written, portMAX_DELAY);
+                    bytes_played += bytes_written;
+                    
+                    // Advance buffer position
+                    mp3_buffer_pos += frame_info.frame_bytes;
+                } else if (frame_info.frame_bytes > 0) {
+                    // Skip invalid frame
+                    mp3_buffer_pos += frame_info.frame_bytes;
+                    bytes_written = 0;
+                } else {
+                    // No valid frame, read more data
+                    if (mp3_buffer_len == mp3_buffer_pos) {
+                        // End of file
+                        bytes_written = 0;
+                    } else {
+                        // Skip byte and try again
+                        mp3_buffer_pos++;
+                        bytes_written = 1;  // Keep trying
+                    }
+                }
+            } else {
+                // End of MP3 file
+                bytes_written = 0;
+            }
+        }
+        
+        // Check if we wrote any data
+        if (bytes_written > 0) {
             // Update UI every 200ms to avoid excessive locking
             uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
             if (now - last_update_time >= 200) {
                 last_update_time = now;
                 
-                // Calculate progress
-                uint32_t progress = (bytes_played * 100) / total_bytes;
-                if (progress > 100) progress = 100;
+                // Calculate progress (for MP3, estimate if total unknown)
+                uint32_t progress = 0;
+                if (total_bytes > 0) {
+                    progress = (bytes_played * 100) / total_bytes;
+                    if (progress > 100) progress = 100;
+                }
                 
                 // Calculate elapsed time
                 uint32_t elapsed_seconds = bytes_played / bytes_per_second;
@@ -666,43 +852,82 @@ static void audio_playback_task(void *arg)
                 
                 // Open next track
                 current_track = next_track;
-                wav_file_t *wav = &wav_files[current_track];
-                current_file = fopen(wav->path, "rb");
+                audio_file_t *next_audio = &audio_files[current_track];
+                current_file = fopen(next_audio->path, "rb");
                 
-                if (current_file && parse_wav_header(current_file, wav)) {
+                bool next_ok = false;
+                if (current_file) {
+                    if (next_audio->type == AUDIO_TYPE_WAV) {
+                        next_ok = parse_wav_header(current_file, next_audio);
+                    } else if (next_audio->type == AUDIO_TYPE_MP3) {
+                        // MP3 files don't need header parsing here
+                        // Allocate MP3 buffers if needed
+                        if (!mp3_decoder) {
+                            mp3_decoder = (mp3dec_t *)malloc(sizeof(mp3dec_t));
+                        }
+                        if (!mp3_buffer) {
+                            mp3_buffer = (uint8_t *)malloc(MP3_BUFFER_SIZE);
+                        }
+                        if (!pcm_buffer) {
+                            pcm_buffer = (int16_t *)malloc(MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t));
+                        }
+                        
+                        if (mp3_decoder && mp3_buffer && pcm_buffer) {
+                            mp3dec_init(mp3_decoder);
+                            mp3_buffer_pos = 0;
+                            mp3_buffer_len = 0;
+                            next_ok = true;
+                        } else {
+                            ESP_LOGE(TAG, "Failed to allocate MP3 buffers for next track");
+                            next_ok = false;
+                        }
+                    }
+                }
+                
+                if (next_ok) {
+                    // Update audio pointer
+                    audio = next_audio;
+                    
                     // Reconfigure I2S for new sample rate if needed
                     i2s_channel_disable(tx_handle);
-                    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(wav->sample_rate);
+                    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio->sample_rate);
                     i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
                     i2s_channel_enable(tx_handle);
                     
                     // Update UI
                     lv_lock();
-                    lv_label_set_text(title_label, wav->name);
+                    const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
+                    char title_text[128];
+                    snprintf(title_text, sizeof(title_text), "%s (%s)", audio->name, type_str);
+                    lv_label_set_text(title_label, title_text);
                     if (progress_bar) {
                         lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
                     }
                     if (time_label) {
                         lv_label_set_text(time_label, "00:00");
                     }
-                    if (time_total_label && wav->sample_rate > 0) {
-                        uint32_t total_seconds = wav->data_size / 
-                            (wav->sample_rate * wav->num_channels * (wav->bits_per_sample / 8));
-                        uint32_t minutes = total_seconds / 60;
-                        uint32_t seconds = total_seconds % 60;
-                        char time_text[16];
-                        snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
-                        lv_label_set_text(time_total_label, time_text);
+                    if (time_total_label) {
+                        if (audio->type == AUDIO_TYPE_WAV && audio->sample_rate > 0 && audio->data_size > 0) {
+                            uint32_t total_seconds = audio->data_size / 
+                                (audio->sample_rate * audio->num_channels * (audio->bits_per_sample / 8));
+                            uint32_t minutes = total_seconds / 60;
+                            uint32_t seconds = total_seconds % 60;
+                            char time_text[16];
+                            snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
+                            lv_label_set_text(time_total_label, time_text);
+                        } else {
+                            lv_label_set_text(time_total_label, "--:--");
+                        }
                     }
                     lv_unlock();
                     
                     // Reset playback state for new track
-                    bytes_per_second = wav->sample_rate * wav->num_channels * (wav->bits_per_sample / 8);
-                    total_bytes = wav->data_size;
+                    bytes_per_second = audio->sample_rate * audio->num_channels * (audio->bits_per_sample / 8);
+                    total_bytes = audio->data_size;
                     bytes_played = 0;
                     seek_position = 0;
                     
-                    ESP_LOGI(TAG, "Started playing next track: %s", wav->name);
+                    ESP_LOGI(TAG, "Started playing next track: %s (%s)", audio->name, type_str);
                     continue;  // Continue playing
                 } else {
                     ESP_LOGE(TAG, "Failed to open next track");
@@ -719,6 +944,15 @@ static void audio_playback_task(void *arg)
     }
     
     free(buffer);
+    if (mp3_buffer) {
+        free(mp3_buffer);
+    }
+    if (mp3_decoder) {
+        free(mp3_decoder);
+    }
+    if (pcm_buffer) {
+        free(pcm_buffer);
+    }
     audio_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -757,7 +991,19 @@ void audio_player_init_i2s(void)
 // Scan for WAV files on SD card
 void audio_player_scan_wav_files(void)
 {
-    ESP_LOGI(TAG, "Scanning for WAV files...");
+    ESP_LOGI(TAG, "Scanning for audio files (WAV/MP3)...");
+    
+    // Allocate audio files array on heap if not already allocated
+    if (!audio_files) {
+        audio_files = (audio_file_t *)heap_caps_malloc(MAX_AUDIO_FILES * sizeof(audio_file_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+        if (!audio_files) {
+            ESP_LOGE(TAG, "Failed to allocate audio files array (~40KB) from internal RAM");
+            return;
+        }
+        memset(audio_files, 0, MAX_AUDIO_FILES * sizeof(audio_file_t));  // Zero to ensure proper mapping
+        ESP_LOGI(TAG, "Allocated %d KB for audio files array from internal RAM", (MAX_AUDIO_FILES * sizeof(audio_file_t)) / 1024);
+    }
+    
     wav_file_count = 0;
     
     DIR *dir = opendir("/sdcard");
@@ -767,73 +1013,94 @@ void audio_player_scan_wav_files(void)
     }
     
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && wav_file_count < MAX_WAV_FILES) {
+    while ((entry = readdir(dir)) != NULL && wav_file_count < MAX_AUDIO_FILES) {
         if (entry->d_type == DT_REG) {
-            // Check if file has .wav extension
+            // Check if file has .wav or .mp3 extension
             const char *ext = strrchr(entry->d_name, '.');
-            if (ext && (strcasecmp(ext, ".wav") == 0)) {
-                strncpy(wav_files[wav_file_count].name, entry->d_name, MAX_FILENAME_LEN - 1);
-                snprintf(wav_files[wav_file_count].path, sizeof(wav_files[wav_file_count].path), 
+            if (ext && (strcasecmp(ext, ".wav") == 0 || strcasecmp(ext, ".mp3") == 0)) {
+                strncpy(audio_files[wav_file_count].name, entry->d_name, MAX_FILENAME_LEN - 1);
+                snprintf(audio_files[wav_file_count].path, sizeof(audio_files[wav_file_count].path), 
                         "/sdcard/%s", entry->d_name);
                 
-                // Try to parse header for file info
-                FILE *f = fopen(wav_files[wav_file_count].path, "rb");
-                if (f) {
-                    parse_wav_header(f, &wav_files[wav_file_count]);
-                    fclose(f);
+                // Set file type
+                if (strcasecmp(ext, ".mp3") == 0) {
+                    audio_files[wav_file_count].type = AUDIO_TYPE_MP3;
+                    // MP3 files will be parsed during playback
+                    audio_files[wav_file_count].sample_rate = 44100;  // Default, will be updated
+                    audio_files[wav_file_count].num_channels = 2;
+                    audio_files[wav_file_count].bits_per_sample = 16;
+                    ESP_LOGI(TAG, "Found MP3 file: %s", audio_files[wav_file_count].name);
+                } else {
+                    audio_files[wav_file_count].type = AUDIO_TYPE_WAV;
+                    // Try to parse WAV header for file info
+                    FILE *f = fopen(audio_files[wav_file_count].path, "rb");
+                    if (f) {
+                        parse_wav_header(f, &audio_files[wav_file_count]);
+                        fclose(f);
+                    }
+                    ESP_LOGI(TAG, "Found WAV file: %s (%lu Hz, %d ch, %d bit)", 
+                            audio_files[wav_file_count].name,
+                            audio_files[wav_file_count].sample_rate,
+                            audio_files[wav_file_count].num_channels,
+                            audio_files[wav_file_count].bits_per_sample);
                 }
                 
-                ESP_LOGI(TAG, "Found WAV file: %s (%lu Hz, %d ch, %d bit)", 
-                        wav_files[wav_file_count].name,
-                        wav_files[wav_file_count].sample_rate,
-                        wav_files[wav_file_count].num_channels,
-                        wav_files[wav_file_count].bits_per_sample);
-                
                 wav_file_count++;
+                
+                // Yield to prevent watchdog timeout with many files
+                vTaskDelay(pdMS_TO_TICKS(1));
             }
         }
     }
     
     closedir(dir);
-    ESP_LOGI(TAG, "Found %d WAV files", wav_file_count);
+    ESP_LOGI(TAG, "Found %d audio files", wav_file_count);
     
     // Sort files alphabetically/numerically
     if (wav_file_count > 1) {
         for (int i = 0; i < wav_file_count - 1; i++) {
             for (int j = i + 1; j < wav_file_count; j++) {
-                if (strcasecmp(wav_files[i].name, wav_files[j].name) > 0) {
+                if (strcasecmp(audio_files[i].name, audio_files[j].name) > 0) {
                     // Swap
-                    wav_file_t temp = wav_files[i];
-                    wav_files[i] = wav_files[j];
-                    wav_files[j] = temp;
+                    audio_file_t temp = audio_files[i];
+                    audio_files[i] = audio_files[j];
+                    audio_files[j] = temp;
                 }
             }
+            // Yield every few iterations to prevent watchdog timeout
+            if (i % 10 == 0) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
-        ESP_LOGI(TAG, "Sorted WAV files alphabetically");
+        ESP_LOGI(TAG, "Sorted audio files alphabetically");
     }
     
     // Update UI with first file if available
     if (wav_file_count > 0 && title_label) {
         char info_text[128];
-        snprintf(info_text, sizeof(info_text), "%s (%lu Hz, %d ch, %d bit)", 
-                wav_files[0].name,
-                wav_files[0].sample_rate,
-                wav_files[0].num_channels,
-                wav_files[0].bits_per_sample);
+        const char *type_str = audio_files[0].type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
+        snprintf(info_text, sizeof(info_text), "%s (%s, %lu Hz, %d ch, %d bit)", 
+                audio_files[0].name,
+                type_str,
+                audio_files[0].sample_rate,
+                audio_files[0].num_channels,
+                audio_files[0].bits_per_sample);
         lv_label_set_text(title_label, info_text);
         
-        // Calculate and display total time
-        if (wav_files[0].sample_rate > 0) {
-            uint32_t total_seconds = wav_files[0].data_size / 
-                (wav_files[0].sample_rate * wav_files[0].num_channels * (wav_files[0].bits_per_sample / 8));
+        // Calculate and display total time (for WAV files with known data size)
+        if (audio_files[0].type == AUDIO_TYPE_WAV && audio_files[0].sample_rate > 0 && audio_files[0].data_size > 0) {
+            uint32_t total_seconds = audio_files[0].data_size / 
+                (audio_files[0].sample_rate * audio_files[0].num_channels * (audio_files[0].bits_per_sample / 8));
             uint32_t minutes = total_seconds / 60;
             uint32_t seconds = total_seconds % 60;
             char time_text[16];
             snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
             lv_label_set_text(time_total_label, time_text);
+        } else if (audio_files[0].type == AUDIO_TYPE_MP3) {
+            lv_label_set_text(time_total_label, "--:--");  // MP3 duration calculated during playback
         }
     } else if (title_label) {
-        lv_label_set_text(title_label, "No WAV files found on SD card");
+        lv_label_set_text(title_label, "No audio files found on SD card");
     }
 }
 
@@ -845,7 +1112,7 @@ void audio_player_play(const char *filename)
     // Find the file in our list
     int track_idx = -1;
     for (int i = 0; i < wav_file_count; i++) {
-        if (strcmp(wav_files[i].name, filename) == 0) {
+        if (strcmp(audio_files[i].name, filename) == 0) {
             track_idx = i;
             break;
         }
@@ -857,30 +1124,37 @@ void audio_player_play(const char *filename)
     }
     
     current_track = track_idx;
-    current_file = fopen(wav_files[track_idx].path, "rb");
+    audio_file_t *audio = &audio_files[track_idx];
     
+    current_file = fopen(audio->path, "rb");
     if (!current_file) {
-        ESP_LOGE(TAG, "Failed to open file: %s", wav_files[track_idx].path);
+        ESP_LOGE(TAG, "Failed to open file: %s", audio->path);
         return;
     }
     
-    wav_file_t *wav = &wav_files[track_idx];
-    if (!parse_wav_header(current_file, wav)) {
-        fclose(current_file);
-        current_file = NULL;
-        return;
+    // Parse header for WAV files only
+    if (audio->type == AUDIO_TYPE_WAV) {
+        if (!parse_wav_header(current_file, audio)) {
+            fclose(current_file);
+            current_file = NULL;
+            return;
+        }
     }
     
     // Reconfigure I2S clock for this file's sample rate
     i2s_channel_disable(tx_handle);
     
-    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(wav->sample_rate);
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio->sample_rate);
     ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg));
     
     i2s_channel_enable(tx_handle);
     
     // Update UI
-    lv_label_set_text(title_label, wav->name);
+    const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
+    char title_text[128];
+    snprintf(title_text, sizeof(title_text), "%s (%s, %lu Hz, %d ch)", 
+             audio->name, type_str, audio->sample_rate, audio->num_channels);
+    lv_label_set_text(title_label, title_text);
     
     // Reset progress bar and time
     if (progress_bar) {
@@ -891,14 +1165,18 @@ void audio_player_play(const char *filename)
     }
     
     // Update total time
-    if (time_total_label && wav->sample_rate > 0) {
-        uint32_t total_seconds = wav->data_size / 
-            (wav->sample_rate * wav->num_channels * (wav->bits_per_sample / 8));
-        uint32_t minutes = total_seconds / 60;
-        uint32_t seconds = total_seconds % 60;
-        char time_text[16];
-        snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
-        lv_label_set_text(time_total_label, time_text);
+    if (time_total_label) {
+        if (audio->type == AUDIO_TYPE_WAV && audio->sample_rate > 0 && audio->data_size > 0) {
+            uint32_t total_seconds = audio->data_size / 
+                (audio->sample_rate * audio->num_channels * (audio->bits_per_sample / 8));
+            uint32_t minutes = total_seconds / 60;
+            uint32_t seconds = total_seconds % 60;
+            char time_text[16];
+            snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
+            lv_label_set_text(time_total_label, time_text);
+        } else {
+            lv_label_set_text(time_total_label, "--:--");
+        }
     }
     
     // Start playback
@@ -906,7 +1184,8 @@ void audio_player_play(const char *filename)
     is_paused = false;
     seek_position = 0;  // Clear any pending seek
     
-    xTaskCreate(audio_playback_task, "audio_task", 4096, NULL, 5, &audio_task_handle);
+    // Larger stack for MP3 decoding (deep call chains + LVGL)
+    xTaskCreate(audio_playback_task, "audio_task", 16384, NULL, 5, &audio_task_handle);
     
     ESP_LOGI(TAG, "Started playing: %s", filename);
 }
@@ -919,7 +1198,7 @@ void audio_player_load(const char *filename)
     // Find the file in our list
     int track_idx = -1;
     for (int i = 0; i < wav_file_count; i++) {
-        if (strcmp(wav_files[i].name, filename) == 0) {
+        if (strcmp(audio_files[i].name, filename) == 0) {
             track_idx = i;
             break;
         }
@@ -931,10 +1210,14 @@ void audio_player_load(const char *filename)
     }
     
     current_track = track_idx;
-    wav_file_t *wav = &wav_files[track_idx];
+    audio_file_t *audio = &audio_files[track_idx];
     
     // Update UI only
-    lv_label_set_text(title_label, wav->name);
+    const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
+    char title_text[128];
+    snprintf(title_text, sizeof(title_text), "%s (%s, %lu Hz, %d ch)", 
+             audio->name, type_str, audio->sample_rate, audio->num_channels);
+    lv_label_set_text(title_label, title_text);
     
     // Reset progress bar and time
     if (progress_bar) {
@@ -945,14 +1228,18 @@ void audio_player_load(const char *filename)
     }
     
     // Update total time
-    if (time_total_label && wav->sample_rate > 0) {
-        uint32_t total_seconds = wav->data_size / 
-            (wav->sample_rate * wav->num_channels * (wav->bits_per_sample / 8));
-        uint32_t minutes = total_seconds / 60;
-        uint32_t seconds = total_seconds % 60;
-        char time_text[16];
-        snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
-        lv_label_set_text(time_total_label, time_text);
+    if (time_total_label) {
+        if (audio->type == AUDIO_TYPE_WAV && audio->sample_rate > 0 && audio->data_size > 0) {
+            uint32_t total_seconds = audio->data_size / 
+                (audio->sample_rate * audio->num_channels * (audio->bits_per_sample / 8));
+            uint32_t minutes = total_seconds / 60;
+            uint32_t seconds = total_seconds % 60;
+            char time_text[16];
+            snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
+            lv_label_set_text(time_total_label, time_text);
+        } else {
+            lv_label_set_text(time_total_label, "--:--");
+        }
     }
     
     ESP_LOGI(TAG, "Loaded track: %s", filename);
@@ -964,8 +1251,16 @@ void audio_player_stop(void)
     is_paused = false;
     
     if (audio_task_handle) {
-        vTaskDelay(pdMS_TO_TICKS(200));  // Wait for task to finish
-        audio_task_handle = NULL;
+        // Wait for task to actually finish (it will set handle to NULL)
+        int timeout = 50;  // 50 * 20ms = 1 second max
+        while (audio_task_handle != NULL && timeout > 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            timeout--;
+        }
+        if (audio_task_handle != NULL) {
+            ESP_LOGW(TAG, "Audio task did not exit in time");
+            audio_task_handle = NULL;
+        }
     }
     
     if (current_file) {
@@ -994,9 +1289,9 @@ void audio_player_next(void)
     
     // Respect auto-play setting
     if (auto_play_enabled || is_playing || is_paused) {
-        audio_player_play(wav_files[next_track].name);
+        audio_player_play(audio_files[next_track].name);
     } else {
-        audio_player_load(wav_files[next_track].name);
+        audio_player_load(audio_files[next_track].name);
     }
 }
 
@@ -1008,9 +1303,9 @@ void audio_player_previous(void)
     
     // Respect auto-play setting
     if (auto_play_enabled || is_playing || is_paused) {
-        audio_player_play(wav_files[prev_track].name);
+        audio_player_play(audio_files[prev_track].name);
     } else {
-        audio_player_load(wav_files[prev_track].name);
+        audio_player_load(audio_files[prev_track].name);
     }
 }
 
@@ -1024,6 +1319,6 @@ void audio_player_show(void)
     // Check if auto-play is enabled and not already playing
     if (auto_play_enabled && !is_playing && !is_paused && wav_file_count > 0) {
         ESP_LOGI(TAG, "Auto-play enabled, starting first track");
-        audio_player_play(wav_files[0].name);
+        audio_player_play(audio_files[0].name);
     }
 }

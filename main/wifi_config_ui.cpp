@@ -93,12 +93,22 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".btn-back:hover { background: #555; }"
         "input[type='file'] { display: none; }"
         ".current-path { color: #888; margin: 10px 0; }"
+        ".progress-container { background: #2a2a2a; padding: 15px; border-radius: 5px; margin: 20px 0; display: none; }"
+        ".progress-bar { width: 100%; height: 30px; background: #333; border-radius: 5px; overflow: hidden; margin: 10px 0; position: relative; }"
+        ".progress-fill { height: 100%; background: #00aa00; text-align: center; line-height: 30px; color: white; min-width: 30px; }"
+        ".upload-status { color: #ccc; margin: 5px 0; font-size: 14px; }"
+        ".upload-bytes { color: #888; margin: 5px 0; font-size: 12px; }"
         "</style>"
         "</head><body>"
         "<div class='container'>"
         "<h1>ESP32 File Manager</h1>"
         "<div class='current-path' id='currentPath'>/sdcard</div>"
         "<button class='btn-back' id='btnBack' style='display:none;' onclick='goUp()'>⬆ Up</button>"
+        "<div class='progress-container' id='progressContainer'>"
+        "<div class='upload-status' id='uploadStatus'>Uploading...</div>"
+        "<div class='upload-bytes' id='uploadBytes'></div>"
+        "<div class='progress-bar'><div class='progress-fill' id='progressFill'>0%</div></div>"
+        "</div>"
         "<div class='upload-area' id='dropArea'>"
         "<p>Drag & Drop files here or click to upload</p>"
         "<input type='file' id='fileInput' multiple>"
@@ -137,25 +147,79 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "\n"
         "function uploadFiles(files) {\n"
         "  console.log('Uploading', files.length, 'files to:', currentPath);\n"
-        "  Array.from(files).forEach(file => {\n"
-        "    console.log('Uploading file:', file.name);\n"
-        "    const formData = new FormData();\n"
-        "    formData.append('file', file);\n"
-        "    formData.append('path', currentPath);\n"
-        "    fetch('/upload', { method: 'POST', body: formData })\n"
-        "      .then(r => {\n"
-        "        console.log('Upload response status:', r.status);\n"
-        "        return r.text();\n"
-        "      })\n"
-        "      .then(data => { \n"
-        "        console.log('Upload result:', data); \n"
-        "        loadFiles(); \n"
-        "      })\n"
-        "      .catch(err => {\n"
-        "        console.error('Upload error:', err);\n"
-        "        alert('Upload failed: ' + err);\n"
+        "  const fileArray = Array.from(files);\n"
+        "  let completed = 0;\n"
+        "  const total = fileArray.length;\n"
+        "  \n"
+        "  document.getElementById('progressContainer').style.display = 'block';\n"
+        "  const statusEl = document.getElementById('uploadStatus');\n"
+        "  const bytesEl = document.getElementById('uploadBytes');\n"
+        "  const progressFill = document.getElementById('progressFill');\n"
+        "  \n"
+        "  function uploadFile(file, index) {\n"
+        "    return new Promise((resolve, reject) => {\n"
+        "      const formData = new FormData();\n"
+        "      formData.append('file', file);\n"
+        "      formData.append('path', currentPath);\n"
+        "      \n"
+        "      const xhr = new XMLHttpRequest();\n"
+        "      \n"
+        "      xhr.upload.addEventListener('progress', (e) => {\n"
+        "        if (e.lengthComputable) {\n"
+        "          const fileProgress = (e.loaded / e.total) * 100;\n"
+        "          const overallProgress = ((completed + (e.loaded / e.total)) / total) * 100;\n"
+        "          progressFill.style.width = overallProgress + '%';\n"
+        "          progressFill.textContent = Math.round(overallProgress) + '%';\n"
+        "          bytesEl.textContent = formatBytes(e.loaded) + ' / ' + formatBytes(e.total);\n"
+        "        }\n"
         "      });\n"
-        "  });\n"
+        "      \n"
+        "      xhr.addEventListener('load', () => {\n"
+        "        if (xhr.status >= 200 && xhr.status < 300) {\n"
+        "          console.log('Upload complete:', file.name);\n"
+        "          resolve(xhr.responseText);\n"
+        "        } else {\n"
+        "          reject(xhr.responseText || 'Upload failed');\n"
+        "        }\n"
+        "      });\n"
+        "      \n"
+        "      xhr.addEventListener('error', () => reject('Network error'));\n"
+        "      \n"
+        "      xhr.open('POST', '/upload');\n"
+        "      statusEl.textContent = `Uploading ${index + 1}/${total}: ${file.name}`;\n"
+        "      xhr.send(formData);\n"
+        "    });\n"
+        "  }\n"
+        "  \n"
+        "  async function uploadSequentially() {\n"
+        "    for (let i = 0; i < fileArray.length; i++) {\n"
+        "      try {\n"
+        "        await uploadFile(fileArray[i], i);\n"
+        "        completed++;\n"
+        "      } catch (err) {\n"
+        "        console.error('Upload error:', err);\n"
+        "        alert('Upload failed for ' + fileArray[i].name + ': ' + err);\n"
+        "        statusEl.textContent = 'Upload failed: ' + fileArray[i].name;\n"
+        "        statusEl.style.color = '#ff0000';\n"
+        "        setTimeout(() => {\n"
+        "          document.getElementById('progressContainer').style.display = 'none';\n"
+        "          statusEl.style.color = '#ccc';\n"
+        "        }, 3000);\n"
+        "        return;\n"
+        "      }\n"
+        "    }\n"
+        "    \n"
+        "    statusEl.textContent = `Upload complete: ${total} file(s)`;\n"
+        "    bytesEl.textContent = '';\n"
+        "    setTimeout(() => {\n"
+        "      document.getElementById('progressContainer').style.display = 'none';\n"
+        "      progressFill.style.width = '0%';\n"
+        "      progressFill.textContent = '0%';\n"
+        "    }, 2000);\n"
+        "    loadFiles();\n"
+        "  }\n"
+        "  \n"
+        "  uploadSequentially();\n"
         "  fileInput.value = '';\n"
         "}\n"
         "\n"
@@ -348,10 +412,12 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     // Simplified upload handler - expects multipart/form-data
     // This is a basic implementation; a production system would need more robust parsing
     
-    char buf[512];
+    char buf[4096];  // Larger buffer for better upload performance
     int remaining = req->content_len;
     bool found_file = false;
     FILE *f = NULL;
+    
+    ESP_LOGI(TAG, "Upload started, content length: %d bytes", req->content_len);
     
     while (remaining > 0) {
         int recv_len = httpd_req_recv(req, buf, (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf));
@@ -377,6 +443,24 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
                     if (content_start) {
                         content_start += 4;
                         snprintf(filepath, sizeof(filepath), "%s/%s", MOUNT_POINT, filename);
+                        
+                        // Check if file already exists
+                        FILE *test = fopen(filepath, "r");
+                        if (test) {
+                            fclose(test);
+                            ESP_LOGW(TAG, "File already exists: %s", filepath);
+                            
+                            // Consume remaining data to prevent connection hang
+                            while (remaining > 0) {
+                                int discard_len = httpd_req_recv(req, buf, (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf));
+                                if (discard_len <= 0) break;
+                                remaining -= discard_len;
+                            }
+                            
+                            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "File already exists. Please delete it first or rename the file.");
+                            return ESP_OK;
+                        }
+                        
                         f = fopen(filepath, "wb");
                         found_file = true;
                         
@@ -457,6 +541,9 @@ static esp_err_t start_webserver(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 8;
     config.stack_size = 8192;
+    config.recv_wait_timeout = 60;  // 60 seconds for large uploads
+    config.send_wait_timeout = 60;
+    config.lru_purge_enable = true;
     
     ESP_LOGI(TAG, "Starting HTTP server");
     
