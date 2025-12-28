@@ -36,6 +36,7 @@ typedef struct {
     uint16_t num_channels;
     uint16_t bits_per_sample;
     uint32_t data_size;
+    uint32_t file_size;  // Total file size (for MP3 seeking)
     audio_type_t type;  // WAV or MP3
 } audio_file_t;
 
@@ -151,11 +152,14 @@ static void progress_bar_event_cb(lv_event_t * e)
         
         // Calculate byte position in the audio data
         audio_file_t *wav = &audio_files[current_track];
-        uint32_t target_byte = (wav->data_size * percentage) / 100;
+        uint32_t total_size = (wav->type == AUDIO_TYPE_MP3) ? wav->file_size : wav->data_size;
+        uint32_t target_byte = (total_size * percentage) / 100;
         
         // Align to sample boundary (important for proper audio playback)
         uint32_t bytes_per_sample = wav->num_channels * (wav->bits_per_sample / 8);
-        target_byte = (target_byte / bytes_per_sample) * bytes_per_sample;
+        if (bytes_per_sample > 0) {
+            target_byte = (target_byte / bytes_per_sample) * bytes_per_sample;
+        }
         
         // Set seek position (will be picked up by playback task)
         seek_position = target_byte;
@@ -660,6 +664,7 @@ static void audio_playback_task(void *arg)
     uint32_t mp3_file_pos = 0;  // Track actual file position for MP3
     uint32_t mp3_file_size = 0;  // Total file size for MP3
     bool mp3_total_time_updated = false;  // Track if we've calculated actual MP3 duration
+    uint32_t mp3_bitrate_kbps = 192;  // MP3 bitrate (default 192, updated from first frame)
     
     // For MP3 files, get the file size for progress calculation
     if (audio->type == AUDIO_TYPE_MP3) {
@@ -695,25 +700,41 @@ static void audio_playback_task(void *arg)
                     ESP_LOGE(TAG, "Seek failed");
                 }
             } else if (audio->type == AUDIO_TYPE_MP3) {
-                // For MP3, approximate seek by jumping forward in file
-                // This is crude but works for basic seeking
-                long file_size = ftell(current_file);
-                fseek(current_file, 0, SEEK_END);
-                long total_file_size = ftell(current_file);
-                fseek(current_file, file_size, SEEK_SET);
-                
-                uint32_t percentage = (seek_pos * 100) / (total_bytes > 0 ? total_bytes : 1);
-                long target_pos = (total_file_size * percentage) / 100;
-                if (fseek(current_file, target_pos, SEEK_SET) == 0) {
-                    bytes_played = seek_pos;
+                // For MP3, seek directly in file based on percentage
+                // seek_pos already represents the desired position in the file
+                if (fseek(current_file, seek_pos, SEEK_SET) == 0) {
+                    // Reset MP3 decoder state
                     mp3_buffer_pos = 0;
                     mp3_buffer_len = 0;
-                    ESP_LOGI(TAG, "MP3 seeked to ~%lu bytes", seek_pos);
+                    mp3_file_pos = seek_pos;  // Update file position tracker
+                    
+                    // Calculate elapsed time based on seek position
+                    if (bytes_per_second > 0 && mp3_file_size > 0 && mp3_bitrate_kbps > 0) {
+                        // Calculate total duration: (file_size * 8 bits) / (bitrate_kbps * 1000)
+                        uint32_t total_duration_seconds = (mp3_file_size * 8) / (mp3_bitrate_kbps * 1000);
+                        
+                        // Calculate elapsed seconds based on seek position percentage
+                        uint32_t elapsed_seconds = ((uint64_t)seek_pos * total_duration_seconds) / mp3_file_size;
+                        
+                        // Convert to PCM bytes for display
+                        bytes_played = elapsed_seconds * bytes_per_second;
+                        
+                        ESP_LOGI(TAG, "MP3 seeked to %lu%% (%lu/%lu bytes), elapsed: %lu/%lu sec, PCM bytes: %lu",
+                                (seek_pos * 100) / mp3_file_size, seek_pos, mp3_file_size,
+                                elapsed_seconds, total_duration_seconds, bytes_played);
+                    } else {
+                        bytes_played = 0;
+                        ESP_LOGI(TAG, "MP3 seeked to file position %lu bytes (no duration estimate yet)", seek_pos);
+                    }
+                    
+                    ESP_LOGI(TAG, "Post-seek state: buffer_pos=%lu, buffer_len=%lu, file_pos=%lu", mp3_buffer_pos, mp3_buffer_len, mp3_file_pos);
                 } else {
                     ESP_LOGE(TAG, "MP3 seek failed");
                 }
             }
         }
+        
+        ESP_LOGD(TAG, "After seek check, about to process audio type=%d", audio->type);
         
         size_t bytes_written = 0;
         
@@ -730,8 +751,11 @@ static void audio_playback_task(void *arg)
             }
         } else if (audio->type == AUDIO_TYPE_MP3) {
             // MP3: Decode frames to PCM
+            ESP_LOGD(TAG, "MP3 decode loop: buffer_pos=%lu, buffer_len=%lu, file_pos=%lu", mp3_buffer_pos, mp3_buffer_len, mp3_file_pos);
+            
             // Read more MP3 data if buffer is low
             if (mp3_buffer_len - mp3_buffer_pos < MINIMP3_MAX_SAMPLES_PER_FRAME) {
+                ESP_LOGD(TAG, "MP3 buffer low, will try to read more data");
                 if (mp3_buffer_pos > 0) {
                     // Move remaining data to start of buffer
                     memmove(mp3_buffer, mp3_buffer + mp3_buffer_pos, mp3_buffer_len - mp3_buffer_pos);
@@ -742,6 +766,7 @@ static void audio_playback_task(void *arg)
                 // Read more data
                 size_t bytes_read = fread(mp3_buffer + mp3_buffer_len, 1, 
                                          MP3_BUFFER_SIZE - mp3_buffer_len, current_file);
+                ESP_LOGD(TAG, "MP3 read %zu bytes from file (file_pos was %lu, now %lu)", bytes_read, mp3_file_pos, mp3_file_pos + bytes_read);
                 if (bytes_read > 0) {
                     mp3_buffer_len += bytes_read;
                     mp3_file_pos += bytes_read;  // Track file position
@@ -754,12 +779,20 @@ static void audio_playback_task(void *arg)
                 int samples = mp3dec_decode_frame(mp3_decoder, mp3_buffer + mp3_buffer_pos,
                                                    mp3_buffer_len - mp3_buffer_pos, pcm_buffer, &frame_info);
                 
+                ESP_LOGD(TAG, "MP3 decode: samples=%d, frame_bytes=%d, buffer_pos=%lu, buffer_len=%lu, file_pos=%lu", 
+                         samples, frame_info.frame_bytes, mp3_buffer_pos, mp3_buffer_len, mp3_file_pos);
+                
                 if (samples > 0) {
                     // Update sample rate if changed
                     if (frame_info.hz > 0 && frame_info.hz != (int)audio->sample_rate) {
                         audio->sample_rate = frame_info.hz;
                         audio->num_channels = frame_info.channels;
                         bytes_per_second = audio->sample_rate * audio->num_channels * 2;  // 16-bit = 2 bytes
+                        
+                        // Store bitrate for seeking calculations
+                        if (frame_info.bitrate_kbps > 0) {
+                            mp3_bitrate_kbps = frame_info.bitrate_kbps;
+                        }
                         
                         // Reconfigure I2S
                         ESP_LOGI(TAG, "MP3 format: %d Hz, %d ch", frame_info.hz, frame_info.channels);
@@ -805,27 +838,32 @@ static void audio_playback_task(void *arg)
                     // Advance buffer position
                     mp3_buffer_pos += frame_info.frame_bytes;
                 } else if (frame_info.frame_bytes > 0) {
-                    // Skip invalid frame
+                    // Skip invalid frame (likely landed mid-frame after seeking)
+                    ESP_LOGW(TAG, "MP3 skipping invalid frame (%d bytes, 0 samples) at buffer_pos=%lu", frame_info.frame_bytes, mp3_buffer_pos);
                     mp3_buffer_pos += frame_info.frame_bytes;
-                    bytes_written = 0;
+                    bytes_written = 1;  // Keep trying to find valid frames (especially after seeking)
                 } else {
                     // No valid frame, read more data
                     if (mp3_buffer_len == mp3_buffer_pos) {
                         // End of file
+                        ESP_LOGI(TAG, "MP3 end of file detected (buffer exhausted), file_pos=%lu, file_size=%lu", mp3_file_pos, mp3_file_size);
                         bytes_written = 0;
                     } else {
                         // Skip byte and try again
+                        ESP_LOGW(TAG, "MP3 skipping invalid byte at buffer_pos=%lu (remaining=%lu)", mp3_buffer_pos, mp3_buffer_len - mp3_buffer_pos);
                         mp3_buffer_pos++;
                         bytes_written = 1;  // Keep trying
                     }
                 }
             } else {
                 // End of MP3 file
+                ESP_LOGI(TAG, "MP3 buffer empty, file_pos=%lu, file_size=%lu", mp3_file_pos, mp3_file_size);
                 bytes_written = 0;
             }
         }
         
         // Check if we wrote any data
+        ESP_LOGD(TAG, "Checking bytes_written: %zu (type=%d)", bytes_written, audio->type);
         if (bytes_written > 0) {
             // Update UI every 200ms to avoid excessive locking
             uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -1069,7 +1107,16 @@ void audio_player_scan_wav_files(void)
                     audio_files[wav_file_count].sample_rate = 44100;  // Default, will be updated
                     audio_files[wav_file_count].num_channels = 2;
                     audio_files[wav_file_count].bits_per_sample = 16;
-                    ESP_LOGI(TAG, "Found MP3 file: %s", audio_files[wav_file_count].name);
+                    
+                    // Get file size for MP3 seeking
+                    struct stat st;
+                    if (stat(audio_files[wav_file_count].path, &st) == 0) {
+                        audio_files[wav_file_count].file_size = st.st_size;
+                    } else {
+                        audio_files[wav_file_count].file_size = 0;
+                    }
+                    
+                    ESP_LOGI(TAG, "Found MP3 file: %s (%lu bytes)", audio_files[wav_file_count].name, audio_files[wav_file_count].file_size);
                 } else {
                     audio_files[wav_file_count].type = AUDIO_TYPE_WAV;
                     // Try to parse WAV header for file info
@@ -1077,6 +1124,14 @@ void audio_player_scan_wav_files(void)
                     if (f) {
                         parse_wav_header(f, &audio_files[wav_file_count]);
                         fclose(f);
+                        
+                        // Get file size
+                        struct stat st;
+                        if (stat(audio_files[wav_file_count].path, &st) == 0) {
+                            audio_files[wav_file_count].file_size = st.st_size;
+                        } else {
+                            audio_files[wav_file_count].file_size = 0;
+                        }
                     }
                     ESP_LOGI(TAG, "Found WAV file: %s (%lu Hz, %d ch, %d bit)", 
                             audio_files[wav_file_count].name,
