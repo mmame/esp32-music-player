@@ -54,6 +54,7 @@ static bool is_playing = false;
 static bool is_paused = false;
 static TaskHandle_t audio_task_handle = NULL;
 static i2s_chan_handle_t tx_handle = NULL;
+static bool i2s_is_enabled = true;  // Track I2S state (initialized as enabled)
 static FILE *current_file = NULL;
 static volatile uint32_t seek_position = 0;  // Byte position to seek to (0 = no seek)
 static uint32_t wav_data_start_offset = 0;   // Offset in file where WAV data starts
@@ -1224,7 +1225,7 @@ void audio_player_init_i2s(void)
         .id = I2S_NUM_0,
         .role = I2S_ROLE_MASTER,
         .dma_desc_num = 8,      // Increased from default 6
-        .dma_frame_num = 1024,   // Increased from default 240
+        .dma_frame_num = 1023,   // Maximum allowed (was 1024, caused warning)
         .auto_clear = true,
         .auto_clear_before_cb = false,
         .allow_pd = false,
@@ -1430,10 +1431,7 @@ void audio_player_play(const char *filename)
         }
     }
     
-    // Flush and reconfigure I2S for this file's format
-    i2s_channel_disable(tx_handle);
-    vTaskDelay(pdMS_TO_TICKS(50));  // Wait for DMA to fully stop and flush
-    
+    // Reconfigure I2S for this file's format (already disabled by audio_player_stop)
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio->sample_rate);
     ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg));
     
@@ -1445,7 +1443,8 @@ void audio_player_play(const char *filename)
     ESP_ERROR_CHECK(i2s_channel_reconfig_std_slot(tx_handle, &slot_cfg));
     
     i2s_channel_enable(tx_handle);
-    vTaskDelay(pdMS_TO_TICKS(10));  // Let I2S stabilize
+    i2s_is_enabled = true;
+    vTaskDelay(pdMS_TO_TICKS(50));  // Longer delay to let I2S fully stabilize and clear any garbage
     
     // Update UI
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
@@ -1584,22 +1583,25 @@ void audio_player_stop(void)
     is_playing = false;
     is_paused = false;
     
-    // Disable I2S to silence DAC output
-    if (tx_handle) {
-        i2s_channel_disable(tx_handle);
-    }
-    
     if (audio_task_handle) {
         // Wait for task to actually finish (it will set handle to NULL)
-        int timeout = 50;  // 50 * 20ms = 1 second max
+        int timeout = 100;  // 100 * 20ms = 2 seconds max
         while (audio_task_handle != NULL && timeout > 0) {
             vTaskDelay(pdMS_TO_TICKS(20));
             timeout--;
         }
         if (audio_task_handle != NULL) {
-            ESP_LOGW(TAG, "Audio task did not exit in time");
+            ESP_LOGW(TAG, "Audio task did not exit in time, forcing termination");
+            vTaskDelete(audio_task_handle);
             audio_task_handle = NULL;
         }
+    }
+    
+    // Disable I2S and flush DMA buffers to clear old audio data
+    if (tx_handle && i2s_is_enabled) {
+        i2s_channel_disable(tx_handle);
+        i2s_is_enabled = false;
+        vTaskDelay(pdMS_TO_TICKS(100));  // Longer delay to fully flush DMA buffers
     }
     
     if (current_file) {
@@ -1615,16 +1617,18 @@ void audio_player_pause(void)
     is_paused = true;
     
     // Disable I2S to silence DAC output
-    if (tx_handle) {
+    if (tx_handle && i2s_is_enabled) {
         i2s_channel_disable(tx_handle);
+        i2s_is_enabled = false;
     }
 }
 
 void audio_player_resume(void)
 {
     // Re-enable I2S before resuming
-    if (tx_handle) {
+    if (tx_handle && !i2s_is_enabled) {
         i2s_channel_enable(tx_handle);
+        i2s_is_enabled = true;
     }
     
     is_paused = false;
@@ -1634,10 +1638,13 @@ void audio_player_next(void)
 {
     if (wav_file_count == 0) return;
     
+    // Clear seek position to prevent issues with buffer state
+    seek_position = 0;
+    
     int next_track = (current_track + 1) % wav_file_count;
     
-    // Respect auto-play setting
-    if (auto_play_enabled || is_playing || is_paused) {
+    // Only play if auto-play is enabled, otherwise just load
+    if (auto_play_enabled) {
         audio_player_play(audio_files[next_track].name);
     } else {
         audio_player_load(audio_files[next_track].name);
@@ -1648,10 +1655,13 @@ void audio_player_previous(void)
 {
     if (wav_file_count == 0) return;
     
+    // Clear seek position to prevent issues with buffer state
+    seek_position = 0;
+    
     int prev_track = (current_track - 1 + wav_file_count) % wav_file_count;
     
-    // Respect auto-play setting
-    if (auto_play_enabled || is_playing || is_paused) {
+    // Only play if auto-play is enabled, otherwise just load
+    if (auto_play_enabled) {
         audio_player_play(audio_files[prev_track].name);
     } else {
         audio_player_load(audio_files[prev_track].name);
