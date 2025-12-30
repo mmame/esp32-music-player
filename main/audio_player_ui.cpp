@@ -394,20 +394,23 @@ void audio_player_ui_init(lv_display_t * disp)
     // Create Volume slider (bottom-right, vertical)
     volume_slider = lv_slider_create(screen);
     lv_obj_set_size(volume_slider, 40, 200);
-    lv_obj_align(volume_slider, LV_ALIGN_BOTTOM_RIGHT, -20, -80);
+    lv_obj_align(volume_slider, LV_ALIGN_BOTTOM_RIGHT, -20, -50);  // Moved down (was -80)
     lv_slider_set_range(volume_slider, 0, 100);
     lv_slider_set_value(volume_slider, volume_level, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x444444), 0);
-    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x00AA00), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x444444), 0);  // Same as progress bar
+    lv_obj_set_style_bg_opa(volume_slider, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(volume_slider, lv_color_hex(0x888888), 0);  // Same as progress bar
+    lv_obj_set_style_border_width(volume_slider, 2, 0);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x00FF00), LV_PART_INDICATOR);  // Same as progress bar
     lv_obj_set_style_bg_color(volume_slider, lv_color_hex(0x00FF00), LV_PART_KNOB);
     lv_obj_add_event_cb(volume_slider, volume_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
     
-    // Create volume label
-    lv_obj_t * volume_label = lv_label_create(screen);
+    // Create volume icon inside the knob (centered on slider)
+    lv_obj_t * volume_label = lv_label_create(volume_slider);
     lv_label_set_text(volume_label, LV_SYMBOL_VOLUME_MAX);
     lv_obj_set_style_text_font(volume_label, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(volume_label, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_align_to(volume_label, volume_slider, LV_ALIGN_OUT_BOTTOM_MID, 0, 5);
+    lv_obj_set_style_text_color(volume_label, lv_color_hex(0x000000), 0);  // Black icon on green knob
+    lv_obj_center(volume_label);  // Center on slider (will appear on/near knob)
     
     // Create CPU label (bottom-right corner for debugging)
     cpu_label = lv_label_create(screen);
@@ -428,6 +431,9 @@ void audio_player_ui_init(lv_display_t * disp)
     if (continue_playback_enabled) {
         lv_obj_add_state(continue_checkbox, LV_STATE_CHECKED);
     }
+    
+    // Update volume slider with loaded value
+    lv_slider_set_value(volume_slider, volume_level, LV_ANIM_OFF);
     
     // Add swipe gesture support to screen
     lv_obj_add_event_cb(screen, screen_gesture_event_cb, LV_EVENT_GESTURE, NULL);
@@ -685,7 +691,17 @@ static bool parse_wav_header(FILE *file, audio_file_t *wav_info)
 // Audio playback task
 static void audio_playback_task(void *arg)
 {
-    file_buffer = (uint8_t *)heap_caps_malloc(SDCARD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+    // Allocate and zero-initialize all buffers to prevent old audio data
+    if (!file_buffer) {
+        file_buffer = (uint8_t *)heap_caps_malloc(SDCARD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+        if (file_buffer) {
+            memset(file_buffer, 0, SDCARD_BUFFER_SIZE);
+        }
+    } else {
+        // Clear existing file_buffer from previous track
+        memset(file_buffer, 0, SDCARD_BUFFER_SIZE);
+    }
+    
     uint8_t *buffer = (uint8_t *)heap_caps_malloc(I2S_BUFFER_SIZE, MALLOC_CAP_DMA);
     uint8_t *mp3_buffer = NULL;
     mp3dec_t *mp3_decoder = NULL;  // Allocate on heap, decoder is ~6KB
@@ -695,6 +711,9 @@ static void audio_playback_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    
+    // Zero-initialize DMA buffer to prevent old audio data
+    memset(buffer, 0, I2S_BUFFER_SIZE);
     
     // Get current track info
     if (current_track < 0 || current_track >= wav_file_count) {
@@ -1201,16 +1220,24 @@ static void audio_playback_task(void *arg)
         i2s_channel_disable(tx_handle);
     }
     
+    // Zero all buffers before freeing to ensure no data leaks to next task
+    memset(buffer, 0, I2S_BUFFER_SIZE);
     free(buffer);
+    
     if (mp3_buffer) {
+        memset(mp3_buffer, 0, MP3_BUFFER_SIZE);
         free(mp3_buffer);
     }
     if (mp3_decoder) {
+        memset(mp3_decoder, 0, sizeof(mp3dec_t));
         free(mp3_decoder);
     }
     if (pcm_buffer) {
+        size_t pcm_size = MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t) + 64;
+        memset(pcm_buffer, 0, pcm_size);
         free(pcm_buffer);
     }
+    
     audio_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -1420,7 +1447,7 @@ void audio_player_play(const char *filename)
     
     // Enable full buffering with large buffer to smooth SD card read latency
     setvbuf(current_file, (char*)file_buffer, _IOFBF, SDCARD_BUFFER_SIZE);
-    ESP_LOGI(TAG, "File buffering enabled: %d bytes", sizeof(file_buffer));
+    ESP_LOGI(TAG, "File buffering enabled: %d bytes", SDCARD_BUFFER_SIZE);
     
     // Parse header for WAV files only
     if (audio->type == AUDIO_TYPE_WAV) {
@@ -1444,7 +1471,19 @@ void audio_player_play(const char *filename)
     
     i2s_channel_enable(tx_handle);
     i2s_is_enabled = true;
-    vTaskDelay(pdMS_TO_TICKS(50));  // Longer delay to let I2S fully stabilize and clear any garbage
+    
+    // Write silence to clear any residual data in DMA buffers
+    uint8_t *silence_buffer = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+    if (silence_buffer) {
+        size_t bytes_written;
+        // Write multiple buffers of silence to fully clear DMA chain
+        for (int i = 0; i < 3; i++) {
+            i2s_channel_write(tx_handle, silence_buffer, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(100));
+        }
+        free(silence_buffer);
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(50));  // Additional delay to let silence propagate through system
     
     // Update UI
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
@@ -1597,6 +1636,12 @@ void audio_player_stop(void)
         }
     }
     
+    // Close file AFTER task has finished to prevent any final read attempts
+    if (current_file) {
+        fclose(current_file);
+        current_file = NULL;
+    }
+    
     // Disable I2S and flush DMA buffers to clear old audio data
     if (tx_handle && i2s_is_enabled) {
         i2s_channel_disable(tx_handle);
@@ -1604,9 +1649,11 @@ void audio_player_stop(void)
         vTaskDelay(pdMS_TO_TICKS(100));  // Longer delay to fully flush DMA buffers
     }
     
-    if (current_file) {
-        fclose(current_file);
-        current_file = NULL;
+    // Free and clear file_buffer to ensure no old data remains
+    if (file_buffer) {
+        memset(file_buffer, 0, SDCARD_BUFFER_SIZE);  // Zero before freeing
+        free(file_buffer);
+        file_buffer = NULL;
     }
     
     current_track = -1;
@@ -1616,10 +1663,11 @@ void audio_player_pause(void)
 {
     is_paused = true;
     
-    // Disable I2S to silence DAC output
+    // Disable I2S and flush buffers to prevent old audio data
     if (tx_handle && i2s_is_enabled) {
         i2s_channel_disable(tx_handle);
         i2s_is_enabled = false;
+        vTaskDelay(pdMS_TO_TICKS(50));  // Wait to flush DMA buffers
     }
 }
 
