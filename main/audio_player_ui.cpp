@@ -1204,10 +1204,8 @@ static void audio_playback_task(void *arg)
         }
     }
     
-    // Disable I2S to silence DAC output
-    if (tx_handle) {
-        i2s_channel_disable(tx_handle);
-    }
+    // Don't disable I2S here - let audio_player_stop() manage I2S state
+    // This allows stop() to flush DMA buffers before disabling
     
     // Zero all buffers before freeing to ensure no data leaks to next task
     memset(buffer, 0, I2S_BUFFER_SIZE);
@@ -1609,6 +1607,8 @@ void audio_player_load(const char *filename)
 
 void audio_player_stop(void)
 {
+    bool was_playing = is_playing && !is_paused;  // Track if we were actively playing
+    
     is_playing = false;
     is_paused = false;
     
@@ -1623,6 +1623,24 @@ void audio_player_stop(void)
             ESP_LOGW(TAG, "Audio task did not exit in time, forcing termination");
             vTaskDelete(audio_task_handle);
             audio_task_handle = NULL;
+        }
+    }
+    
+    // If we were actively playing, flush I2S DMA buffers to prevent old audio bleed
+    if (was_playing && tx_handle && i2s_is_enabled) {
+        ESP_LOGI(TAG, "Flushing I2S DMA buffers (was actively playing)");
+        uint8_t *silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+        if (silence) {
+            size_t bytes_written;
+            // Write 5 buffers of silence to fully flush DMA chain (8 desc × 1023 frames × 4 bytes = ~32KB)
+            // 5 × 8KB = 40KB ensures complete flush
+            for (int i = 0; i < 5; i++) {
+                i2s_channel_write(tx_handle, silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(100));
+            }
+            free(silence);
+            // Wait for silence to propagate through entire audio pipeline
+            vTaskDelay(pdMS_TO_TICKS(50));
+            ESP_LOGI(TAG, "I2S DMA buffers flushed");
         }
     }
     
