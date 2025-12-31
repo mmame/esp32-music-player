@@ -562,8 +562,8 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
         fclose(f);
         ESP_LOGI(TAG, "File uploaded: %s", filepath);
         
-        // Pause playback and rescan audio files
-        audio_player_pause();
+        // Stop playback and rescan audio files
+        audio_player_stop();
         audio_player_scan_wav_files();
         
         httpd_resp_sendstr(req, "File uploaded successfully");
@@ -590,8 +590,8 @@ static esp_err_t delete_handler(httpd_req_t *req)
                 if (remove(filepath) == 0) {
                     ESP_LOGI(TAG, "File deleted: %s", filepath);
                     
-                    // Pause playback and rescan audio files
-                    audio_player_pause();
+                    // Stop playback and rescan audio files
+                    audio_player_stop();
                     audio_player_scan_wav_files();
                     
                     httpd_resp_sendstr(req, "File deleted");
@@ -672,8 +672,8 @@ static esp_err_t rename_handler(httpd_req_t *req)
     if (rename(oldPath, newPath) == 0) {
         ESP_LOGI(TAG, "File renamed: %s -> %s", oldPath, newPath);
         
-        // Pause playback and rescan audio files
-        audio_player_pause();
+        // Stop playback and rescan audio files
+        audio_player_stop();
         audio_player_scan_wav_files();
         
         httpd_resp_sendstr(req, "File renamed");
@@ -887,8 +887,8 @@ static void start_wifi_ap(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     
-    // Pause audio playback before starting WiFi to prevent display issues
-    audio_player_pause();
+    // Stop audio playback before starting WiFi to prevent watchdog timeouts
+    audio_player_stop();
     
     ESP_ERROR_CHECK(esp_wifi_start());
     
@@ -948,8 +948,8 @@ static void start_wifi_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     
-    // Pause audio playback before starting WiFi to prevent display issues
-    audio_player_pause();
+    // Stop audio playback before starting WiFi to prevent watchdog timeouts
+    audio_player_stop();
     
     ESP_ERROR_CHECK(esp_wifi_start());
     
