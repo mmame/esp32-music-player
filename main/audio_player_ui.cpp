@@ -92,6 +92,7 @@ static void continue_checkbox_event_cb(lv_event_t *e);
 static void volume_slider_event_cb(lv_event_t *e);
 static void load_audio_config(void);
 static void save_audio_config(void);
+static void set_title_scroll_speed(lv_obj_t *label, const char *text);
 
 // Test: Generate 1kHz sine wave - NS4168 MONO test
 static void test_sine_wave_task(void *arg)
@@ -529,6 +530,33 @@ static void save_audio_config(void)
         nvs_close(nvs_handle);
         ESP_LOGI(TAG, "Saved audio config");
     }
+}
+
+// Helper function to set scroll speed based on text length
+static void set_title_scroll_speed(lv_obj_t *label, const char *text) {
+    // Get the actual rendered width of the text in pixels
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    int32_t text_width = lv_text_get_width(text, strlen(text), font, 0);
+    
+    // Get label width for reference
+    int32_t label_width = lv_obj_get_width(label);
+    
+    // Calculate scroll duration based on pixel width
+    // Aim for constant scroll speed: ~100 pixels per second
+    uint32_t duration_ms = (text_width * 1000) / 100;  // 100 pixels/second
+    
+    // Clamp between 1000ms and 30000ms
+    if (duration_ms < 1000) duration_ms = 1000;
+    if (duration_ms > 30000) duration_ms = 30000;
+    
+    lv_obj_set_style_anim_time(label, duration_ms, 0);
+    
+    // Force restart scroll animation by temporarily disabling and re-enabling scroll mode
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    
+    ESP_LOGI(TAG, "Scroll speed: text=\"%s\", text_width=%ld px, label_width=%ld px, duration=%lu ms", 
+             text, text_width, label_width, duration_ms);
 }
 
 // ========== Checkbox Event Handlers ==========
@@ -1265,7 +1293,16 @@ static void audio_playback_task(void *arg)
                     
                     // Update UI
                     lv_lock();
-                    lv_label_set_text(title_label, audio->name);
+                    // Strip file extension from title
+                    char title_without_ext[MAX_FILENAME_LEN];
+                    strncpy(title_without_ext, audio->name, MAX_FILENAME_LEN - 1);
+                    title_without_ext[MAX_FILENAME_LEN - 1] = '\0';
+                    char *dot = strrchr(title_without_ext, '.');
+                    if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
+                        *dot = '\0';
+                    }
+                    lv_label_set_text(title_label, title_without_ext);
+                    set_title_scroll_speed(title_label, title_without_ext);
                     
                     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
                     char info_text[64];
@@ -1490,7 +1527,16 @@ void audio_player_scan_wav_files(void)
     // Update UI with first file if available
     lv_lock();  // MUST lock LVGL before updating UI elements
     if (wav_file_count > 0 && title_label) {
-        lv_label_set_text(title_label, audio_files[0].name);
+        // Strip file extension from title
+        char title_without_ext[MAX_FILENAME_LEN];
+        strncpy(title_without_ext, audio_files[0].name, MAX_FILENAME_LEN - 1);
+        title_without_ext[MAX_FILENAME_LEN - 1] = '\0';
+        char *dot = strrchr(title_without_ext, '.');
+        if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
+            *dot = '\0';
+        }
+        lv_label_set_text(title_label, title_without_ext);
+        set_title_scroll_speed(title_label, title_without_ext);
         
         const char *type_str = audio_files[0].type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
         char info_text[64];
@@ -1590,7 +1636,16 @@ void audio_player_play(const char *filename)
     
     // Update UI with proper locking to prevent watchdog timeout
     lv_lock();
-    lv_label_set_text(title_label, audio->name);
+    // Strip file extension from title
+    char title_without_ext[MAX_FILENAME_LEN];
+    strncpy(title_without_ext, audio->name, MAX_FILENAME_LEN - 1);
+    title_without_ext[MAX_FILENAME_LEN - 1] = '\0';
+    char *dot = strrchr(title_without_ext, '.');
+    if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
+        *dot = '\0';
+    }
+    lv_label_set_text(title_label, title_without_ext);
+    set_title_scroll_speed(title_label, title_without_ext);
     
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
     char info_text[64];
@@ -1681,10 +1736,20 @@ void audio_player_load(const char *filename)
     current_track = track_idx;
     audio_file_t *audio = &audio_files[track_idx];
     
-    // Update UI only
-    lv_label_set_text(title_label, audio->name);
-    
+    // Strip file extension from title
+    char title_without_ext[MAX_FILENAME_LEN];
+    strncpy(title_without_ext, audio->name, MAX_FILENAME_LEN - 1);
+    title_without_ext[MAX_FILENAME_LEN - 1] = '\0';
+    char *dot = strrchr(title_without_ext, '.');
+    if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
+        *dot = '\0';
+    }
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
+    
+    // Update UI only
+    lv_label_set_text(title_label, title_without_ext);
+    set_title_scroll_speed(title_label, title_without_ext);
+    
     char info_text[64];
     snprintf(info_text, sizeof(info_text), "%s, %lu Hz, %d ch", 
              type_str, audio->sample_rate, audio->num_channels);
@@ -1729,7 +1794,9 @@ void audio_player_load(const char *filename)
         }
     }
     
-    ESP_LOGI(TAG, "Loaded track: %s", filename);
+    // Log the title without extension to match what's displayed
+    ESP_LOGI(TAG, "Loaded track: %s (type: %s, %lu Hz, %d ch)", 
+             title_without_ext, type_str, audio->sample_rate, audio->num_channels);
 }
 
 void audio_player_stop(void)
