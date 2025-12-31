@@ -4,6 +4,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "driver/i2s_std.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -700,12 +701,16 @@ static bool parse_wav_header(FILE *file, audio_file_t *wav_info)
 // Audio playback task
 static void audio_playback_task(void *arg)
 {
+    // Subscribe to watchdog to prevent timeout during slow SD card operations
+    esp_task_wdt_add(NULL);
+    
     uint8_t *buffer = (uint8_t *)heap_caps_malloc(I2S_BUFFER_SIZE, MALLOC_CAP_DMA);
     uint8_t *mp3_buffer = NULL;
     mp3dec_t *mp3_decoder = NULL;  // Allocate on heap, decoder is ~6KB
     
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate DMA buffer");
+        esp_task_wdt_delete(NULL);
         vTaskDelete(NULL);
         return;
     }
@@ -717,6 +722,7 @@ static void audio_playback_task(void *arg)
     if (current_track < 0 || current_track >= wav_file_count) {
         free(buffer);
         audio_task_handle = NULL;
+        esp_task_wdt_delete(NULL);
         vTaskDelete(NULL);
         return;
     }
@@ -735,6 +741,7 @@ static void audio_playback_task(void *arg)
         if (!mp3_buffer) {
             ESP_LOGE(TAG, "Failed to allocate MP3 buffer");
             free(buffer);
+            esp_task_wdt_delete(NULL);
             vTaskDelete(NULL);
             return;
         }
@@ -746,6 +753,7 @@ static void audio_playback_task(void *arg)
             ESP_LOGE(TAG, "Failed to allocate MP3 decoder (~6KB)");
             free(mp3_buffer);
             free(buffer);
+            esp_task_wdt_delete(NULL);
             vTaskDelete(NULL);
             return;
         }
@@ -760,6 +768,7 @@ static void audio_playback_task(void *arg)
             free(mp3_decoder);
             free(mp3_buffer);
             free(buffer);
+            esp_task_wdt_delete(NULL);
             vTaskDelete(NULL);
             return;
         }
@@ -856,6 +865,9 @@ static void audio_playback_task(void *arg)
         
         ESP_LOGD(TAG, "After seek check, about to process audio type=%d", audio->type);
         
+        // Reset watchdog before potentially slow SD card operations
+        esp_task_wdt_reset();
+        
         size_t bytes_written = 0;
         
         if (audio->type == AUDIO_TYPE_WAV) {
@@ -863,20 +875,39 @@ static void audio_playback_task(void *arg)
             size_t bytes_read = fread(buffer, 1, I2S_BUFFER_SIZE, current_file);
             
             if (bytes_read > 0) {
-                // Apply volume scaling only if needed (treat buffer as 16-bit samples)
-                if (volume_level < 100) {
-                    int16_t *samples = (int16_t *)buffer;
-                    size_t sample_count = bytes_read / 2;
-                    for (size_t i = 0; i < sample_count; i++) {
+                // Check if this is the last buffer (near EOF)
+                long current_pos = ftell(current_file);
+                fseek(current_file, 0, SEEK_END);
+                long file_end = ftell(current_file);
+                fseek(current_file, current_pos, SEEK_SET);
+                
+                bool is_last_buffer = (file_end - current_pos) < (long)I2S_BUFFER_SIZE;
+                
+                // Apply volume scaling (treat buffer as 16-bit samples)
+                int16_t *samples = (int16_t *)buffer;
+                size_t sample_count = bytes_read / 2;
+                
+                for (size_t i = 0; i < sample_count; i++) {
+                    // Apply volume
+                    if (volume_level < 100) {
                         samples[i] = (samples[i] * volume_level) / 100;
+                    }
+                    
+                    // Apply fade-out on last buffer to prevent pop
+                    if (is_last_buffer && i > sample_count / 2) {
+                        // Fade out the second half of the last buffer
+                        int32_t fade = ((sample_count - i) * 1000) / (sample_count / 2);
+                        samples[i] = (samples[i] * fade) / 1000;
                     }
                 }
                 
                 i2s_channel_write(tx_handle, buffer, bytes_read, &bytes_written, portMAX_DELAY);
                 bytes_played += bytes_written;
             } else {
-                // End of WAV file
-                bytes_written = 0;
+                // End of WAV file - write silence to keep I2S happy
+                memset(buffer, 0, I2S_BUFFER_SIZE);
+                i2s_channel_write(tx_handle, buffer, I2S_BUFFER_SIZE, &bytes_written, portMAX_DELAY);
+                bytes_written = 0;  // Signal EOF
             }
         } else if (audio->type == AUDIO_TYPE_MP3) {
             // MP3: Decode frames to PCM
@@ -1009,9 +1040,11 @@ static void audio_playback_task(void *arg)
                     }
                 }
             } else {
-                // End of MP3 file
+                // End of MP3 file - write silence immediately to prevent pop from abrupt ending
+                memset(buffer, 0, I2S_BUFFER_SIZE);
+                i2s_channel_write(tx_handle, buffer, I2S_BUFFER_SIZE, &bytes_written, portMAX_DELAY);
                 ESP_LOGI(TAG, "MP3 buffer empty, file_pos=%lu, file_size=%lu", mp3_file_pos, mp3_file_size);
-                bytes_written = 0;
+                bytes_written = 0;  // Signal EOF
             }
         }
         
@@ -1057,6 +1090,18 @@ static void audio_playback_task(void *arg)
         } else {
             // End of file
             ESP_LOGI(TAG, "Finished playing track");
+            
+            // Write LOTS of silence immediately to keep I2S fed during entire file transition
+            // This prevents I2S DMA underrun pop during file close/open/setup
+            uint8_t *end_silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+            if (end_silence) {
+                size_t bytes_written;
+                // Write MORE to cover the entire file operations duration (10 × 8KB = 80KB)
+                for (int i = 0; i < 10; i++) {
+                    i2s_channel_write(tx_handle, end_silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
+                }
+                free(end_silence);
+            }
             
             // Update UI to show 100% completion
             lv_lock();
@@ -1143,31 +1188,80 @@ static void audio_playback_task(void *arg)
                 }
                 
                 if (next_ok) {
+                    // Check if sample rate changed - only reconfigure if needed
+                    bool sample_rate_changed = (next_audio->sample_rate != audio->sample_rate);
+                    
                     // Update audio pointer
                     audio = next_audio;
                     
-                    // Flush I2S DMA buffers to prevent audio garbage from previous track
-                    i2s_channel_disable(tx_handle);
-                    vTaskDelay(pdMS_TO_TICKS(50));  // Wait for DMA to fully stop
-                    
-                    // Update clock configuration
-                    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio->sample_rate);
-                    ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg));
-                    
-                    // Update slot configuration (stereo/mono may have changed between MP3 and WAV)
-                    i2s_std_slot_config_t slot_cfg = I2S_STD_PCM_SLOT_DEFAULT_CONFIG(
-                        I2S_DATA_BIT_WIDTH_16BIT, 
-                        I2S_SLOT_MODE_STEREO  // Always stereo for NS4168
-                    );
-                    ESP_ERROR_CHECK(i2s_channel_reconfig_std_slot(tx_handle, &slot_cfg));
-                    
-                    i2s_channel_enable(tx_handle);
-                    
-                    // Small delay to let I2S stabilize after reconfiguration
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                    
-                    ESP_LOGI(TAG, "I2S reconfigured: %lu Hz, %d ch, %d bit", 
-                             audio->sample_rate, audio->num_channels, audio->bits_per_sample);
+                    // Only reconfigure I2S if sample rate changed (avoids disable/enable pop)
+                    if (sample_rate_changed) {
+                        ESP_LOGI(TAG, "Sample rate changed, reconfiguring I2S");
+                        
+                        // Mute before disabling I2S to prevent pop - write LOTS of silence
+                        uint8_t *silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+                        if (silence) {
+                            size_t bytes_written;
+                            // Write MORE silence to ensure complete settling
+                            for (int i = 0; i < 8; i++) {
+                                i2s_channel_write(tx_handle, silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
+                            }
+                            free(silence);
+                        }
+                        
+                        // Wait LONGER for silence to fully settle in DAC and NS4168 amplifier
+                        vTaskDelay(pdMS_TO_TICKS(150));
+                        
+                        // Flush I2S DMA buffers to prevent audio garbage from previous track
+                        i2s_channel_disable(tx_handle);
+                        vTaskDelay(pdMS_TO_TICKS(100));  // Wait longer for complete shutdown
+                        
+                        // Update clock configuration
+                        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(audio->sample_rate);
+                        ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg));
+                        
+                        // Update slot configuration (stereo/mono may have changed between MP3 and WAV)
+                        i2s_std_slot_config_t slot_cfg = I2S_STD_PCM_SLOT_DEFAULT_CONFIG(
+                            I2S_DATA_BIT_WIDTH_16BIT, 
+                            I2S_SLOT_MODE_STEREO  // Always stereo for NS4168
+                        );
+                        ESP_ERROR_CHECK(i2s_channel_reconfig_std_slot(tx_handle, &slot_cfg));
+                        
+                        i2s_channel_enable(tx_handle);
+                        
+                        // Write MORE silence immediately after enabling to ensure DAC/NS4168 start at zero (prevents pop)
+                        uint8_t *startup_silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+                        if (startup_silence) {
+                            size_t bytes_written;
+                            for (int i = 0; i < 5; i++) {
+                                i2s_channel_write(tx_handle, startup_silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
+                            }
+                            free(startup_silence);
+                        }
+                        
+                        // Longer delay to let I2S and NS4168 stabilize after reconfiguration
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                        
+                        ESP_LOGI(TAG, "I2S reconfigured: %lu Hz, %d ch, %d bit", 
+                                 audio->sample_rate, audio->num_channels, audio->bits_per_sample);
+                    } else {
+                        ESP_LOGI(TAG, "Sample rate unchanged (%lu Hz), keeping I2S running", audio->sample_rate);
+                        
+                        // Even without I2S reconfiguration, write silence to flush previous track
+                        // and ensure clean transition (prevents pop from residual audio in DMA buffers)
+                        uint8_t *silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+                        if (silence) {
+                            size_t bytes_written;
+                            // Write enough silence to flush the I2S DMA pipeline
+                            for (int i = 0; i < 3; i++) {
+                                i2s_channel_write(tx_handle, silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
+                            }
+                            free(silence);
+                        }
+                        
+                        // Brief delay to let silence flush through the audio path
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                    }
                     
                     // Update UI
                     lv_lock();
@@ -1243,6 +1337,7 @@ static void audio_playback_task(void *arg)
     }
     
     audio_task_handle = NULL;
+    esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
 
@@ -1493,7 +1588,8 @@ void audio_player_play(const char *filename)
     
     vTaskDelay(pdMS_TO_TICKS(10));
     
-    // Update UI
+    // Update UI with proper locking to prevent watchdog timeout
+    lv_lock();
     lv_label_set_text(title_label, audio->name);
     
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
@@ -1548,6 +1644,8 @@ void audio_player_play(const char *filename)
             lv_label_set_text(time_total_label, "--:--");
         }
     }
+    
+    lv_unlock();  // Release LVGL lock after all UI updates
     
     // Start playback
     is_playing = true;
@@ -1679,10 +1777,24 @@ void audio_player_stop(void)
         current_file = NULL;
     }
     
-    // Disable I2S to stop audio output
+    // Disable I2S to stop audio output - but first ensure clean silence to prevent pop
     if (tx_handle && i2s_is_enabled) {
+        // Write additional silence to ensure DAC/amplifier are at DC zero before disable
+        uint8_t *silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
+        if (silence) {
+            size_t bytes_written;
+            // Write 3 more buffers to ensure clean shutdown
+            for (int i = 0; i < 3; i++) {
+                i2s_channel_write(tx_handle, silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
+            }
+            free(silence);
+        }
+        // Wait longer for silence to fully settle in DAC/amplifier before disabling
+        vTaskDelay(pdMS_TO_TICKS(100));
+        
         i2s_channel_disable(tx_handle);
         i2s_is_enabled = false;
+        ESP_LOGI(TAG, "I2S disabled after muting");
     }
     
     current_track = -1;
