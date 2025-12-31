@@ -71,6 +71,7 @@ static int64_t last_transition_time = 0;
 
 // Audio player UI elements
 static lv_obj_t * title_label = NULL;
+static lv_obj_t * info_label = NULL;
 static lv_obj_t * progress_bar = NULL;
 static lv_obj_t * time_label = NULL;
 static lv_obj_t * time_total_label = NULL;
@@ -288,6 +289,14 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_label_set_text(title_label, "No track loaded");
     // Set constant scroll speed (pixels per second)
     lv_obj_set_style_anim_time(title_label, 5000, 0);
+    
+    // Create info label (small, below title, shows format info)
+    info_label = lv_label_create(screen);
+    lv_obj_set_width(info_label, SUNTON_ESP32_LCD_WIDTH - 40);
+    lv_obj_align(info_label, LV_ALIGN_TOP_MID, 0, 90);
+    lv_obj_set_style_text_color(info_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(info_label, &lv_font_montserrat_28, 0);
+    lv_label_set_text(info_label, "");
     
     // Create progress bar
     progress_bar = lv_bar_create(screen);
@@ -1157,10 +1166,13 @@ static void audio_playback_task(void *arg)
                     
                     // Update UI
                     lv_lock();
+                    lv_label_set_text(title_label, audio->name);
+                    
                     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
-                    char title_text[128];
-                    snprintf(title_text, sizeof(title_text), "%s (%s)", audio->name, type_str);
-                    lv_label_set_text(title_label, title_text);
+                    char info_text[64];
+                    snprintf(info_text, sizeof(info_text), "%s, %lu Hz, %d ch", 
+                             type_str, audio->sample_rate, audio->num_channels);
+                    lv_label_set_text(info_label, info_text);
                     if (progress_bar) {
                         lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
                     }
@@ -1377,15 +1389,16 @@ void audio_player_scan_wav_files(void)
     
     // Update UI with first file if available
     if (wav_file_count > 0 && title_label) {
-        char info_text[128];
+        lv_label_set_text(title_label, audio_files[0].name);
+        
         const char *type_str = audio_files[0].type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
-        snprintf(info_text, sizeof(info_text), "%s (%s, %lu Hz, %d ch, %d bit)", 
-                audio_files[0].name,
+        char info_text[64];
+        snprintf(info_text, sizeof(info_text), "%s, %lu Hz, %d ch, %d bit", 
                 type_str,
                 audio_files[0].sample_rate,
                 audio_files[0].num_channels,
                 audio_files[0].bits_per_sample);
-        lv_label_set_text(title_label, info_text);
+        lv_label_set_text(info_label, info_text);
         
         // Calculate and display total time (for WAV files with known data size)
         if (audio_files[0].type == AUDIO_TYPE_WAV && audio_files[0].sample_rate > 0 && audio_files[0].data_size > 0) {
@@ -1474,11 +1487,13 @@ void audio_player_play(const char *filename)
     vTaskDelay(pdMS_TO_TICKS(10));
     
     // Update UI
+    lv_label_set_text(title_label, audio->name);
+    
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
-    char title_text[128];
-    snprintf(title_text, sizeof(title_text), "%s (%s, %lu Hz, %d ch)", 
-             audio->name, type_str, audio->sample_rate, audio->num_channels);
-    lv_label_set_text(title_label, title_text);
+    char info_text[64];
+    snprintf(info_text, sizeof(info_text), "%s, %lu Hz, %d ch", 
+             type_str, audio->sample_rate, audio->num_channels);
+    lv_label_set_text(info_label, info_text);
     
     // Reset progress bar and time
     if (progress_bar) {
@@ -1557,11 +1572,13 @@ void audio_player_load(const char *filename)
     audio_file_t *audio = &audio_files[track_idx];
     
     // Update UI only
+    lv_label_set_text(title_label, audio->name);
+    
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
-    char title_text[128];
-    snprintf(title_text, sizeof(title_text), "%s (%s, %lu Hz, %d ch)", 
-             audio->name, type_str, audio->sample_rate, audio->num_channels);
-    lv_label_set_text(title_label, title_text);
+    char info_text[64];
+    snprintf(info_text, sizeof(info_text), "%s, %lu Hz, %d ch", 
+             type_str, audio->sample_rate, audio->num_channels);
+    lv_label_set_text(info_label, info_text);
     
     // Reset progress bar and time
     if (progress_bar) {
