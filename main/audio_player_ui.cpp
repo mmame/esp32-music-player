@@ -691,17 +691,6 @@ static bool parse_wav_header(FILE *file, audio_file_t *wav_info)
 // Audio playback task
 static void audio_playback_task(void *arg)
 {
-    // Allocate and zero-initialize all buffers to prevent old audio data
-    if (!file_buffer) {
-        file_buffer = (uint8_t *)heap_caps_malloc(SDCARD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
-        if (file_buffer) {
-            memset(file_buffer, 0, SDCARD_BUFFER_SIZE);
-        }
-    } else {
-        // Clear existing file_buffer from previous track
-        memset(file_buffer, 0, SDCARD_BUFFER_SIZE);
-    }
-    
     uint8_t *buffer = (uint8_t *)heap_caps_malloc(I2S_BUFFER_SIZE, MALLOC_CAP_DMA);
     uint8_t *mp3_buffer = NULL;
     mp3dec_t *mp3_decoder = NULL;  // Allocate on heap, decoder is ~6KB
@@ -1445,7 +1434,19 @@ void audio_player_play(const char *filename)
         return;
     }
     
-    // Enable full buffering with large buffer to smooth SD card read latency
+    // Allocate FRESH file_buffer BEFORE setvbuf to prevent using old cached data
+    if (!file_buffer) {
+        file_buffer = (uint8_t *)heap_caps_malloc(SDCARD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+        if (!file_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate file buffer");
+            fclose(current_file);
+            current_file = NULL;
+            return;
+        }
+    }
+    memset(file_buffer, 0, SDCARD_BUFFER_SIZE);  // Clear it
+    
+    // Enable full buffering with OUR buffer to prevent setvbuf from using cached data
     setvbuf(current_file, (char*)file_buffer, _IOFBF, SDCARD_BUFFER_SIZE);
     ESP_LOGI(TAG, "File buffering enabled: %d bytes", SDCARD_BUFFER_SIZE);
     
@@ -1472,18 +1473,7 @@ void audio_player_play(const char *filename)
     i2s_channel_enable(tx_handle);
     i2s_is_enabled = true;
     
-    // Write silence to clear any residual data in DMA buffers
-    uint8_t *silence_buffer = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
-    if (silence_buffer) {
-        size_t bytes_written;
-        // Write multiple buffers of silence to fully clear DMA chain
-        for (int i = 0; i < 3; i++) {
-            i2s_channel_write(tx_handle, silence_buffer, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(100));
-        }
-        free(silence_buffer);
-    }
-    
-    vTaskDelay(pdMS_TO_TICKS(50));  // Additional delay to let silence propagate through system
+    vTaskDelay(pdMS_TO_TICKS(10));
     
     // Update UI
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
@@ -1642,18 +1632,10 @@ void audio_player_stop(void)
         current_file = NULL;
     }
     
-    // Disable I2S and flush DMA buffers to clear old audio data
+    // Disable I2S to stop audio output
     if (tx_handle && i2s_is_enabled) {
         i2s_channel_disable(tx_handle);
         i2s_is_enabled = false;
-        vTaskDelay(pdMS_TO_TICKS(100));  // Longer delay to fully flush DMA buffers
-    }
-    
-    // Free and clear file_buffer to ensure no old data remains
-    if (file_buffer) {
-        memset(file_buffer, 0, SDCARD_BUFFER_SIZE);  // Zero before freeing
-        free(file_buffer);
-        file_buffer = NULL;
     }
     
     current_track = -1;
@@ -1662,23 +1644,10 @@ void audio_player_stop(void)
 void audio_player_pause(void)
 {
     is_paused = true;
-    
-    // Disable I2S and flush buffers to prevent old audio data
-    if (tx_handle && i2s_is_enabled) {
-        i2s_channel_disable(tx_handle);
-        i2s_is_enabled = false;
-        vTaskDelay(pdMS_TO_TICKS(50));  // Wait to flush DMA buffers
-    }
 }
 
 void audio_player_resume(void)
 {
-    // Re-enable I2S before resuming
-    if (tx_handle && !i2s_is_enabled) {
-        i2s_channel_enable(tx_handle);
-        i2s_is_enabled = true;
-    }
-    
     is_paused = false;
 }
 
