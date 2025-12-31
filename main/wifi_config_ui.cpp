@@ -83,8 +83,10 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".folder { color: #00aaff; font-weight: bold; }"
         ".file { color: #cccccc; }"
         ".file-size { color: #888; margin: 0 10px; }"
-        ".btn-delete { background: #aa0000; color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 3px; }"
+        ".btn-delete { background: #aa0000; color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 3px; margin-left: 5px; }"
         ".btn-delete:hover { background: #cc0000; }"
+        ".btn-rename { background: #0066aa; color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 3px; margin-left: 5px; }"
+        ".btn-rename:hover { background: #0088cc; }"
         ".upload-area { border: 2px dashed #00ff00; padding: 30px; text-align: center; margin: 20px 0; border-radius: 5px; cursor: pointer; }"
         ".upload-area.dragover { background: #2a4a2a; }"
         ".btn-upload { background: #00aa00; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 5px; margin: 10px 5px; }"
@@ -245,6 +247,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "        html += `<span class='file-name ${nameClass}' ${onclick}>${isDir ? '📁 ' : '📄 '}${f.name}</span>`;\n"
         "        html += size;\n"
         "        if (!isDir) html += `<button class='btn-delete' onclick='deleteFile(\"${f.name}\")'>Delete</button>`;\n"
+        "        if (!isDir) html += `<button class='btn-rename' onclick='renameFile(\"${f.name}\")'>Rename</button>`;\n"
         "        html += `</div>`;\n"
         "      });\n"
         "      document.getElementById('fileList').innerHTML = html || '<p>No files</p>';\n"
@@ -273,6 +276,20 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "    fetch('/delete?path=' + encodeURIComponent(currentPath + '/' + name), { method: 'DELETE' })\n"
         "      .then(r => r.text())\n"
         "      .then(data => { console.log(data); loadFiles(); });\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "function renameFile(name) {\n"
+        "  const newName = prompt('Rename ' + name + ' to:', name);\n"
+        "  if (newName && newName !== name) {\n"
+        "    fetch('/rename', {\n"
+        "      method: 'POST',\n"
+        "      headers: { 'Content-Type': 'application/json' },\n"
+        "      body: JSON.stringify({ oldPath: currentPath + '/' + name, newName: newName })\n"
+        "    })\n"
+        "    .then(r => r.text())\n"
+        "    .then(data => { console.log(data); loadFiles(); })\n"
+        "    .catch(err => alert('Rename failed: ' + err));\n"
         "  }\n"
         "}\n"
         "\n"
@@ -530,6 +547,78 @@ static esp_err_t delete_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t rename_handler(httpd_req_t *req)
+{
+    char content[512];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    
+    content[ret] = '\0';
+    
+    // Parse JSON: {"oldPath": "/sdcard/file.mp3", "newName": "newfile.mp3"}
+    char oldPath[256] = {0};
+    char newName[128] = {0};
+    
+    char *oldPathStart = strstr(content, "\"oldPath\":\"");
+    char *newNameStart = strstr(content, "\"newName\":\"");
+    
+    if (oldPathStart && newNameStart) {
+        oldPathStart += 11; // skip "oldPath":"
+        char *oldPathEnd = strchr(oldPathStart, '"');
+        if (oldPathEnd) {
+            int len = oldPathEnd - oldPathStart;
+            if (len < sizeof(oldPath)) {
+                strncpy(oldPath, oldPathStart, len);
+                oldPath[len] = '\0';
+            }
+        }
+        
+        newNameStart += 11; // skip "newName":"
+        char *newNameEnd = strchr(newNameStart, '"');
+        if (newNameEnd) {
+            int len = newNameEnd - newNameStart;
+            if (len < sizeof(newName)) {
+                strncpy(newName, newNameStart, len);
+                newName[len] = '\0';
+            }
+        }
+    }
+    
+    if (strlen(oldPath) == 0 || strlen(newName) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    // Build new path (same directory as old file)
+    char newPath[256];
+    strncpy(newPath, oldPath, sizeof(newPath) - 1);
+    newPath[sizeof(newPath) - 1] = '\0';
+    
+    char *lastSlash = strrchr(newPath, '/');
+    if (lastSlash) {
+        *(lastSlash + 1) = '\0'; // Keep path up to last slash
+        strncat(newPath, newName, sizeof(newPath) - strlen(newPath) - 1);
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid path");
+        return ESP_FAIL;
+    }
+    
+    // Perform rename
+    if (rename(oldPath, newPath) == 0) {
+        ESP_LOGI(TAG, "File renamed: %s -> %s", oldPath, newPath);
+        httpd_resp_sendstr(req, "File renamed");
+    } else {
+        ESP_LOGE(TAG, "Rename failed: %s -> %s", oldPath, newPath);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Rename failed");
+    }
+    
+    return ESP_OK;
+}
+
 static esp_err_t start_webserver(void)
 {
     // Don't start if server is already running
@@ -579,6 +668,14 @@ static esp_err_t start_webserver(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &delete_uri);
+        
+        httpd_uri_t rename_uri = {
+            .uri = "/rename",
+            .method = HTTP_POST,
+            .handler = rename_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &rename_uri);
         
         ESP_LOGI(TAG, "HTTP server started successfully");
         return ESP_OK;

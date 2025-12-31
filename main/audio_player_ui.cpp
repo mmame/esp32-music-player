@@ -1527,6 +1527,9 @@ void audio_player_scan_wav_files(void)
     // Update UI with first file if available
     lv_lock();  // MUST lock LVGL before updating UI elements
     if (wav_file_count > 0 && title_label) {
+        // Set current track to first file so Next/Previous work correctly from startup
+        current_track = 0;
+        
         // Strip file extension from title
         char title_without_ext[MAX_FILENAME_LEN];
         strncpy(title_without_ext, audio_files[0].name, MAX_FILENAME_LEN - 1);
@@ -1864,7 +1867,7 @@ void audio_player_stop(void)
         ESP_LOGI(TAG, "I2S disabled after muting");
     }
     
-    current_track = -1;
+    // Don't reset current_track here - preserve track position for Next/Previous navigation
 }
 
 void audio_player_pause(void)
