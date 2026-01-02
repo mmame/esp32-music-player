@@ -55,10 +55,6 @@ static lv_obj_t *clear_buttons[NUM_BUTTONS];
 static adc_oneshot_unit_handle_t adc_handle = NULL;
 static bool adc_initialized = false;
 
-// Button state
-static int last_button_pressed = -1;
-static uint32_t last_button_time = 0;
-
 // Learning state
 static int learning_button_index = -1;  // Which button we're learning (-1 = none)
 
@@ -260,7 +256,6 @@ static void button_scan_task(void *arg)
     while (1) {
         uint16_t adc_value = button_config_get_adc_value();
         int button_index = button_config_get_button_index();
-        uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
         // Handle learning mode
         if (learning_button_index >= 0) {
@@ -295,40 +290,37 @@ static void button_scan_task(void *arg)
                     learning_button_index = -1; // Done learning
                 }
             }
-        } else {
-            // Normal mode - handle button actions
-                        switch (button_index) {
-                            case 0:
-                                // Play
-                                audio_player_resume();
-                                break;
-                            case 1:
-                                // Pause
-                                audio_player_pause();
-                                break;
-                            case 2:
-                                // Play/Pause toggle
-                                if (audio_player_is_playing()) {
-                                    audio_player_pause();
-                                } else {
-                                    audio_player_resume();
-                                }
-                                break;
-                            case 3:
-                                // Previous track
-                                audio_player_previous();
-                                break;
-                            case 4:
-                                // Next track
-                                audio_player_next();
-                                break;
-                            case 5:
-                                // Stop
-                                audio_player_stop();
-                                break;
-                        }
+        } else if (button_index >= 0) {
+            // Normal mode - handle button actions when a valid button is detected
+            switch (button_index) {
+                case 0:
+                    // Play
+                    audio_player_resume();
+                    break;
+                case 1:
+                    // Pause
+                    audio_player_pause();
+                    break;
+                case 2:
+                    // Play/Pause toggle
+                    if (audio_player_is_playing()) {
+                        audio_player_pause();
+                    } else {
+                        audio_player_resume();
                     }
-                }
+                    break;
+                case 3:
+                    // Previous track
+                    audio_player_previous();
+                    break;
+                case 4:
+                    // Next track
+                    audio_player_next();
+                    break;
+                case 5:
+                    // Stop
+                    audio_player_stop();
+                    break;
             }
         }
 
