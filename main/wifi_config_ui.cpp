@@ -1,6 +1,7 @@
 #include "wifi_config_ui.h"
 #include "audio_player_ui.h"
 #include "file_manager_ui.h"
+#include "button_config_ui.h"
 #include "sunton_esp32_8048s050c.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -1083,6 +1084,9 @@ static void wifi_config_gesture_event_cb(lv_event_t *e)
         if (dir == LV_DIR_RIGHT) {
             ESP_LOGI(TAG, "Swipe RIGHT detected, returning to file manager");
             wifi_config_hide();
+        } else if (dir == LV_DIR_LEFT) {
+            ESP_LOGI(TAG, "Swipe LEFT detected, showing button config");
+            button_config_show();
         }
     }
 }

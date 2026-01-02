@@ -15,7 +15,8 @@
 #define SUNTON_ESP32_LCD_WIDTH                  800
 #define SUNTON_ESP32_LCD_HEIGHT                 480
 
-#define SUNTON_ESP32_PIN_BCKL                   GPIO_NUM_2
+// Backlight is now hardwired to VCC - GPIO2 available for other uses
+// #define SUNTON_ESP32_PIN_BCKL                   GPIO_NUM_2
 
 // GT911 Pin config
 #define SUNTON_ESP32_TOUCH_PIN_I2C_SCL          GPIO_NUM_20

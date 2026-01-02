@@ -10,6 +10,7 @@
 #include "audio_player_ui.h"
 #include "file_manager_ui.h"
 #include "wifi_config_ui.h"
+#include "button_config_ui.h"
 
 void app_main(void)
 {
@@ -49,6 +50,9 @@ void app_main(void)
     
     // Initialize WiFi config UI (hidden by default)
     wifi_config_ui_init(lv_screen_active());
+    
+    // Initialize button config UI (hidden by default)
+    button_config_ui_init();
     lv_unlock();
     
     // Trigger auto-play if enabled
