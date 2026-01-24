@@ -18,8 +18,8 @@
 
 static const char *TAG = "WiFiConfig";
 
-#define WIFI_AP_SSID "ESP32-FileManager"
-#define WIFI_AP_PASS "12345678"
+#define WIFI_AP_SSID_DEFAULT "ESP32-MusicPlayer"
+#define WIFI_AP_PASS_DEFAULT "music2026"
 #define WIFI_AP_CHANNEL 1
 #define WIFI_AP_MAX_CONN 4
 #define MOUNT_POINT "/sdcard"
@@ -36,20 +36,24 @@ typedef enum {
 // UI elements
 static lv_obj_t *wifi_config_screen = NULL;
 static lv_obj_t *status_label = NULL;
-static lv_obj_t *ip_label = NULL;
 static lv_obj_t *mode_dropdown = NULL;
 static lv_obj_t *sta_container = NULL;
 static lv_obj_t *ssid_textarea = NULL;
 static lv_obj_t *password_textarea = NULL;
 static lv_obj_t *connect_btn = NULL;
 static lv_obj_t *keyboard = NULL;
-static lv_obj_t *ap_info = NULL;
+static lv_obj_t *ap_start_btn = NULL;
+static lv_obj_t *ap_container = NULL;
+static lv_obj_t *ap_ssid_textarea = NULL;
+static lv_obj_t *ap_password_textarea = NULL;
 
 // WiFi state
 static wifi_ui_mode_t current_ui_mode = WIFI_UI_MODE_AP;
 static wifi_mode_t current_wifi_mode = WIFI_MODE_AP;
 static char sta_ssid[MAX_SSID_LEN] = "";
 static char sta_password[MAX_PASS_LEN] = "";
+static char ap_ssid[MAX_SSID_LEN] = WIFI_AP_SSID_DEFAULT;
+static char ap_password[MAX_PASS_LEN] = WIFI_AP_PASS_DEFAULT;
 static bool wifi_initialized = false;
 static bool wifi_enabled = false;
 static httpd_handle_t server = NULL;
@@ -58,8 +62,15 @@ static esp_netif_t *ap_netif = NULL;
 static char got_ip_str[100] = "";
 static bool ip_update_pending = false;
 static lv_timer_t *ip_update_timer = NULL;
+static bool lcd_refresh_pending = false;
+static lv_timer_t *lcd_refresh_timer = NULL;
+static esp_event_handler_instance_t wifi_event_instance = NULL;
+static esp_event_handler_instance_t ip_event_instance = NULL;
+static bool event_handlers_registered = false;
 
 // Forward declarations
+static void lcd_refresh_timer_cb(lv_timer_t *timer);
+static void ip_update_timer_cb(lv_timer_t *timer);
 static void start_wifi_ap(void);
 static void stop_wifi_ap(void);
 static void start_wifi_sta(void);
@@ -778,6 +789,14 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Station " MACSTR " disconnected", MAC2STR(event->mac));
     } else if (event_id == WIFI_EVENT_AP_START) {
         ESP_LOGI(TAG, "WiFi AP started, starting web server...");
+        
+        // Schedule LCD refresh via timer (safer than calling from event handler)
+        lcd_refresh_pending = true;
+        if (!lcd_refresh_timer) {
+            lcd_refresh_timer = lv_timer_create(lcd_refresh_timer_cb, 150, NULL);
+            lv_timer_set_repeat_count(lcd_refresh_timer, 1);
+        }
+        
         start_webserver();
     } else if (event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
@@ -788,13 +807,35 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
+// Timer callback to refresh LCD from LVGL task
+static void lcd_refresh_timer_cb(lv_timer_t *timer)
+{
+    if (lcd_refresh_pending) {
+        sunton_esp32s3_lcd_force_refresh();
+        lcd_refresh_pending = false;
+        
+        // Force LVGL to redraw the entire screen after LCD refresh
+        lv_obj_invalidate(lv_screen_active());
+    }
+    
+    // Delete the timer after execution
+    if (lcd_refresh_timer) {
+        lv_timer_delete(lcd_refresh_timer);
+        lcd_refresh_timer = NULL;
+    }
+}
+
 // Timer callback to update UI from LVGL task
 static void ip_update_timer_cb(lv_timer_t *timer)
 {
     if (ip_update_pending) {
-        lv_label_set_text(status_label, "WiFi STA: Connected");
+        char status_text[150];
+        snprintf(status_text, sizeof(status_text), "WiFi STA: Connected (%s)", got_ip_str);
+        lv_label_set_text(status_label, status_text);
         lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
-        lv_label_set_text(ip_label, got_ip_str);
+        if (connect_btn) {
+            lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Disconnect");
+        }
         ip_update_pending = false;
     }
     
@@ -823,9 +864,12 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
             lv_timer_set_repeat_count(ip_update_timer, 1);
         }
         
-        // Force display refresh to fix any corruption from WiFi init
-        // This is safe to call from event handler as it's hardware-level
-        sunton_esp32s3_lcd_force_refresh();
+        // Schedule LCD refresh via timer (safer than calling from event handler)
+        lcd_refresh_pending = true;
+        if (!lcd_refresh_timer) {
+            lcd_refresh_timer = lv_timer_create(lcd_refresh_timer_cb, 150, NULL);
+            lv_timer_set_repeat_count(lcd_refresh_timer, 1);
+        }
         
         // Start web server
         start_webserver();
@@ -851,8 +895,14 @@ static void load_wifi_config(void)
         size_t pass_len = MAX_PASS_LEN;
         nvs_get_str(nvs_handle, "sta_pass", sta_password, &pass_len);
         
+        size_t ap_ssid_len = MAX_SSID_LEN;
+        nvs_get_str(nvs_handle, "ap_ssid", ap_ssid, &ap_ssid_len);
+        
+        size_t ap_pass_len = MAX_PASS_LEN;
+        nvs_get_str(nvs_handle, "ap_pass", ap_password, &ap_pass_len);
+        
         nvs_close(nvs_handle);
-        ESP_LOGI(TAG, "Loaded WiFi config: mode=%d, SSID=%s", current_wifi_mode, sta_ssid);
+        ESP_LOGI(TAG, "Loaded WiFi config: mode=%d, STA_SSID=%s, AP_SSID=%s", current_wifi_mode, sta_ssid, ap_ssid);
     } else {
         ESP_LOGI(TAG, "No saved WiFi config, using defaults");
     }
@@ -867,6 +917,8 @@ static void save_wifi_config(void)
         nvs_set_u8(nvs_handle, "mode", (uint8_t)current_wifi_mode);
         nvs_set_str(nvs_handle, "sta_ssid", sta_ssid);
         nvs_set_str(nvs_handle, "sta_pass", sta_password);
+        nvs_set_str(nvs_handle, "ap_ssid", ap_ssid);
+        nvs_set_str(nvs_handle, "ap_pass", ap_password);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
         ESP_LOGI(TAG, "Saved WiFi config");
@@ -895,21 +947,30 @@ static void start_wifi_ap(void)
     // Disable WiFi power save to prevent CPU frequency changes
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                         ESP_EVENT_ANY_ID,
-                                                         &wifi_event_handler,
-                                                         NULL,
-                                                         NULL));
+    // Register event handlers only once
+    if (!event_handlers_registered) {
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                             ESP_EVENT_ANY_ID,
+                                                             &wifi_event_handler,
+                                                             NULL,
+                                                             &wifi_event_instance));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                             IP_EVENT_STA_GOT_IP,
+                                                             &ip_event_handler,
+                                                             NULL,
+                                                             &ip_event_instance));
+        event_handlers_registered = true;
+    }
     
     wifi_config_t wifi_config = {};
-    strcpy((char *)wifi_config.ap.ssid, WIFI_AP_SSID);
-    strcpy((char *)wifi_config.ap.password, WIFI_AP_PASS);
-    wifi_config.ap.ssid_len = strlen(WIFI_AP_SSID);
+    strcpy((char *)wifi_config.ap.ssid, ap_ssid);
+    strcpy((char *)wifi_config.ap.password, ap_password);
+    wifi_config.ap.ssid_len = strlen(ap_ssid);
     wifi_config.ap.channel = WIFI_AP_CHANNEL;
     wifi_config.ap.max_connection = WIFI_AP_MAX_CONN;
     wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
     
-    if (strlen(WIFI_AP_PASS) == 0) {
+    if (strlen(ap_password) == 0) {
         wifi_config.ap.authmode = WIFI_AUTH_OPEN;
     }
     
@@ -922,7 +983,7 @@ static void start_wifi_ap(void)
     ESP_ERROR_CHECK(esp_wifi_start());
     
     ESP_LOGI(TAG, "WiFi AP starting. SSID:%s password:%s channel:%d",
-             WIFI_AP_SSID, WIFI_AP_PASS, WIFI_AP_CHANNEL);
+             ap_ssid, ap_password, WIFI_AP_CHANNEL);
     
     // Webserver will be started by WIFI_EVENT_AP_START event
     
@@ -944,6 +1005,7 @@ static void stop_wifi_ap(void)
     
     wifi_enabled = false;
     wifi_initialized = false;
+    event_handlers_registered = false;
     ESP_LOGI(TAG, "WiFi AP stopped");
 }
 
@@ -964,16 +1026,20 @@ static void start_wifi_sta(void)
         ESP_ERROR_CHECK(esp_wifi_init(&cfg));
         ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
         
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                             ESP_EVENT_ANY_ID,
-                                                             &wifi_event_handler,
-                                                             NULL,
-                                                             NULL));
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                             IP_EVENT_STA_GOT_IP,
-                                                             &ip_event_handler,
-                                                             NULL,
-                                                             NULL));
+        // Register event handlers only once
+        if (!event_handlers_registered) {
+            ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                                 ESP_EVENT_ANY_ID,
+                                                                 &wifi_event_handler,
+                                                                 NULL,
+                                                                 &wifi_event_instance));
+            ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                                 IP_EVENT_STA_GOT_IP,
+                                                                 &ip_event_handler,
+                                                                 NULL,
+                                                                 &ip_event_instance));
+            event_handlers_registered = true;
+        }
     }
     
     wifi_config_t wifi_config = {};
@@ -1017,11 +1083,11 @@ static void stop_wifi_sta(void)
     
     wifi_enabled = false;
     wifi_initialized = false;
+    event_handlers_registered = false;
     
     // Update UI
     lv_label_set_text(status_label, "WiFi STA: Disconnected");
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
-    lv_label_set_text(ip_label, "Not connected");
     
     ESP_LOGI(TAG, "WiFi STA stopped");
 }
@@ -1039,24 +1105,25 @@ static void mode_dropdown_event_cb(lv_event_t *e)
             current_ui_mode = WIFI_UI_MODE_AP;
             current_wifi_mode = WIFI_MODE_AP;
             lv_obj_add_flag(sta_container, LV_OBJ_FLAG_HIDDEN);
-            if (ap_info) lv_obj_clear_flag(ap_info, LV_OBJ_FLAG_HIDDEN);
+            if (ap_container) lv_obj_clear_flag(ap_container, LV_OBJ_FLAG_HIDDEN);
+            if (ap_start_btn) lv_obj_clear_flag(ap_start_btn, LV_OBJ_FLAG_HIDDEN);
             
-            // Stop STA if running and start AP
+            // Stop STA if running, but don't auto-start AP
             if (wifi_enabled) {
                 stop_wifi_sta();
-                start_wifi_ap();
             }
             
             // Update UI for AP mode
-            lv_label_set_text(status_label, "WiFi AP: Active");
-            lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
-            lv_label_set_text(ip_label, "IP: 192.168.4.1");
+            lv_label_set_text(status_label, "WiFi AP: Stopped");
+            lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+            if (ap_start_btn) lv_label_set_text(lv_obj_get_child(ap_start_btn, 0), "Start AP");
         } else {
             // STA mode
             current_ui_mode = WIFI_UI_MODE_STA;
             current_wifi_mode = WIFI_MODE_STA;
             lv_obj_clear_flag(sta_container, LV_OBJ_FLAG_HIDDEN);
-            if (ap_info) lv_obj_add_flag(ap_info, LV_OBJ_FLAG_HIDDEN);
+            if (ap_container) lv_obj_add_flag(ap_container, LV_OBJ_FLAG_HIDDEN);
+            if (ap_start_btn) lv_obj_add_flag(ap_start_btn, LV_OBJ_FLAG_HIDDEN);
             
             // Stop AP if running
             if (wifi_enabled) {
@@ -1066,7 +1133,6 @@ static void mode_dropdown_event_cb(lv_event_t *e)
             // Update UI for STA mode
             lv_label_set_text(status_label, "WiFi STA: Disconnected");
             lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
-            lv_label_set_text(ip_label, "Not connected");
         }
         
         save_wifi_config();
@@ -1103,31 +1169,73 @@ static void textarea_event_cb(lv_event_t *e)
     }
 }
 
+static void ap_start_btn_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    
+    if (code == LV_EVENT_CLICKED) {
+        if (!wifi_enabled) {
+            // Get AP SSID and password from textareas
+            const char *ssid = lv_textarea_get_text(ap_ssid_textarea);
+            const char *password = lv_textarea_get_text(ap_password_textarea);
+            
+            if (strlen(ssid) == 0) {
+                lv_label_set_text(status_label, "Error: AP SSID cannot be empty");
+                lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+                return;
+            }
+            
+            // Save AP credentials
+            strncpy(ap_ssid, ssid, MAX_SSID_LEN - 1);
+            strncpy(ap_password, password, MAX_PASS_LEN - 1);
+            save_wifi_config();
+            
+            // Start AP
+            start_wifi_ap();
+            lv_label_set_text(status_label, "WiFi AP: Active (IP: 192.168.4.1)");
+            lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
+            lv_label_set_text(lv_obj_get_child(ap_start_btn, 0), "Stop AP");
+        } else {
+            // Stop AP
+            stop_wifi_ap();
+            lv_label_set_text(status_label, "WiFi AP: Stopped");
+            lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+            lv_label_set_text(lv_obj_get_child(ap_start_btn, 0), "Start AP");
+        }
+    }
+}
+
 static void connect_btn_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     
     if (code == LV_EVENT_CLICKED) {
-        // Get SSID and password from textareas
-        const char *ssid = lv_textarea_get_text(ssid_textarea);
-        const char *password = lv_textarea_get_text(password_textarea);
-        
-        if (strlen(ssid) == 0) {
-            lv_label_set_text(status_label, "Error: SSID cannot be empty");
-            lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
-            return;
-        }
-        
-        // Save credentials
-        strncpy(sta_ssid, ssid, MAX_SSID_LEN - 1);
-        strncpy(sta_password, password, MAX_PASS_LEN - 1);
-        save_wifi_config();
-        
-        // Connect
-        if (wifi_enabled) {
+        if (!wifi_enabled) {
+            // Connect to WiFi
+            const char *ssid = lv_textarea_get_text(ssid_textarea);
+            const char *password = lv_textarea_get_text(password_textarea);
+            
+            if (strlen(ssid) == 0) {
+                lv_label_set_text(status_label, "Error: SSID cannot be empty");
+                lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+                return;
+            }
+            
+            // Save credentials
+            strncpy(sta_ssid, ssid, MAX_SSID_LEN - 1);
+            strncpy(sta_password, password, MAX_PASS_LEN - 1);
+            save_wifi_config();
+            
+            // Start connection
+            start_wifi_sta();
+            lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Disconnect");
+        } else {
+            // Disconnect from WiFi
             stop_wifi_sta();
+            lv_label_set_text(status_label, "WiFi STA: Disconnected");
+            lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+            lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Connect");
         }
-        start_wifi_sta();
     }
 }
 
@@ -1192,19 +1300,10 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
     lv_obj_set_pos(status_label, 20, 110);
     
-    // IP label
-    ip_label = lv_label_create(wifi_config_screen);
-    lv_label_set_text(ip_label, "Not connected");
-    lv_obj_set_style_text_font(ip_label, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(ip_label, lv_color_hex(0x888888), 0);
-    lv_obj_set_pos(ip_label, 20, 140);
-    lv_label_set_long_mode(ip_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ip_label, 760);
-    
     // STA configuration container (hidden by default in AP mode)
     sta_container = lv_obj_create(wifi_config_screen);
     lv_obj_set_size(sta_container, 760, 300);
-    lv_obj_set_pos(sta_container, 20, 200);
+    lv_obj_set_pos(sta_container, 20, 150);
     lv_obj_set_style_bg_color(sta_container, lv_color_hex(0x1a1a1a), 0);
     lv_obj_set_style_border_color(sta_container, lv_color_hex(0x444444), 0);
     lv_obj_set_style_border_width(sta_container, 2, 0);
@@ -1265,31 +1364,76 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     
-    // AP info (shown when in AP mode)
-    ap_info = lv_label_create(wifi_config_screen);
-    lv_label_set_text(ap_info, 
-        "AP Mode Info:\n"
-        "SSID: " WIFI_AP_SSID "\n"
-        "Password: " WIFI_AP_PASS "\n"
-        "IP: 192.168.4.1\n\n"
-        "Access web interface at:\nhttp://192.168.4.1");
-    lv_obj_set_style_text_font(ap_info, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(ap_info, lv_color_hex(0x00AAFF), 0);
-    lv_obj_set_pos(ap_info, 20, 200);
+    // AP configuration container (shown when in AP mode)
+    ap_container = lv_obj_create(wifi_config_screen);
+    lv_obj_set_size(ap_container, 760, 240);
+    lv_obj_set_pos(ap_container, 20, 150);
+    lv_obj_set_style_bg_color(ap_container, lv_color_hex(0x1a1a1a), 0);
+    lv_obj_set_style_border_color(ap_container, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(ap_container, 2, 0);
+    lv_obj_clear_flag(ap_container, LV_OBJ_FLAG_SCROLLABLE);
+    
+    // AP SSID input
+    lv_obj_t *ap_ssid_label = lv_label_create(ap_container);
+    lv_label_set_text(ap_ssid_label, "AP SSID:");
+    lv_obj_set_style_text_font(ap_ssid_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(ap_ssid_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_pos(ap_ssid_label, 10, 10);
+    
+    ap_ssid_textarea = lv_textarea_create(ap_container);
+    lv_obj_set_size(ap_ssid_textarea, 720, 50);
+    lv_obj_set_pos(ap_ssid_textarea, 10, 40);
+    lv_obj_set_style_text_font(ap_ssid_textarea, &lv_font_montserrat_28, 0);
+    lv_textarea_set_placeholder_text(ap_ssid_textarea, "Enter AP SSID");
+    lv_textarea_set_one_line(ap_ssid_textarea, true);
+    lv_textarea_set_max_length(ap_ssid_textarea, MAX_SSID_LEN - 1);
+    lv_textarea_set_text(ap_ssid_textarea, ap_ssid);
+    lv_obj_add_event_cb(ap_ssid_textarea, textarea_event_cb, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(ap_ssid_textarea, textarea_event_cb, LV_EVENT_DEFOCUSED, NULL);
+    
+    // AP Password input
+    lv_obj_t *ap_pass_label = lv_label_create(ap_container);
+    lv_label_set_text(ap_pass_label, "AP Password:");
+    lv_obj_set_style_text_font(ap_pass_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(ap_pass_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_pos(ap_pass_label, 10, 95);
+    
+    ap_password_textarea = lv_textarea_create(ap_container);
+    lv_obj_set_size(ap_password_textarea, 720, 50);
+    lv_obj_set_pos(ap_password_textarea, 10, 125);
+    lv_obj_set_style_text_font(ap_password_textarea, &lv_font_montserrat_28, 0);
+    lv_textarea_set_placeholder_text(ap_password_textarea, "Enter AP password");
+    lv_textarea_set_one_line(ap_password_textarea, true);
+    lv_textarea_set_max_length(ap_password_textarea, MAX_PASS_LEN - 1);
+    lv_textarea_set_password_mode(ap_password_textarea, true);
+    lv_textarea_set_text(ap_password_textarea, ap_password);
+    lv_obj_add_event_cb(ap_password_textarea, textarea_event_cb, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(ap_password_textarea, textarea_event_cb, LV_EVENT_DEFOCUSED, NULL);
+    
+    // AP Start/Stop button
+    ap_start_btn = lv_btn_create(wifi_config_screen);
+    lv_obj_set_size(ap_start_btn, 300, 50);
+    lv_obj_set_pos(ap_start_btn, 250, 400);
+    lv_obj_set_style_bg_color(ap_start_btn, lv_color_hex(0x00AA00), 0);
+    lv_obj_add_event_cb(ap_start_btn, ap_start_btn_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ap_btn_label = lv_label_create(ap_start_btn);
+    lv_label_set_text(ap_btn_label, "Start AP");
+    lv_obj_set_style_text_font(ap_btn_label, &lv_font_montserrat_28, 0);
+    lv_obj_center(ap_btn_label);
     
     // Hide/show appropriate containers based on mode
     if (current_ui_mode == WIFI_UI_MODE_STA) {
         lv_obj_clear_flag(sta_container, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(ap_info, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ap_container, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ap_start_btn, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(sta_container, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(ap_info, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ap_container, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ap_start_btn, LV_OBJ_FLAG_HIDDEN);
         
-        // Start AP automatically
-        start_wifi_ap();
-        lv_label_set_text(status_label, "WiFi AP: Active");
-        lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
-        lv_label_set_text(ip_label, "IP: 192.168.4.1");
+        // Don't auto-start AP, just set UI to stopped state
+        lv_label_set_text(status_label, "WiFi AP: Stopped");
+        lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
     }
     
     ESP_LOGI(TAG, "WiFi config UI initialized");

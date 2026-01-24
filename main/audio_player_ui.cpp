@@ -1970,6 +1970,16 @@ void audio_player_play_current_or_first(void)
 
 void audio_player_show(void)
 {
+    // Reset UI if not playing/paused (playback was stopped)
+    if (!is_playing && !is_paused) {
+        if (time_label) {
+            lv_label_set_text(time_label, "00:00");
+        }
+        if (progress_bar) {
+            lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
+        }
+    }
+    
     // Check if auto-play is enabled and not already playing
     if (auto_play_enabled && !is_playing && !is_paused && wav_file_count > 0) {
         ESP_LOGI(TAG, "Auto-play enabled, starting first track");
