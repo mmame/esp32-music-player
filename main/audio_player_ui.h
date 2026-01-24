@@ -31,6 +31,10 @@ void audio_player_resume(void);
 void audio_player_next(void);
 void audio_player_previous(void);
 bool audio_player_is_playing(void);
+bool audio_player_is_paused(void);  // Check if playback is paused
+bool audio_player_has_files(void);  // Check if there are audio files available
+int audio_player_get_current_track(void);  // Get current track index
+void audio_player_play_current_or_first(void);  // Play current track or first if none selected
 void audio_player_show(void);
 
 #ifdef __cplusplus

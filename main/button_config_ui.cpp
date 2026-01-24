@@ -236,11 +236,19 @@ int button_config_get_button_index(void)
     for (int i = 0; i < NUM_BUTTONS; i++) {
         if (button_configs[i].configured) {
             if (adc_value >= button_configs[i].adc_min && adc_value <= button_configs[i].adc_max) {
+                ESP_LOGI(TAG, "Button %d detected! ADC=%d (range: %d-%d)", i, adc_value, button_configs[i].adc_min, button_configs[i].adc_max);
                 return i;
             }
         }
     }
 
+    // If we get here, ADC value didn't match any button
+    static uint32_t last_log_time = 0;
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (now - last_log_time > 1000) {  // Log once per second to avoid spam
+        ESP_LOGW(TAG, "No button match for ADC=%d", adc_value);
+        last_log_time = now;
+    }
     return -1; // No matching button
 }
 
@@ -344,8 +352,22 @@ static void button_scan_task(void *arg)
         if (learning_button_index >= 0) {
             // Wait for a button press (ADC value above threshold)
             if (adc_value > 300) {
-                // Assign this value to the learning button
-                if (assign_button_value(learning_button_index, adc_value)) {
+                // Wait for the value to settle (30ms)
+                vTaskDelay(pdMS_TO_TICKS(30));
+                
+                // Take multiple samples to get a settled average value
+                uint32_t settled_sum = 0;
+                int settled_samples = 5;
+                for (int i = 0; i < settled_samples; i++) {
+                    settled_sum += button_config_get_adc_value();
+                    vTaskDelay(pdMS_TO_TICKS(5));
+                }
+                uint16_t settled_value = settled_sum / settled_samples;
+                
+                ESP_LOGI(TAG, "Button press detected: initial=%d, settled=%d", adc_value, settled_value);
+                
+                // Assign the settled value to the learning button
+                if (assign_button_value(learning_button_index, settled_value)) {
                     // Learning successful - update button color
                     lv_lock();
                     if (learn_buttons[learning_button_index] && lv_obj_is_valid(learn_buttons[learning_button_index])) {
@@ -384,33 +406,77 @@ static void button_scan_task(void *arg)
                 last_button_pressed = button_index;
                 last_button_time = current_time;
                 
+                ESP_LOGI(TAG, "Button action triggered: button %d (%s)", button_index, button_configs[button_index].action_name);
+                
                 switch (button_index) {
                     case 0:
                         // Play
-                        audio_player_resume();
+                        ESP_LOGI(TAG, "Action: Play");
+                        if (!audio_player_has_files()) {
+                            ESP_LOGW(TAG, "No audio files available");
+                        } else {
+                            int current = audio_player_get_current_track();
+                            bool playing = audio_player_is_playing();
+                            bool paused = audio_player_is_paused();
+                            ESP_LOGI(TAG, "Current track: %d, is_playing: %d, is_paused: %d", current, playing, paused);
+                            
+                            if (paused) {
+                                // Paused - just resume
+                                ESP_LOGI(TAG, "Resuming paused playback");
+                                audio_player_resume();
+                            } else if (!playing) {
+                                // Nothing is playing - start playing
+                                ESP_LOGI(TAG, "Starting playback");
+                                audio_player_play_current_or_first();
+                            } else {
+                                ESP_LOGI(TAG, "Already playing");
+                            }
+                        }
                         break;
                     case 1:
                         // Pause
+                        ESP_LOGI(TAG, "Action: Pause");
                         audio_player_pause();
                         break;
                     case 2:
                         // Play/Pause toggle
-                        if (audio_player_is_playing()) {
-                            audio_player_pause();
+                        ESP_LOGI(TAG, "Action: Play/Pause toggle");
+                        if (!audio_player_has_files()) {
+                            ESP_LOGW(TAG, "No audio files available");
                         } else {
-                            audio_player_resume();
+                            int current = audio_player_get_current_track();
+                            bool playing = audio_player_is_playing();
+                            bool paused = audio_player_is_paused();
+                            ESP_LOGI(TAG, "Current track: %d, is_playing: %d, is_paused: %d", current, playing, paused);
+                            
+                            if (playing) {
+                                // Currently playing - pause it
+                                ESP_LOGI(TAG, "Currently playing, pausing");
+                                audio_player_pause();
+                            } else if (paused) {
+                                // Paused - resume it
+                                ESP_LOGI(TAG, "Resuming paused playback");
+                                audio_player_resume();
+                            } else {
+                                // Nothing is playing - start playing
+                                ESP_LOGI(TAG, "Starting playback");
+                                audio_player_play_current_or_first();
+                            }
                         }
                         break;
                     case 3:
                         // Previous track
+                        ESP_LOGI(TAG, "Action: Previous");
                         audio_player_previous();
                         break;
                     case 4:
                         // Next track
+                        ESP_LOGI(TAG, "Action: Next");
                         audio_player_next();
                         break;
                     case 5:
                         // Stop
+                        ESP_LOGI(TAG, "Action: Stop");
                         audio_player_stop();
                         break;
                 }

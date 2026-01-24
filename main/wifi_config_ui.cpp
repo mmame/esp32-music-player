@@ -43,6 +43,7 @@ static lv_obj_t *ssid_textarea = NULL;
 static lv_obj_t *password_textarea = NULL;
 static lv_obj_t *connect_btn = NULL;
 static lv_obj_t *keyboard = NULL;
+static lv_obj_t *ap_info = NULL;
 
 // WiFi state
 static wifi_ui_mode_t current_ui_mode = WIFI_UI_MODE_AP;
@@ -52,6 +53,11 @@ static char sta_password[MAX_PASS_LEN] = "";
 static bool wifi_initialized = false;
 static bool wifi_enabled = false;
 static httpd_handle_t server = NULL;
+static esp_netif_t *sta_netif = NULL;
+static esp_netif_t *ap_netif = NULL;
+static char got_ip_str[100] = "";
+static bool ip_update_pending = false;
+static lv_timer_t *ip_update_timer = NULL;
 
 // Forward declarations
 static void start_wifi_ap(void);
@@ -782,6 +788,23 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
+// Timer callback to update UI from LVGL task
+static void ip_update_timer_cb(lv_timer_t *timer)
+{
+    if (ip_update_pending) {
+        lv_label_set_text(status_label, "WiFi STA: Connected");
+        lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
+        lv_label_set_text(ip_label, got_ip_str);
+        ip_update_pending = false;
+    }
+    
+    // Delete the timer after execution
+    if (ip_update_timer) {
+        lv_timer_delete(ip_update_timer);
+        ip_update_timer = NULL;
+    }
+}
+
 static void ip_event_handler(void* arg, esp_event_base_t event_base,
                              int32_t event_id, void* event_data)
 {
@@ -789,15 +812,20 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         
-        char ip_str[100];
-        snprintf(ip_str, sizeof(ip_str), "WiFi STA: Connected");
-        lv_label_set_text(status_label, ip_str);
-        lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
-        
-        char ip_info[100];
-        snprintf(ip_info, sizeof(ip_info), "IP: " IPSTR, 
+        // Store IP info and schedule UI update in LVGL task
+        snprintf(got_ip_str, sizeof(got_ip_str), "IP: " IPSTR, 
                  IP2STR(&event->ip_info.ip));
-        lv_label_set_text(ip_label, ip_info);
+        ip_update_pending = true;
+        
+        // Create one-shot timer to update UI from LVGL task
+        if (!ip_update_timer) {
+            ip_update_timer = lv_timer_create(ip_update_timer_cb, 100, NULL);
+            lv_timer_set_repeat_count(ip_update_timer, 1);
+        }
+        
+        // Force display refresh to fix any corruption from WiFi init
+        // This is safe to call from event handler as it's hardware-level
+        sunton_esp32s3_lcd_force_refresh();
         
         // Start web server
         start_webserver();
@@ -848,10 +876,10 @@ static void save_wifi_config(void)
 static void start_wifi_ap(void)
 {
     // Network infrastructure (NVS, netif, event loop) is already initialized in main.c
-    // Just mark as initialized and create the AP interface
-    wifi_initialized = true;
-    
-    esp_netif_create_default_wifi_ap();
+    if (!wifi_initialized) {
+        wifi_initialized = true;
+        ap_netif = esp_netif_create_default_wifi_ap();
+    }
     
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     // Reduce WiFi memory usage to avoid PSRAM conflicts with LCD framebuffer
@@ -908,7 +936,14 @@ static void stop_wifi_ap(void)
     esp_wifi_stop();
     esp_wifi_deinit();
     
+    // Destroy the network interface to allow recreation
+    if (ap_netif) {
+        esp_netif_destroy(ap_netif);
+        ap_netif = NULL;
+    }
+    
     wifi_enabled = false;
+    wifi_initialized = false;
     ESP_LOGI(TAG, "WiFi AP stopped");
 }
 
@@ -916,7 +951,7 @@ static void start_wifi_sta(void)
 {
     if (!wifi_initialized) {
         wifi_initialized = true;
-        esp_netif_create_default_wifi_sta();
+        sta_netif = esp_netif_create_default_wifi_sta();
         
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         cfg.static_rx_buf_num = 4;
@@ -956,6 +991,10 @@ static void start_wifi_sta(void)
     
     ESP_LOGI(TAG, "WiFi STA started. Connecting to SSID:%s", sta_ssid);
     
+    // Force display refresh after WiFi start to fix any DMA/display corruption
+    vTaskDelay(pdMS_TO_TICKS(100));  // Give WiFi time to initialize
+    sunton_esp32s3_lcd_force_refresh();
+    
     // Update UI
     lv_label_set_text(status_label, "WiFi STA: Connecting...");
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xFFFF00), 0);
@@ -969,6 +1008,12 @@ static void stop_wifi_sta(void)
     
     esp_wifi_stop();
     esp_wifi_deinit();
+    
+    // Destroy the network interface to allow recreation
+    if (sta_netif) {
+        esp_netif_destroy(sta_netif);
+        sta_netif = NULL;
+    }
     
     wifi_enabled = false;
     wifi_initialized = false;
@@ -994,22 +1039,34 @@ static void mode_dropdown_event_cb(lv_event_t *e)
             current_ui_mode = WIFI_UI_MODE_AP;
             current_wifi_mode = WIFI_MODE_AP;
             lv_obj_add_flag(sta_container, LV_OBJ_FLAG_HIDDEN);
+            if (ap_info) lv_obj_clear_flag(ap_info, LV_OBJ_FLAG_HIDDEN);
             
             // Stop STA if running and start AP
             if (wifi_enabled) {
                 stop_wifi_sta();
                 start_wifi_ap();
             }
+            
+            // Update UI for AP mode
+            lv_label_set_text(status_label, "WiFi AP: Active");
+            lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
+            lv_label_set_text(ip_label, "IP: 192.168.4.1");
         } else {
             // STA mode
             current_ui_mode = WIFI_UI_MODE_STA;
             current_wifi_mode = WIFI_MODE_STA;
             lv_obj_clear_flag(sta_container, LV_OBJ_FLAG_HIDDEN);
+            if (ap_info) lv_obj_add_flag(ap_info, LV_OBJ_FLAG_HIDDEN);
             
             // Stop AP if running
             if (wifi_enabled) {
                 stop_wifi_ap();
             }
+            
+            // Update UI for STA mode
+            lv_label_set_text(status_label, "WiFi STA: Disconnected");
+            lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+            lv_label_set_text(ip_label, "Not connected");
         }
         
         save_wifi_config();
@@ -1209,7 +1266,7 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     
     // AP info (shown when in AP mode)
-    lv_obj_t *ap_info = lv_label_create(wifi_config_screen);
+    ap_info = lv_label_create(wifi_config_screen);
     lv_label_set_text(ap_info, 
         "AP Mode Info:\n"
         "SSID: " WIFI_AP_SSID "\n"

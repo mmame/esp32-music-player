@@ -792,17 +792,23 @@ static void audio_playback_task(void *arg)
         memset(mp3_decoder, 0, sizeof(mp3dec_t));  // Zero to ensure proper mapping
         ESP_LOGI(TAG, "MP3 decoder allocated at %p (size=%d)", mp3_decoder, sizeof(mp3dec_t));
         
-        // Allocate PCM buffer with extra safety margin
+        // Allocate PCM buffer from SPIRAM (WiFi uses too much internal RAM)
         size_t pcm_size = MINIMP3_MAX_SAMPLES_PER_FRAME * 2 * sizeof(int16_t) + 64;  // +64 bytes safety
-        pcm_buffer = (int16_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_INTERNAL);
+        pcm_buffer = (int16_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_SPIRAM);
         if (!pcm_buffer) {
-            ESP_LOGE(TAG, "Failed to allocate PCM buffer");
-            free(mp3_decoder);
-            free(mp3_buffer);
-            free(buffer);
-            esp_task_wdt_delete(NULL);
-            vTaskDelete(NULL);
-            return;
+            ESP_LOGE(TAG, "Failed to allocate PCM buffer from SPIRAM");
+            // Try internal RAM as fallback
+            pcm_buffer = (int16_t *)heap_caps_malloc(pcm_size, MALLOC_CAP_INTERNAL);
+            if (!pcm_buffer) {
+                ESP_LOGE(TAG, "Failed to allocate PCM buffer from internal RAM");
+                free(mp3_decoder);
+                free(mp3_buffer);
+                free(buffer);
+                esp_task_wdt_delete(NULL);
+                audio_task_handle = NULL;
+                vTaskDelete(NULL);
+                return;
+            }
         }
         memset(pcm_buffer, 0, pcm_size);  // Zero to ensure proper mapping
         ESP_LOGI(TAG, "PCM buffer allocated at %p (size=%d)", pcm_buffer, pcm_size);
@@ -843,6 +849,8 @@ static void audio_playback_task(void *arg)
     
     while (is_playing) {
         if (is_paused) {
+            // Reset watchdog while paused to prevent timeout
+            esp_task_wdt_reset();
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
@@ -1814,16 +1822,24 @@ void audio_player_stop(void)
     is_paused = false;
     
     if (audio_task_handle) {
+        TaskHandle_t task_copy = audio_task_handle;
         // Wait for task to actually finish (it will set handle to NULL)
         int timeout = 100;  // 100 * 20ms = 2 seconds max
         while (audio_task_handle != NULL && timeout > 0) {
             vTaskDelay(pdMS_TO_TICKS(20));
             timeout--;
         }
-        if (audio_task_handle != NULL) {
-            ESP_LOGW(TAG, "Audio task did not exit in time, forcing termination");
-            vTaskDelete(audio_task_handle);
-            audio_task_handle = NULL;
+        if (audio_task_handle != NULL && task_copy != NULL) {
+            // Task didn't exit - check if it's still valid before forcing deletion
+            eTaskState state = eTaskGetState(task_copy);
+            if (state != eDeleted && state != eInvalid) {
+                ESP_LOGW(TAG, "Audio task did not exit in time, forcing termination (state=%d)", state);
+                audio_task_handle = NULL;  // Clear handle first to prevent re-entry
+                vTaskDelete(task_copy);
+            } else {
+                ESP_LOGI(TAG, "Audio task already deleted or invalid");
+                audio_task_handle = NULL;
+            }
         }
     }
     
@@ -1921,6 +1937,35 @@ void audio_player_previous(void)
 bool audio_player_is_playing(void)
 {
     return is_playing && !is_paused;
+}
+
+bool audio_player_is_paused(void)
+{
+    return is_paused;
+}
+
+bool audio_player_has_files(void)
+{
+    return wav_file_count > 0;
+}
+
+int audio_player_get_current_track(void)
+{
+    return current_track;
+}
+
+void audio_player_play_current_or_first(void)
+{
+    if (wav_file_count == 0) {
+        ESP_LOGW(TAG, "No audio files to play");
+        return;
+    }
+    
+    // If no track selected, start with first track
+    int track_to_play = (current_track < 0) ? 0 : current_track;
+    
+    ESP_LOGI(TAG, "Playing track %d: %s", track_to_play, audio_files[track_to_play].name);
+    audio_player_play(audio_files[track_to_play].name);
 }
 
 void audio_player_show(void)

@@ -41,7 +41,16 @@
 
 #define LVGL_TICK_PERIOD_MS                     2
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void sunton_esp32s3_backlight_init(void);
 lv_display_t *sunton_esp32s3_lcd_init(void);
+void sunton_esp32s3_lcd_force_refresh(void);
 i2c_master_bus_handle_t sunton_esp32s3_i2c_master(void);
 void sunton_esp32s3_touch_init(i2c_master_bus_handle_t i2c_master);
+
+#ifdef __cplusplus
+}
+#endif

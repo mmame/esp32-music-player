@@ -11,6 +11,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_lcd_touch_gt911.h"
@@ -66,6 +67,8 @@ const esp_lcd_rgb_panel_config_t panel_config = {
 static TaskHandle_t lvgl_port_task_handle = NULL;
 static esp_timer_handle_t lvgl_tick_timer_handle = NULL;
 static lv_indev_t * indev_touchpad = NULL;
+static lv_display_t * global_disp = NULL;
+static esp_lcd_panel_handle_t global_panel_handle = NULL;
 
 void sunton_esp32s3_backlight_init(void)
 {
@@ -160,6 +163,10 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     lv_display_t * disp = lv_display_create(SUNTON_ESP32_LCD_WIDTH, SUNTON_ESP32_LCD_HEIGHT);
     lv_display_set_user_data(disp, panel_handle);
     lv_display_set_flush_cb(disp, lvgl_disp_flush);
+    
+    // Save global handles for refresh function
+    global_disp = disp;
+    global_panel_handle = panel_handle;
 
     buffer_size = SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t); // 2 = 16bit color data
 
@@ -192,6 +199,24 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     xTaskCreate(lvgl_port_task, "lvgl_port_task", (CONFIG_LVGL_TASK_STACK_SIZE * 1024), NULL, CONFIG_LVGL_TASK_PRIORITY, &lvgl_port_task_handle);
 
     return disp;
+}
+
+void sunton_esp32s3_lcd_force_refresh(void)
+{
+    if (global_panel_handle != NULL) {
+        ESP_LOGI("LCD", "Resetting LCD panel to fix frame buffer offset");
+        
+        // Reset the LCD panel hardware to fix any DMA/frame buffer offset issues
+        // This resets the hardware state without needing LVGL coordination
+        esp_lcd_panel_reset(global_panel_handle);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        
+        // Re-initialize the panel (resets frame buffer pointer)
+        esp_lcd_panel_init(global_panel_handle);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        
+        ESP_LOGI("LCD", "LCD panel reset complete");
+    }
 }
 
 i2c_master_bus_handle_t sunton_esp32s3_i2c_master(void)
