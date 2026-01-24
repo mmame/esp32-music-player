@@ -27,6 +27,7 @@ static const char *TAG = "WiFiConfig";
 #define NVS_NAMESPACE "wifi_config"
 #define MAX_SSID_LEN 32
 #define MAX_PASS_LEN 64
+#define MAX_STA_RETRY 5
 
 // WiFi mode selection
 typedef enum {
@@ -64,17 +65,38 @@ static bool ip_update_pending = false;
 static lv_timer_t *ip_update_timer = NULL;
 static bool lcd_refresh_pending = false;
 static lv_timer_t *lcd_refresh_timer = NULL;
+static SemaphoreHandle_t lcd_refresh_mutex = NULL;
 static esp_event_handler_instance_t wifi_event_instance = NULL;
 static esp_event_handler_instance_t ip_event_instance = NULL;
 static bool event_handlers_registered = false;
+static int sta_retry_count = 0;
+static bool sta_connection_failed = false;
 
 // Forward declarations
 static void lcd_refresh_timer_cb(lv_timer_t *timer);
 static void ip_update_timer_cb(lv_timer_t *timer);
+static void sta_failure_update_timer_cb(lv_timer_t *timer);
+static void schedule_lcd_refresh(void);
 static void start_wifi_ap(void);
 static void stop_wifi_ap(void);
 static void start_wifi_sta(void);
 static void stop_wifi_sta(void);
+
+// Helper function to schedule LCD refresh via timer (always 150ms delay)
+static void schedule_lcd_refresh(void)
+{
+    if (lcd_refresh_mutex && xSemaphoreTake(lcd_refresh_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+        if(!lcd_refresh_pending)
+        {
+            lcd_refresh_pending = true;
+            if (!lcd_refresh_timer) {
+                lcd_refresh_timer = lv_timer_create(lcd_refresh_timer_cb, 300, NULL);
+                lv_timer_set_repeat_count(lcd_refresh_timer, 1);
+            }
+        }
+        xSemaphoreGive(lcd_refresh_mutex);
+    }
+}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -89,37 +111,60 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "WiFi AP started, starting web server...");
         
         // Schedule LCD refresh via timer (safer than calling from event handler)
-        lcd_refresh_pending = true;
-        if (!lcd_refresh_timer) {
-            lcd_refresh_timer = lv_timer_create(lcd_refresh_timer_cb, 150, NULL);
-            lv_timer_set_repeat_count(lcd_refresh_timer, 1);
-        }
+        schedule_lcd_refresh();
         
         start_webserver();
     } else if (event_id == WIFI_EVENT_STA_START) {
+        sta_retry_count = 0;
         esp_wifi_connect();
         ESP_LOGI(TAG, "STA started, connecting...");
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        esp_wifi_connect();
-        ESP_LOGI(TAG, "STA disconnected, retrying...");
+        // Schedule LCD refresh to prevent black screen
+        schedule_lcd_refresh();
+        
+        if (sta_retry_count < MAX_STA_RETRY) {
+            esp_wifi_connect();
+            sta_retry_count++;
+            ESP_LOGI(TAG, "STA disconnected, retry %d/%d", sta_retry_count, MAX_STA_RETRY);
+        } else {
+            ESP_LOGE(TAG, "STA connection failed after %d attempts", MAX_STA_RETRY);
+            sta_connection_failed = true;
+            
+            // Stop WiFi to prevent interference with LCD
+            esp_wifi_stop();
+            esp_wifi_deinit();
+            
+            // Destroy the network interface
+            if (sta_netif) {
+                esp_netif_destroy(sta_netif);
+                sta_netif = NULL;
+            }
+            
+            wifi_enabled = false;
+            wifi_initialized = false;
+            event_handlers_registered = false;
+            
+            // Update UI via timer
+            lv_timer_t *failure_timer = lv_timer_create(sta_failure_update_timer_cb, 100, NULL);
+            lv_timer_set_repeat_count(failure_timer, 1);
+        }
     }
 }
 
 // Timer callback to refresh LCD from LVGL task
 static void lcd_refresh_timer_cb(lv_timer_t *timer)
 {
-    if (lcd_refresh_pending) {
-        sunton_esp32s3_lcd_force_refresh();
-        lcd_refresh_pending = false;
-        
-        // Force LVGL to redraw the entire screen after LCD refresh
-        lv_obj_invalidate(lv_screen_active());
-    }
-    
-    // Delete the timer after execution
-    if (lcd_refresh_timer) {
-        lv_timer_delete(lcd_refresh_timer);
-        lcd_refresh_timer = NULL;
+    if (lcd_refresh_mutex && xSemaphoreTake(lcd_refresh_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+        if (lcd_refresh_pending) {
+            sunton_esp32s3_lcd_force_refresh();
+            lcd_refresh_pending = false;
+        }
+        // Delete the timer after execution
+        if (lcd_refresh_timer) {
+            lv_timer_delete(lcd_refresh_timer);
+            lcd_refresh_timer = NULL;
+        }
+        xSemaphoreGive(lcd_refresh_mutex);
     }
 }
 
@@ -144,12 +189,32 @@ static void ip_update_timer_cb(lv_timer_t *timer)
     }
 }
 
+// Timer callback to update UI on connection failure
+static void sta_failure_update_timer_cb(lv_timer_t *timer)
+{
+    if (sta_connection_failed) {
+        lv_label_set_text(status_label, "WiFi STA: Connection failed (check SSID/password)");
+        lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+        if (connect_btn) {
+            lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Connect");
+        }
+        sta_connection_failed = false;
+    }
+    
+    // Delete the timer
+    lv_timer_delete(timer);
+}
+
 static void ip_event_handler(void* arg, esp_event_base_t event_base,
                              int32_t event_id, void* event_data)
 {
     if (event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        
+        // Reset retry counter on successful connection
+        sta_retry_count = 0;
+        sta_connection_failed = false;
         
         // Store IP info and schedule UI update in LVGL task
         snprintf(got_ip_str, sizeof(got_ip_str), "IP: " IPSTR, 
@@ -163,11 +228,7 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
         }
         
         // Schedule LCD refresh via timer (safer than calling from event handler)
-        lcd_refresh_pending = true;
-        if (!lcd_refresh_timer) {
-            lcd_refresh_timer = lv_timer_create(lcd_refresh_timer_cb, 150, NULL);
-            lv_timer_set_repeat_count(lcd_refresh_timer, 1);
-        }
+        schedule_lcd_refresh();
         
         // Start web server
         start_webserver();
@@ -283,6 +344,9 @@ static void start_wifi_ap(void)
     ESP_LOGI(TAG, "WiFi AP starting. SSID:%s password:%s channel:%d",
              ap_ssid, ap_password, WIFI_AP_CHANNEL);
     
+    // Schedule LCD refresh via timer to fix any DMA/display corruption
+    schedule_lcd_refresh();
+    
     // Webserver will be started by WIFI_EVENT_AP_START event
     
     wifi_enabled = true;
@@ -304,6 +368,11 @@ static void stop_wifi_ap(void)
     wifi_enabled = false;
     wifi_initialized = false;
     event_handlers_registered = false;
+    
+    // Schedule LCD refresh to prevent black screen after WiFi stop
+    vTaskDelay(pdMS_TO_TICKS(100));  // Give WiFi time to fully stop
+    schedule_lcd_refresh();
+    
     ESP_LOGI(TAG, "WiFi AP stopped");
 }
 
@@ -355,9 +424,8 @@ static void start_wifi_sta(void)
     
     ESP_LOGI(TAG, "WiFi STA started. Connecting to SSID:%s", sta_ssid);
     
-    // Force display refresh after WiFi start to fix any DMA/display corruption
-    vTaskDelay(pdMS_TO_TICKS(100));  // Give WiFi time to initialize
-    sunton_esp32s3_lcd_force_refresh();
+    // Schedule LCD refresh via timer to fix any DMA/display corruption
+    schedule_lcd_refresh();
     
     // Update UI
     lv_label_set_text(status_label, "WiFi STA: Connecting...");
@@ -382,6 +450,10 @@ static void stop_wifi_sta(void)
     wifi_enabled = false;
     wifi_initialized = false;
     event_handlers_registered = false;
+    
+    // Schedule LCD refresh to prevent black screen after WiFi stop
+    vTaskDelay(pdMS_TO_TICKS(100));  // Give WiFi time to fully stop
+    schedule_lcd_refresh();
     
     // Update UI
     lv_label_set_text(status_label, "WiFi STA: Disconnected");
@@ -411,10 +483,11 @@ static void mode_dropdown_event_cb(lv_event_t *e)
                 stop_wifi_sta();
             }
             
-            // Update UI for AP mode
+            // Update UI for AP mode - ensure button shows correct state
             lv_label_set_text(status_label, "WiFi AP: Stopped");
             lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
             if (ap_start_btn) lv_label_set_text(lv_obj_get_child(ap_start_btn, 0), "Start AP");
+            if (connect_btn) lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Connect");
         } else {
             // STA mode
             current_ui_mode = WIFI_UI_MODE_STA;
@@ -428,12 +501,35 @@ static void mode_dropdown_event_cb(lv_event_t *e)
                 stop_wifi_ap();
             }
             
-            // Update UI for STA mode
+            // Update UI for STA mode - ensure button shows correct state
             lv_label_set_text(status_label, "WiFi STA: Disconnected");
             lv_obj_set_style_text_color(status_label, lv_color_hex(0xFF0000), 0);
+            if (connect_btn) lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Connect");
+            if (ap_start_btn) lv_label_set_text(lv_obj_get_child(ap_start_btn, 0), "Start AP");
         }
         
         save_wifi_config();
+    }
+}
+
+static void keyboard_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    
+    if (code == LV_EVENT_READY) {
+        // User pressed OK/check button, hide keyboard
+        if (keyboard) {
+            lv_keyboard_set_textarea(keyboard, NULL);
+            lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+            
+            // Restore original position of containers
+            if (sta_container) {
+                lv_obj_set_pos(sta_container, 20, 200);
+            }
+            if (ap_container) {
+                lv_obj_set_pos(ap_container, 20, 150);
+            }
+        }
     }
 }
 
@@ -448,9 +544,12 @@ static void textarea_event_cb(lv_event_t *e)
             lv_keyboard_set_textarea(keyboard, textarea);
             lv_obj_clear_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
             
-            // Move the STA container to the top so textarea is visible above keyboard
-            if (sta_container) {
+            // Move the container to the top so textarea is visible above keyboard
+            if (sta_container && !lv_obj_has_flag(sta_container, LV_OBJ_FLAG_HIDDEN)) {
                 lv_obj_set_pos(sta_container, 20, 10);
+            }
+            if (ap_container && !lv_obj_has_flag(ap_container, LV_OBJ_FLAG_HIDDEN)) {
+                lv_obj_set_pos(ap_container, 20, 10);
             }
         }
     } else if (code == LV_EVENT_DEFOCUSED) {
@@ -459,9 +558,12 @@ static void textarea_event_cb(lv_event_t *e)
             lv_keyboard_set_textarea(keyboard, NULL);
             lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
             
-            // Restore original position of STA container
+            // Restore original position of containers
             if (sta_container) {
                 lv_obj_set_pos(sta_container, 20, 200);
+            }
+            if (ap_container) {
+                lv_obj_set_pos(ap_container, 20, 150);
             }
         }
     }
@@ -524,6 +626,10 @@ static void connect_btn_event_cb(lv_event_t *e)
             strncpy(sta_password, password, MAX_PASS_LEN - 1);
             save_wifi_config();
             
+            // Reset retry counter
+            sta_retry_count = 0;
+            sta_connection_failed = false;
+            
             // Start connection
             start_wifi_sta();
             lv_label_set_text(lv_obj_get_child(connect_btn, 0), "Disconnect");
@@ -556,6 +662,11 @@ static void wifi_config_gesture_event_cb(lv_event_t *e)
 
 void wifi_config_ui_init(lv_obj_t *parent)
 {
+    // Create mutex for LCD refresh timer protection
+    if (!lcd_refresh_mutex) {
+        lcd_refresh_mutex = xSemaphoreCreateMutex();
+    }
+    
     // Load saved WiFi config
     load_wifi_config();
     
@@ -661,6 +772,7 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_set_size(keyboard, SUNTON_ESP32_LCD_WIDTH, SUNTON_ESP32_LCD_HEIGHT / 2);
     lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(keyboard, keyboard_event_cb, LV_EVENT_READY, NULL);
     
     // AP configuration container (shown when in AP mode)
     ap_container = lv_obj_create(wifi_config_screen);

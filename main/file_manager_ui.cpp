@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <string.h>
+#include "ff.h"
 
 static const char *TAG = "FileManager";
 
@@ -29,6 +30,7 @@ static char current_path[MAX_PATH_LEN] = "";
 static lv_obj_t *file_manager_screen = NULL;
 static lv_obj_t *file_list = NULL;
 static lv_obj_t *status_label = NULL;
+static lv_obj_t *disk_space_label = NULL;
 static lv_obj_t *refresh_btn = NULL;
 static lv_obj_t *context_menu = NULL;
 static lv_obj_t *rename_dialog = NULL;
@@ -537,6 +539,42 @@ static void scan_files(void)
     ESP_LOGI(TAG, "Found %d files/folders in %s", file_count, scan_path);
 }
 
+static void update_disk_space_label(void)
+{
+    if (!disk_space_label || !sd_mounted) {
+        return;
+    }
+    
+    FATFS *fs;
+    DWORD free_clusters;
+    
+    // Get free clusters using FatFs API
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
+    if (res == FR_OK) {
+        // Calculate total and free space in bytes
+        uint64_t total_sectors = (fs->n_fatent - 2) * fs->csize;
+        uint64_t free_sectors = free_clusters * fs->csize;
+        
+        // Convert to bytes (sector size is 512 bytes on SD cards)
+        uint64_t total_bytes = total_sectors * 512;
+        uint64_t free_bytes = free_sectors * 512;
+        uint64_t used_bytes = total_bytes - free_bytes;
+        
+        // Convert to MB for display
+        uint32_t total_mb = total_bytes / (1024 * 1024);
+        uint32_t free_mb = free_bytes / (1024 * 1024);
+        uint32_t used_mb = used_bytes / (1024 * 1024);
+        
+        char space_text[100];
+        snprintf(space_text, sizeof(space_text), "Used: %lu MB / %lu MB (Free: %lu MB)", 
+                 used_mb, total_mb, free_mb);
+        
+        lv_label_set_text(disk_space_label, space_text);
+    } else {
+        lv_label_set_text(disk_space_label, "Disk space: Unknown");
+    }
+}
+
 static void update_file_list(void)
 {
     lv_obj_clean(file_list);
@@ -637,6 +675,7 @@ void file_manager_refresh(void)
 {
     scan_files();
     update_file_list();
+    update_disk_space_label();
 }
 
 static void refresh_btn_event_cb(lv_event_t *e)
@@ -764,11 +803,18 @@ void file_manager_ui_init(lv_obj_t *parent)
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
     lv_obj_align(status_label, LV_ALIGN_TOP_MID, 0, 70);
+    
+    // Disk space label
+    disk_space_label = lv_label_create(file_manager_screen);
+    lv_label_set_text(disk_space_label, "");
+    lv_obj_set_style_text_font(disk_space_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(disk_space_label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(disk_space_label, LV_ALIGN_TOP_MID, 0, 100);
 
     // File list container (scrollable)
     file_list = lv_obj_create(file_manager_screen);
-    lv_obj_set_size(file_list, SUNTON_ESP32_LCD_WIDTH - 40, 250);
-    lv_obj_align(file_list, LV_ALIGN_TOP_MID, 0, 120);
+    lv_obj_set_size(file_list, SUNTON_ESP32_LCD_WIDTH - 40, 230);
+    lv_obj_align(file_list, LV_ALIGN_TOP_MID, 0, 130);
     lv_obj_set_style_bg_color(file_list, lv_color_hex(0x111111), 0);
     lv_obj_set_flex_flow(file_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(file_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);

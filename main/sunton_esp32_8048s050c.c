@@ -10,6 +10,7 @@
  */
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_lcd_panel_ops.h"
@@ -21,6 +22,11 @@
 #include "lvgl.h"
 
 #include "sunton_esp32_8048s050c.h"
+
+// Mutex to protect LCD reset operations
+static SemaphoreHandle_t lcd_reset_mutex = NULL;
+static int64_t last_reset_time = 0;
+#define MIN_RESET_INTERVAL_MS 500  // Minimum 500ms between resets
 
 const esp_lcd_rgb_panel_config_t panel_config = {
     .data_width = 16,
@@ -157,6 +163,11 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+    
+    // Create mutex for LCD reset protection
+    if (lcd_reset_mutex == NULL) {
+        lcd_reset_mutex = xSemaphoreCreateMutex();
+    }
 
     // assign callback and handle
     lv_init();
@@ -203,20 +214,39 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
 
 void sunton_esp32s3_lcd_force_refresh(void)
 {
-    if (global_panel_handle != NULL) {
+    if (global_panel_handle == NULL || lcd_reset_mutex == NULL) {
+        return;
+    }
+    
+    // Check if minimum interval has passed since last reset
+    int64_t current_time = esp_timer_get_time() / 1000;  // Convert to ms
+    if ((current_time - last_reset_time) < MIN_RESET_INTERVAL_MS) {
+        ESP_LOGW("LCD", "Skipping LCD reset - too soon (only %lld ms since last reset)", 
+                 current_time - last_reset_time);
+        return;
+    }
+    
+    // Try to acquire mutex (non-blocking to avoid blocking other threads)
         ESP_LOGI("LCD", "Resetting LCD panel to fix frame buffer offset");
         
+        // Lock LVGL to prevent drawing operations during reset
+        lv_lock();
+        
         // Reset the LCD panel hardware to fix any DMA/frame buffer offset issues
-        // This resets the hardware state without needing LVGL coordination
         esp_lcd_panel_reset(global_panel_handle);
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(50));
         
         // Re-initialize the panel (resets frame buffer pointer)
         esp_lcd_panel_init(global_panel_handle);
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(50));
+        // Unlock LVGL and invalidate screen to trigger redraw
+        lv_obj_invalidate(lv_screen_active());
+        lv_unlock();
+        
+        // Update last reset time
+        last_reset_time = current_time;
         
         ESP_LOGI("LCD", "LCD panel reset complete");
-    }
 }
 
 i2c_master_bus_handle_t sunton_esp32s3_i2c_master(void)

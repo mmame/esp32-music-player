@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <cctype>
+#include "ff.h"
 
 static const char *TAG = "Webserver";
 
@@ -39,8 +40,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".file-name { flex-grow: 1; cursor: pointer; }"
         ".folder { color: #00aaff; font-weight: bold; }"
         ".file { color: #cccccc; }"
-        ".file-size { color: #888; margin: 0 10px; }"
-        ".btn-delete { background: #aa0000; color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 3px; margin-left: 5px; }"
+        ".file-size { color: #888; margin: 0 10px; }"        ".btn-download { background: transparent; color: white; border: 1px solid #555; padding: 5px 10px; cursor: pointer; border-radius: 3px; margin-left: 5px; font-size: 20px; line-height: 1; }\n"
+        ".btn-download:hover { background: #3a3a3a; border-color: #00ff00; }\n"        ".btn-delete { background: #aa0000; color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 3px; margin-left: 5px; }"
         ".btn-delete:hover { background: #cc0000; }"
         ".btn-rename { background: #0066aa; color: white; border: none; padding: 5px 15px; cursor: pointer; border-radius: 3px; margin-left: 5px; }"
         ".btn-rename:hover { background: #0088cc; }"
@@ -61,8 +62,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "</head><body>"
         "<div class='container'>"
         "<h1>ESP32 File Manager</h1>"
-        "<div class='current-path' id='currentPath'>/sdcard</div>"
-        "<button class='btn-back' id='btnBack' style='display:none;' onclick='goUp()'>⬆ Up</button>"
+        "<div class='current-path' id='currentPath'>/sdcard</div>"        "<div class='current-path' id='diskSpace' style='font-size: 14px; color: #999; margin-top: 5px;'>Loading...</div>\n"        "<button class='btn-back' id='btnBack' style='display:none;' onclick='goUp()'>⬆ Up</button>"
         "<div class='progress-container' id='progressContainer'>"
         "<div class='upload-status' id='uploadStatus'>Uploading...</div>"
         "<div class='upload-bytes' id='uploadBytes'></div>"
@@ -193,6 +193,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "    .then(data => {\n"
         "      console.log('Received data:', data);\n"
         "      document.getElementById('currentPath').textContent = currentPath;\n"
+        "      // Update disk space display\n"
+        "      if (data.disk) {\n"
+        "        document.getElementById('diskSpace').textContent = \n"
+        "          `Used: ${data.disk.used} MB / ${data.disk.total} MB (Free: ${data.disk.free} MB)`;\n"
+        "      }\n"
         "      document.getElementById('btnBack').style.display = currentPath === '/sdcard' ? 'none' : 'block';\n"
         "      let html = '';\n"
         "      data.files.forEach(f => {\n"
@@ -203,6 +208,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "        html += `<div class='file-item'>`;\n"
         "        html += `<span class='file-name ${nameClass}' ${onclick}>${isDir ? '📁 ' : '📄 '}${f.name}</span>`;\n"
         "        html += size;\n"
+        "        if (!isDir) html += `<button class='btn-download' onclick='downloadFile(\"${f.name}\")'>💾</button>`;\n"
         "        if (!isDir) html += `<button class='btn-delete' onclick='deleteFile(\"${f.name}\")'>Delete</button>`;\n"
         "        if (!isDir) html += `<button class='btn-rename' onclick='renameFile(\"${f.name}\")'>Rename</button>`;\n"
         "        html += `</div>`;\n"
@@ -226,6 +232,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "    currentPath = currentPath.substring(0, lastSlash);\n"
         "    loadFiles();\n"
         "  }\n"
+        "}\n"
+        "\n"
+        "function downloadFile(name) {\n"
+        "  const url = '/download?path=' + encodeURIComponent(currentPath + '/' + name);\n"
+        "  window.location.href = url;\n"
         "}\n"
         "\n"
         "function deleteFile(name) {\n"
@@ -391,9 +402,32 @@ static esp_err_t list_get_handler(httpd_req_t *req)
         }
     }
     
+    // Get disk space information using FatFs API
+    FATFS *fs;
+    DWORD free_clusters;
+    long total_mb = 0, free_mb = 0, used_mb = 0;
+    
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
+    if (res == FR_OK) {
+        // Calculate total and free space
+        uint64_t total_sectors = (fs->n_fatent - 2) * fs->csize;
+        uint64_t free_sectors = free_clusters * fs->csize;
+        
+        // Convert to MB (sector size is 512 bytes)
+        total_mb = (long)((total_sectors * 512) / (1024 * 1024));
+        free_mb = (long)((free_sectors * 512) / (1024 * 1024));
+        used_mb = total_mb - free_mb;
+    }
+    
     // Send JSON response
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr_chunk(req, "{\"files\":[");
+    
+    // Send disk space info first
+    char disk_info[256];
+    snprintf(disk_info, sizeof(disk_info), 
+             "{\"disk\":{\"total\":%ld,\"used\":%ld,\"free\":%ld},\"files\":[",
+             total_mb, used_mb, free_mb);
+    httpd_resp_sendstr_chunk(req, disk_info);
     
     for (int i = 0; i < file_count; i++) {
         if (i > 0) {
@@ -642,6 +676,88 @@ static esp_err_t rename_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t download_handler(httpd_req_t *req)
+{
+    char filepath[512];
+    size_t buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+        char *buf = (char *)malloc(buf_len);
+        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            char param[256];
+            if (httpd_query_key_value(buf, "path", param, sizeof(param)) == ESP_OK) {
+                url_decode(filepath, param);
+            }
+        }
+        free(buf);
+    }
+    
+    ESP_LOGI(TAG, "Downloading file: %s", filepath);
+    
+    FILE *file = fopen(filepath, "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file: %s", filepath);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+        return ESP_FAIL;
+    }
+    
+    // Extract filename from path
+    const char *filename = strrchr(filepath, '/');
+    if (filename) {
+        filename++; // Skip the '/'
+    } else {
+        filename = filepath;
+    }
+    
+    // Set Content-Disposition header to force download (limit filename length to avoid truncation)
+    char content_disp[384];
+    char safe_filename[256];
+    strncpy(safe_filename, filename, sizeof(safe_filename) - 1);
+    safe_filename[sizeof(safe_filename) - 1] = '\0';
+    snprintf(content_disp, sizeof(content_disp), "attachment; filename=\"%s\"", safe_filename);
+    httpd_resp_set_hdr(req, "Content-Disposition", content_disp);
+    
+    // Determine content type
+    const char *ext = strrchr(filename, '.');
+    if (ext) {
+        if (strcasecmp(ext, ".mp3") == 0) {
+            httpd_resp_set_type(req, "audio/mpeg");
+        } else if (strcasecmp(ext, ".wav") == 0) {
+            httpd_resp_set_type(req, "audio/wav");
+        } else if (strcasecmp(ext, ".txt") == 0) {
+            httpd_resp_set_type(req, "text/plain");
+        } else {
+            httpd_resp_set_type(req, "application/octet-stream");
+        }
+    } else {
+        httpd_resp_set_type(req, "application/octet-stream");
+    }
+    
+    // Stream file in chunks
+    char *chunk = (char *)malloc(4096);
+    if (!chunk) {
+        fclose(file);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    
+    size_t read_bytes;
+    while ((read_bytes = fread(chunk, 1, 4096, file)) > 0) {
+        if (httpd_resp_send_chunk(req, chunk, read_bytes) != ESP_OK) {
+            ESP_LOGE(TAG, "File sending failed");
+            free(chunk);
+            fclose(file);
+            return ESP_FAIL;
+        }
+    }
+    
+    free(chunk);
+    fclose(file);
+    httpd_resp_send_chunk(req, NULL, 0);
+    
+    ESP_LOGI(TAG, "File download completed: %s", filename);
+    return ESP_OK;
+}
+
 esp_err_t start_webserver(void)
 {
     // Don't start if server is already running
@@ -699,6 +815,14 @@ esp_err_t start_webserver(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &rename_uri);
+        
+        httpd_uri_t download_uri = {
+            .uri = "/download",
+            .method = HTTP_GET,
+            .handler = download_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &download_uri);
         
         ESP_LOGI(TAG, "HTTP server started successfully");
         return ESP_OK;

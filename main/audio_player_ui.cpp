@@ -58,6 +58,7 @@ static lv_obj_t * audio_player_screen = NULL;
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
 static void btn_pause_event_cb(lv_event_t *e);
+static void btn_stop_event_cb(lv_event_t *e);
 static void btn_next_event_cb(lv_event_t *e);
 static void progress_bar_event_cb(lv_event_t *e);
 static void autoplay_checkbox_event_cb(lv_event_t *e);
@@ -310,7 +311,7 @@ void audio_player_ui_init(lv_display_t * disp)
     // Create control buttons (centered below time labels)
     int button_size = 100;
     int button_spacing = 25;
-    int total_width = (button_size * 4) + (button_spacing * 3);
+    int total_width = (button_size * 5) + (button_spacing * 4);
     int start_x = (SUNTON_ESP32_LCD_WIDTH - total_width) / 2;
     int button_y = 260;
     
@@ -350,10 +351,22 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_center(label_pause);
     lv_obj_add_event_cb(btn_pause, btn_pause_event_cb, LV_EVENT_CLICKED, NULL);
     
+    // Stop button
+    lv_obj_t * btn_stop = lv_button_create(screen);
+    lv_obj_set_size(btn_stop, button_size, button_size);
+    lv_obj_set_pos(btn_stop, start_x + (button_size + button_spacing) * 3, button_y);
+    lv_obj_set_style_bg_color(btn_stop, lv_color_hex(0xAA0000), 0);
+    lv_obj_set_style_radius(btn_stop, 40, 0);
+    lv_obj_t * label_stop = lv_label_create(btn_stop);
+    lv_label_set_text(label_stop, LV_SYMBOL_STOP);
+    lv_obj_set_style_text_font(label_stop, &lv_font_montserrat_48, 0);
+    lv_obj_center(label_stop);
+    lv_obj_add_event_cb(btn_stop, btn_stop_event_cb, LV_EVENT_CLICKED, NULL);
+    
     // Next button
     lv_obj_t * btn_next = lv_button_create(screen);
     lv_obj_set_size(btn_next, button_size, button_size);
-    lv_obj_set_pos(btn_next, start_x + (button_size + button_spacing) * 3, button_y);
+    lv_obj_set_pos(btn_next, start_x + (button_size + button_spacing) * 4, button_y);
     lv_obj_set_style_bg_color(btn_next, lv_color_hex(0x333333), 0);
     lv_obj_set_style_radius(btn_next, 40, 0);
     lv_obj_t * label_next = lv_label_create(btn_next);
@@ -617,6 +630,15 @@ static void btn_pause_event_cb(lv_event_t *e)
         if (is_playing && !is_paused) {
             audio_player_pause();
         }
+    }
+}
+
+static void btn_stop_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CLICKED) {
+        ESP_LOGI(TAG, "Stop button clicked");
+        audio_player_stop();
     }
 }
 
@@ -938,6 +960,16 @@ void audio_player_stop(void)
         i2s_is_enabled = false;
         ESP_LOGI(TAG, "I2S disabled after muting");
     }
+    
+    // Reset UI elements
+    lv_lock();
+    if (progress_bar) {
+        lv_bar_set_value(progress_bar, 0, LV_ANIM_OFF);
+    }
+    if (time_label) {
+        lv_label_set_text(time_label, "00:00");
+    }
+    lv_unlock();
     
     // Don't reset current_track here - preserve track position for Next/Previous navigation
 }
