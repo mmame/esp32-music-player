@@ -1,24 +1,38 @@
-# ESP32-8048S050C
+# ESP32-8048S050C Music Player
 
-**Implementation with FreeRTOS OSAL and LVGL 9.3**
+**Music Player with Web Interface for ESP32-S3 Touch Display**
 
-Sunton ESP32-S3 800x480 Capacitive touch display
+A music player application for the Sunton ESP32-S3 800x480 capacitive touch display, built with FreeRTOS, LVGL 9.3, and featuring MP3 playback capabilities.
 
-Example using esp-idf 5.5 and the esp_lcd_touch_gt911 and lvgl components.
+## Features
 
-In gt911_touch_init, a callback is registered to map the measured touch coordinates to display coordinates, see header file for information.
+- MP3 audio playback with minimp3 decoder
+- Touch-based UI with LVGL 9.3
+- Web-based configuration interface
+- File management system
+- WiFi configuration
+- Button mapping configuration
 
-* Set esp-idf target to ESP32S3, other versions might lack rgb panel support.
-* The supplied sdkconfig.defaults configures SPIRAM, regenerate your sdkconfig if needed.
+## Hardware
 
-idf.py set-target esp32s3 idf.py build flash monitor
+This project is designed for the Sunton ESP32-S3 8048S050C display:
+- ESP32-S3 microcontroller
+- 800x480 RGB LCD display
+- GT911 capacitive touch controller
+- Audio output support
 
-## Branches
+## Based On
 
-* [Main](../../tree/main)
-  * LVGL 9.3.0
-  * LVGL requires 128kb RAM for demo widgets
-  * can use OSAL via `CONFIG_LV_OS_FREERTOS`
-  * can use double-FB and direct rendering
+This project is based on [mr-sven/esp32-8048S050C](https://github.com/mr-sven/esp32-8048S050C) - thanks for the excellent hardware implementation foundation!
 
-* [Test](../../tree/lvgl-test) - test branch
+## Building
+
+* Set esp-idf target to ESP32S3
+* The supplied sdkconfig.defaults configures SPIRAM
+* Requires esp-idf 5.5+
+
+```bash
+idf.py set-target esp32s3
+idf.py build
+idf.py flash monitor
+```
