@@ -212,42 +212,6 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     return disp;
 }
 
-void sunton_esp32s3_lcd_force_refresh(void)
-{
-    if (global_panel_handle == NULL || lcd_reset_mutex == NULL) {
-        return;
-    }
-    
-    // Check if minimum interval has passed since last reset
-    int64_t current_time = esp_timer_get_time() / 1000;  // Convert to ms
-    if ((current_time - last_reset_time) < MIN_RESET_INTERVAL_MS) {
-        ESP_LOGW("LCD", "Skipping LCD reset - too soon (only %lld ms since last reset)", 
-                 current_time - last_reset_time);
-        return;
-    }
-    
-    // Try to acquire mutex (non-blocking to avoid blocking other threads)
-        ESP_LOGI("LCD", "Resetting LCD panel to fix frame buffer offset");
-        
-        // Lock LVGL to prevent drawing operations during reset
-        lv_lock();
-        
-        // Reset the LCD panel hardware to fix any DMA/frame buffer offset issues
-        esp_lcd_panel_reset(global_panel_handle);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        
-        // Re-initialize the panel (resets frame buffer pointer)
-        esp_lcd_panel_init(global_panel_handle);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        // Unlock LVGL and invalidate screen to trigger redraw
-        lv_obj_invalidate(lv_screen_active());
-        lv_unlock();
-        
-        // Update last reset time
-        last_reset_time = current_time;
-        
-        ESP_LOGI("LCD", "LCD panel reset complete");
-}
 
 i2c_master_bus_handle_t sunton_esp32s3_i2c_master(void)
 {

@@ -744,7 +744,10 @@ void audio_player_scan_wav_files(void)
             // Check if file has .wav or .mp3 extension
             const char *ext = strrchr(entry->d_name, '.');
             if (ext && (strcasecmp(ext, ".wav") == 0 || strcasecmp(ext, ".mp3") == 0)) {
-                strncpy(audio_files[wav_file_count].name, entry->d_name, MAX_FILENAME_LEN - 1);
+                size_t name_len = strlen(entry->d_name);
+                if (name_len >= MAX_FILENAME_LEN) name_len = MAX_FILENAME_LEN - 1;
+                memcpy(audio_files[wav_file_count].name, entry->d_name, name_len);
+                audio_files[wav_file_count].name[name_len] = '\0';
                 snprintf(audio_files[wav_file_count].path, sizeof(audio_files[wav_file_count].path), 
                         "/sdcard/%s", entry->d_name);
                 

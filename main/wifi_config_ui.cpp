@@ -63,9 +63,6 @@ static esp_netif_t *ap_netif = NULL;
 static char got_ip_str[100] = "";
 static bool ip_update_pending = false;
 static lv_timer_t *ip_update_timer = NULL;
-static bool lcd_refresh_pending = false;
-static lv_timer_t *lcd_refresh_timer = NULL;
-static SemaphoreHandle_t lcd_refresh_mutex = NULL;
 static esp_event_handler_instance_t wifi_event_instance = NULL;
 static esp_event_handler_instance_t ip_event_instance = NULL;
 static bool event_handlers_registered = false;
@@ -73,30 +70,12 @@ static int sta_retry_count = 0;
 static bool sta_connection_failed = false;
 
 // Forward declarations
-static void lcd_refresh_timer_cb(lv_timer_t *timer);
 static void ip_update_timer_cb(lv_timer_t *timer);
 static void sta_failure_update_timer_cb(lv_timer_t *timer);
-static void schedule_lcd_refresh(void);
 static void start_wifi_ap(void);
 static void stop_wifi_ap(void);
 static void start_wifi_sta(void);
 static void stop_wifi_sta(void);
-
-// Helper function to schedule LCD refresh via timer (always 150ms delay)
-static void schedule_lcd_refresh(void)
-{
-    if (lcd_refresh_mutex && xSemaphoreTake(lcd_refresh_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
-        if(!lcd_refresh_pending)
-        {
-            lcd_refresh_pending = true;
-            if (!lcd_refresh_timer) {
-                lcd_refresh_timer = lv_timer_create(lcd_refresh_timer_cb, 300, NULL);
-                lv_timer_set_repeat_count(lcd_refresh_timer, 1);
-            }
-        }
-        xSemaphoreGive(lcd_refresh_mutex);
-    }
-}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -109,19 +88,12 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Station " MACSTR " disconnected", MAC2STR(event->mac));
     } else if (event_id == WIFI_EVENT_AP_START) {
         ESP_LOGI(TAG, "WiFi AP started, starting web server...");
-        
-        // Schedule LCD refresh via timer (safer than calling from event handler)
-        schedule_lcd_refresh();
-        
         start_webserver();
     } else if (event_id == WIFI_EVENT_STA_START) {
         sta_retry_count = 0;
         esp_wifi_connect();
         ESP_LOGI(TAG, "STA started, connecting...");
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        // Schedule LCD refresh to prevent black screen
-        schedule_lcd_refresh();
-        
         if (sta_retry_count < MAX_STA_RETRY) {
             esp_wifi_connect();
             sta_retry_count++;
@@ -148,23 +120,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             lv_timer_t *failure_timer = lv_timer_create(sta_failure_update_timer_cb, 100, NULL);
             lv_timer_set_repeat_count(failure_timer, 1);
         }
-    }
-}
-
-// Timer callback to refresh LCD from LVGL task
-static void lcd_refresh_timer_cb(lv_timer_t *timer)
-{
-    if (lcd_refresh_mutex && xSemaphoreTake(lcd_refresh_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
-        if (lcd_refresh_pending) {
-            sunton_esp32s3_lcd_force_refresh();
-            lcd_refresh_pending = false;
-        }
-        // Delete the timer after execution
-        if (lcd_refresh_timer) {
-            lv_timer_delete(lcd_refresh_timer);
-            lcd_refresh_timer = NULL;
-        }
-        xSemaphoreGive(lcd_refresh_mutex);
     }
 }
 
@@ -226,9 +181,6 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
             ip_update_timer = lv_timer_create(ip_update_timer_cb, 100, NULL);
             lv_timer_set_repeat_count(ip_update_timer, 1);
         }
-        
-        // Schedule LCD refresh via timer (safer than calling from event handler)
-        schedule_lcd_refresh();
         
         // Start web server
         start_webserver();
@@ -344,9 +296,6 @@ static void start_wifi_ap(void)
     ESP_LOGI(TAG, "WiFi AP starting. SSID:%s password:%s channel:%d",
              ap_ssid, ap_password, WIFI_AP_CHANNEL);
     
-    // Schedule LCD refresh via timer to fix any DMA/display corruption
-    schedule_lcd_refresh();
-    
     // Webserver will be started by WIFI_EVENT_AP_START event
     
     wifi_enabled = true;
@@ -368,10 +317,6 @@ static void stop_wifi_ap(void)
     wifi_enabled = false;
     wifi_initialized = false;
     event_handlers_registered = false;
-    
-    // Schedule LCD refresh to prevent black screen after WiFi stop
-    vTaskDelay(pdMS_TO_TICKS(100));  // Give WiFi time to fully stop
-    schedule_lcd_refresh();
     
     ESP_LOGI(TAG, "WiFi AP stopped");
 }
@@ -424,9 +369,6 @@ static void start_wifi_sta(void)
     
     ESP_LOGI(TAG, "WiFi STA started. Connecting to SSID:%s", sta_ssid);
     
-    // Schedule LCD refresh via timer to fix any DMA/display corruption
-    schedule_lcd_refresh();
-    
     // Update UI
     lv_label_set_text(status_label, "WiFi STA: Connecting...");
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xFFFF00), 0);
@@ -451,9 +393,7 @@ static void stop_wifi_sta(void)
     wifi_initialized = false;
     event_handlers_registered = false;
     
-    // Schedule LCD refresh to prevent black screen after WiFi stop
-    vTaskDelay(pdMS_TO_TICKS(100));  // Give WiFi time to fully stop
-    schedule_lcd_refresh();
+    vTaskDelay(pdMS_TO_TICKS(100));
     
     // Update UI
     lv_label_set_text(status_label, "WiFi STA: Disconnected");
@@ -662,11 +602,6 @@ static void wifi_config_gesture_event_cb(lv_event_t *e)
 
 void wifi_config_ui_init(lv_obj_t *parent)
 {
-    // Create mutex for LCD refresh timer protection
-    if (!lcd_refresh_mutex) {
-        lcd_refresh_mutex = xSemaphoreCreateMutex();
-    }
-    
     // Load saved WiFi config
     load_wifi_config();
     

@@ -490,8 +490,10 @@ static void scan_files(void)
             continue;
         }
 
-        strncpy(files[file_count].name, entry->d_name, MAX_FILENAME_LEN - 1);
-        files[file_count].name[MAX_FILENAME_LEN - 1] = '\0';
+        size_t name_len = strlen(entry->d_name);
+        if (name_len >= MAX_FILENAME_LEN) name_len = MAX_FILENAME_LEN - 1;
+        memcpy(files[file_count].name, entry->d_name, name_len);
+        files[file_count].name[name_len] = '\0';
         files[file_count].is_dir = (entry->d_type == DT_DIR);
 
         // Get file size
@@ -632,9 +634,9 @@ static void update_file_list(void)
 
         lv_obj_t *label = lv_label_create(btn);
         
-        char text[128];
+        char text[256];
         if (files[i].is_dir) {
-            snprintf(text, sizeof(text), LV_SYMBOL_DIRECTORY " %s", files[i].name);
+            snprintf(text, sizeof(text), LV_SYMBOL_DIRECTORY " %.63s", files[i].name);
             lv_obj_set_style_text_color(label, lv_color_hex(0xFFAA00), 0);
         } else {
             // Format file size
@@ -647,7 +649,7 @@ static void update_file_list(void)
                 snprintf(size_str, sizeof(size_str), "%.1f MB", files[i].size / (1024.0f * 1024.0f));
             }
             
-            snprintf(text, sizeof(text), LV_SYMBOL_FILE " %s (%s)", files[i].name, size_str);
+            snprintf(text, sizeof(text), LV_SYMBOL_FILE " %.63s (%s)", files[i].name, size_str);
             lv_obj_set_style_text_color(label, lv_color_hex(0xCCCCCC), 0);
         }
         
