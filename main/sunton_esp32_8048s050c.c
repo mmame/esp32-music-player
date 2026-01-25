@@ -88,7 +88,7 @@ void sunton_esp32s3_backlight_init(void)
     // GPIO2 is now available for other uses (e.g., ADC button scanning)
 }
 
-#if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
+#if defined(CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING) || defined(CONFIG_SUNTON_ESP32_USE_BOUNCE_BUFFER)
 IRAM_ATTR bool lvgl_port_task_notify(uint32_t value)
 {
     BaseType_t need_yield = pdFALSE;
@@ -119,6 +119,11 @@ static bool lvgl_port_flush_ready(esp_lcd_panel_handle_t panel, const esp_lcd_rg
     lv_display_flush_ready(disp);
     return false;
 }
+
+static bool lvgl_port_bounce_empty_callback(esp_lcd_panel_handle_t panel, void *bounce_buf, int pos_px, int len_bytes, void *user_ctx)
+{
+    return lvgl_port_task_notify(ULONG_MAX);
+}
 #endif
 
 static void lvgl_disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
@@ -132,6 +137,9 @@ static void lvgl_disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t
         ulTaskNotifyValueClear(NULL, ULONG_MAX);
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
+    lv_display_flush_ready(disp);
+#elif CONFIG_SUNTON_ESP32_USE_BOUNCE_BUFFER
+    /* Bounce buffer mode - no action needed, hardware handles transfer */
     lv_display_flush_ready(disp);
 #else
     esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
@@ -205,14 +213,10 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
     lv_display_set_buffers(disp, buf1, buf2, SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_DIRECT);
 #elif CONFIG_SUNTON_ESP32_USE_BOUNCE_BUFFER
-    // With bounce buffer mode, RGB peripheral handles DMA internally
-    // LVGL draws directly to framebuffer, bounce buffer handles transfer
+    // Bounce buffer mode: LVGL draws directly to RGB panel framebuffer
+    // The 20-line bounce buffer in internal RAM handles DMA synchronization automatically
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 1, &buf1, NULL));
     lv_display_set_buffers(disp, buf1, NULL, SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_DIRECT);
-    const esp_lcd_rgb_panel_event_callbacks_t cbs = {
-        .on_color_trans_done = lvgl_port_flush_ready,
-    };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, disp));
 #else
     size_t buffer_size = SUNTON_ESP32_LCD_WIDTH * 30 * sizeof(lv_color_t);
     //buf1 = esp_lcd_rgb_alloc_draw_buffer(panel_handle, buffer_size, 0); // Future use, currently not in release
