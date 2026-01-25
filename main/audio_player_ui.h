@@ -38,6 +38,8 @@ int audio_player_get_current_track(void);  // Get current track index
 void audio_player_play_current_or_first(void);  // Play current track or first if none selected
 void audio_player_show(void);
 void audio_player_flash_button(const char *button_name);  // Flash button for physical button feedback
+void audio_player_volume_up(void);    // Increase volume by 5%
+void audio_player_volume_down(void);  // Decrease volume by 5%
 
 #ifdef __cplusplus
 }

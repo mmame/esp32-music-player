@@ -17,13 +17,34 @@ static const char *TAG = "ButtonConfig";
 #define NVS_NAMESPACE "button_cfg"
 
 // ADC Configuration - Using GPIO2 (ADC1 Channel 1)
+// External 10kΩ pulldown resistor to GND, so idle ADC value is ~0
+// 
+// Recommended resistor ladder for 10 buttons (E12 series, 3.3V supply, 10kΩ pulldown):
+// ADC = 4095 * Rpulldown / (Rpulldown + Rbutton)
+// Detection tolerance: ±70 around nominal value
+// 
+// - No button pressed: open circuit → pulled to GND via 10kΩ (ADC = ~0)
+// - Button  1: 100kΩ  (ADC ≈  372)  → range:  302- 442
+// - Button  2:  47kΩ  (ADC ≈  718)  → range:  648- 788
+// - Button  3:  27kΩ  (ADC ≈ 1107)  → range: 1037-1177
+// - Button  4:  18kΩ  (ADC ≈ 1463)  → range: 1393-1533
+// - Button  5:  12kΩ  (ADC ≈ 1861)  → range: 1791-1931
+// - Button  6: 8.2kΩ  (ADC ≈ 2250)  → range: 2180-2320
+// - Button  7: 5.6kΩ  (ADC ≈ 2625)  → range: 2555-2695
+// - Button  8: 3.9kΩ  (ADC ≈ 2945)  → range: 2875-3015
+// - Button  9: 2.2kΩ  (ADC ≈ 3357)  → range: 3287-3427
+// - Button 10:   0Ω   (ADC ≈ 4095)  → range: 3900-4095 (direct to 3.3V)
+//
+// Circuit: 10kΩ pulldown to GND on GPIO2, each button connects 3.3V through its resistor to GPIO2
+// Total: 1x 10kΩ pulldown + 9x button resistors (10th button uses 0Ω/wire)
+// This spreads buttons evenly across the full ADC range (0-4095)
 #define BUTTON_ADC_UNIT         ADC_UNIT_1
 #define BUTTON_ADC_CHANNEL      ADC_CHANNEL_1  // GPIO2
 #define BUTTON_ADC_ATTEN        ADC_ATTEN_DB_12
 #define BUTTON_SAMPLE_COUNT     10
 #define BUTTON_DEBOUNCE_MS      50
 
-#define NUM_BUTTONS 6
+#define NUM_BUTTONS 8
 #define BUTTON_TOLERANCE 100  // Tolerance for button range (±50 on each side)
 
 // Button configuration structure
@@ -36,12 +57,14 @@ typedef struct {
 
 // Default button thresholds (can be overridden by learning)
 static button_config_t button_configs[NUM_BUTTONS] = {
-    {350,  850, "Play",       true},
-    {750,  1250, "Pause",      true},
-    {1150, 1650, "Play/Pause", true},
-    {1550, 2050, "Previous",   true},
-    {1950, 2450, "Next",       true},
-    {2350, 4095, "Stop",       true}
+    {   0,    0, "Play",        false},  // 100kΩ - not configured
+    {   0,    0, "Pause",       false},  // 47kΩ - not configured
+    {   0,    0, "Play/Pause",  false},  // 22kΩ - not configured
+    {   0,    0, "Previous",    false},  // 10kΩ - not configured
+    {   0,    0, "Next",        false},  // 4.7kΩ - not configured
+    {   0,    0, "Stop",        false},  // 2.2kΩ - not configured
+    {   0,    0, "Volume Up",   false},  // 1.0kΩ - not configured
+    {   0,    0, "Volume Down", false}   // 0Ω - not configured
 };
 
 // UI elements
@@ -406,6 +429,38 @@ static void button_scan_task(void *arg)
                 last_button_pressed = button_index;
                 last_button_time = current_time;
                 
+                // Check if we're on the button config screen
+                lv_obj_t *active_screen = lv_screen_active();
+                bool on_config_screen = (active_screen == button_config_screen);
+                
+                if (on_config_screen) {
+                    // We're on the button config screen - highlight the list item instead of triggering action
+                    ESP_LOGI(TAG, "Button %d detected on config screen - highlighting list item", button_index);
+                    
+                    lv_lock();
+                    if (list_items[button_index] && lv_obj_is_valid(list_items[button_index])) {
+                        // Scroll to make the item visible
+                        lv_obj_scroll_to_view(list_items[button_index], LV_ANIM_ON);
+                        
+                        // Flash the list item background
+                        lv_obj_set_style_bg_color(list_items[button_index], lv_color_hex(0x00FF00), 0);
+                        lv_obj_set_style_bg_opa(list_items[button_index], LV_OPA_50, 0);
+                    }
+                    lv_unlock();
+                    
+                    // Reset highlight after a short delay
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                    
+                    lv_lock();
+                    if (list_items[button_index] && lv_obj_is_valid(list_items[button_index])) {
+                        lv_obj_set_style_bg_opa(list_items[button_index], LV_OPA_TRANSP, 0);
+                    }
+                    lv_unlock();
+                    
+                    continue; // Don't execute the button action
+                }
+                
+                // Not on config screen - execute button action normally
                 ESP_LOGI(TAG, "Button action triggered: button %d (%s)", button_index, button_configs[button_index].action_name);
                 
                 switch (button_index) {
@@ -486,6 +541,16 @@ static void button_scan_task(void *arg)
                         ESP_LOGI(TAG, "Action: Stop");
                         audio_player_flash_button("stop");
                         audio_player_stop();
+                        break;
+                    case 6:
+                        // Volume Up
+                        ESP_LOGI(TAG, "Action: Volume Up");
+                        audio_player_volume_up();
+                        break;
+                    case 7:
+                        // Volume Down
+                        ESP_LOGI(TAG, "Action: Volume Down");
+                        audio_player_volume_down();
                         break;
                 }
             }

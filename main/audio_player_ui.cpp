@@ -1136,3 +1136,38 @@ void audio_player_flash_button(const char *button_name)
         lv_unlock();
     }
 }
+
+// Volume control functions for physical buttons
+void audio_player_volume_up(void)
+{
+    if (volume_level < 100) {
+        volume_level += 5;
+        if (volume_level > 100) volume_level = 100;
+        
+        lv_lock();
+        if (volume_slider) {
+            lv_slider_set_value(volume_slider, volume_level, LV_ANIM_ON);
+        }
+        lv_unlock();
+        
+        save_audio_config();
+        ESP_LOGI(TAG, "Volume increased to %d%%", volume_level);
+    }
+}
+
+void audio_player_volume_down(void)
+{
+    if (volume_level > 0) {
+        volume_level -= 5;
+        if (volume_level > 100) volume_level = 0;  // Handle underflow
+        
+        lv_lock();
+        if (volume_slider) {
+            lv_slider_set_value(volume_slider, volume_level, LV_ANIM_ON);
+        }
+        lv_unlock();
+        
+        save_audio_config();
+        ESP_LOGI(TAG, "Volume decreased to %d%%", volume_level);
+    }
+}
