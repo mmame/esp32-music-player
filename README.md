@@ -1,17 +1,17 @@
-# ESP32-8048S050C Music Player
+# ESP32 Music Player - based on ESP32-8048S050C
 
 **Music Player with Web Interface for ESP32-S3 Touch Display**
 
-A music player application for the Sunton ESP32-S3 800x480 capacitive touch display, built with FreeRTOS, LVGL 9.3, and featuring MP3 playback capabilities.
+A music player application for the Sunton ESP32-S3 800x480 capacitive touch display ESP32-8048S050C, built with FreeRTOS, LVGL 9.3, and featuring MP3/WAV playback capabilities.
 
 ## Features
 
-- MP3 audio playback with minimp3 decoder
+- MP3 and WAV audio playback with minimp3 decoder
 - Touch-based UI with LVGL 9.3
 - Web-based configuration interface
 - File management system
 - WiFi configuration
-- Button mapping configuration
+- Physical Button mapping configuration
 
 ## Hardware
 
