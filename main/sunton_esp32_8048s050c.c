@@ -25,7 +25,6 @@
 
 // Mutex to protect LCD reset operations
 static SemaphoreHandle_t lcd_reset_mutex = NULL;
-static int64_t last_reset_time = 0;
 #define MIN_RESET_INTERVAL_MS 500  // Minimum 500ms between resets
 
 const esp_lcd_rgb_panel_config_t panel_config = {
@@ -35,9 +34,16 @@ const esp_lcd_rgb_panel_config_t panel_config = {
 #else
     .num_fbs = 1,
 #endif
-    .clk_src = LCD_CLK_SRC_XTAL,  // Use crystal oscillator (40MHz, independent of WiFi/CPU)
+#if CONFIG_SUNTON_ESP32_USE_BOUNCE_BUFFER
+    .bounce_buffer_size_px = 20 * SUNTON_ESP32_LCD_WIDTH,
+    .clk_src = LCD_CLK_SRC_PLL240M,
     .timings = {
-        .pclk_hz = (16*1000000),
+        .pclk_hz = (18*1000000),
+#else
+    .clk_src = LCD_CLK_SRC_PLL160M,
+    .timings = {
+        .pclk_hz = (14*1000000),
+#endif
         .h_res = SUNTON_ESP32_LCD_WIDTH,
         .v_res = SUNTON_ESP32_LCD_HEIGHT,
         .hsync_pulse_width = 4,
@@ -59,7 +65,7 @@ const esp_lcd_rgb_panel_config_t panel_config = {
     .de_gpio_num = GPIO_NUM_40,
     .pclk_gpio_num = GPIO_NUM_42,
     .data_gpio_nums = {
-        GPIO_NUM_8, GPIO_NUM_3, GPIO_NUM_4, GPIO_NUM_9, GPIO_NUM_1,               // B0 - B4
+        GPIO_NUM_8, GPIO_NUM_3, GPIO_NUM_46, GPIO_NUM_9, GPIO_NUM_1,              // B0 - B4
         GPIO_NUM_5, GPIO_NUM_6, GPIO_NUM_7, GPIO_NUM_15, GPIO_NUM_16, GPIO_NUM_4, // G0 - G5
         GPIO_NUM_45, GPIO_NUM_48, GPIO_NUM_47, GPIO_NUM_21, GPIO_NUM_14,          // R0 - R4
     },
@@ -106,21 +112,30 @@ static bool lvgl_port_flush_vsync_ready_callback(esp_lcd_panel_handle_t panel_io
 }
 #endif
 
+#if !CONFIG_SUNTON_ESP32_DOUBLE_FB
+static bool lvgl_port_flush_ready(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_ctx)
+{
+    lv_display_t *disp = (lv_display_t *)user_ctx;
+    lv_display_flush_ready(disp);
+    return false;
+}
+#endif
+
 static void lvgl_disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
 #if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
     if (lv_display_flush_is_last(disp))
     {
-#endif
-        esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
-#if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, lv_disp_get_hor_res(disp), lv_disp_get_ver_res(disp), px_map);
         /* Waiting for the last frame buffer to complete transmission */
         ulTaskNotifyValueClear(NULL, ULONG_MAX);
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
-#endif
     lv_display_flush_ready(disp);
+#else
+    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+#endif
 };
 
 static void lvgl_port_task(void *arg)
@@ -156,7 +171,6 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
 {
     void *buf1 = NULL;
     void *buf2 = NULL;
-    int buffer_size;
     esp_lcd_panel_handle_t panel_handle = NULL;
 
     // create lcd panel
@@ -179,24 +193,35 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     global_disp = disp;
     global_panel_handle = panel_handle;
 
-    buffer_size = SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t); // 2 = 16bit color data
-
 #if CONFIG_SUNTON_ESP32_DOUBLE_FB
 #if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
     // register flush callback to avoid tearing effect
-    const esp_lcd_rgb_panel_event_callbacks_t vsync_cbs = {
+    const esp_lcd_rgb_panel_event_callbacks_t cbs = {
         .on_vsync = lvgl_port_flush_vsync_ready_callback,
     };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &vsync_cbs, disp));
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, disp));
 #endif
 
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
-    lv_display_set_buffers(disp, buf1, buf2, buffer_size, LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_buffers(disp, buf1, buf2, SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_DIRECT);
+#elif CONFIG_SUNTON_ESP32_USE_BOUNCE_BUFFER
+    // With bounce buffer mode, RGB peripheral handles DMA internally
+    // LVGL draws directly to framebuffer, bounce buffer handles transfer
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 1, &buf1, NULL));
+    lv_display_set_buffers(disp, buf1, NULL, SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_DIRECT);
+    const esp_lcd_rgb_panel_event_callbacks_t cbs = {
+        .on_color_trans_done = lvgl_port_flush_ready,
+    };
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, disp));
 #else
-    buffer_size = buffer_size / 10;
-    buf1 = heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
-    //buf2 = heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
+    size_t buffer_size = SUNTON_ESP32_LCD_WIDTH * 30 * sizeof(lv_color_t);
+    //buf1 = esp_lcd_rgb_alloc_draw_buffer(panel_handle, buffer_size, 0); // Future use, currently not in release
+    buf1 = heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     lv_display_set_buffers(disp, buf1, buf2, buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    const esp_lcd_rgb_panel_event_callbacks_t cbs = {
+        .on_color_trans_done = lvgl_port_flush_ready,
+    };
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, disp));
 #endif
 
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
