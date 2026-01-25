@@ -651,7 +651,21 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
-    
+    // Page indicators (5 circles)
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *circle = lv_obj_create(wifi_config_screen);
+        lv_obj_set_size(circle, 12, 12);
+        lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(circle, 2, 0);
+        lv_obj_set_style_border_color(circle, lv_color_hex(0x00FF00), 0);
+        if (i == 2) {
+            lv_obj_set_style_bg_color(circle, lv_color_hex(0x00FF00), 0);
+            lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
+        } else {
+            lv_obj_set_style_bg_opa(circle, LV_OPA_TRANSP, 0);
+        }
+        lv_obj_align(circle, LV_ALIGN_TOP_RIGHT, -10 - (i * 18), 12);
+    }    
     // Mode selection dropdown
     lv_obj_t *mode_label = lv_label_create(wifi_config_screen);
     lv_label_set_text(mode_label, "WiFi Mode:");

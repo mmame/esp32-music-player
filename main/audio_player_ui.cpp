@@ -268,6 +268,22 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);  // Disable scroll
     
+    // Page indicators (5 circles)
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *circle = lv_obj_create(screen);
+        lv_obj_set_size(circle, 12, 12);
+        lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(circle, 2, 0);
+        lv_obj_set_style_border_color(circle, lv_color_hex(0x00FF00), 0);
+        if (i == 4) {
+            lv_obj_set_style_bg_color(circle, lv_color_hex(0x00FF00), 0);
+            lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
+        } else {
+            lv_obj_set_style_bg_opa(circle, LV_OPA_TRANSP, 0);
+        }
+        lv_obj_align(circle, LV_ALIGN_TOP_RIGHT, -10 - (i * 18), 12);
+    }
+    
     // Create song title label (large, scrolling text)
     title_label = lv_label_create(screen);
     lv_obj_set_width(title_label, SUNTON_ESP32_LCD_WIDTH - 40);

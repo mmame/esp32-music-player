@@ -44,6 +44,22 @@ static void create_about_ui(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
+    // Page indicators (5 circles)
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *circle = lv_obj_create(about_screen);
+        lv_obj_set_size(circle, 12, 12);
+        lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(circle, 2, 0);
+        lv_obj_set_style_border_color(circle, lv_color_hex(0x00FF00), 0);
+        if (i == 0) {
+            lv_obj_set_style_bg_color(circle, lv_color_hex(0x00FF00), 0);
+            lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
+        } else {
+            lv_obj_set_style_bg_opa(circle, LV_OPA_TRANSP, 0);
+        }
+        lv_obj_align(circle, LV_ALIGN_TOP_RIGHT, -10 - (i * 18), 12);
+    }
+
     // Create info container
     lv_obj_t *info_container = lv_obj_create(about_screen);
     lv_obj_set_size(info_container, 700, 350);
@@ -123,13 +139,6 @@ static void create_about_ui(void)
     lv_obj_set_style_text_font(psram_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(psram_label, lv_color_hex(0xFFFF00), 0);
     lv_obj_align(psram_label, LV_ALIGN_TOP_LEFT, 10, 240);
-
-    // Navigation hint
-    lv_obj_t *nav_hint = lv_label_create(about_screen);
-    lv_label_set_text(nav_hint, "Swipe RIGHT for Button Config");
-    lv_obj_set_style_text_font(nav_hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(nav_hint, lv_color_hex(0x666666), 0);
-    lv_obj_align(nav_hint, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
 
 // Initialize about UI

@@ -619,6 +619,22 @@ static void create_button_config_ui(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
+    // Page indicators (5 circles)
+    for (int i = 0; i < 5; i++) {
+        lv_obj_t *circle = lv_obj_create(button_config_screen);
+        lv_obj_set_size(circle, 12, 12);
+        lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(circle, 2, 0);
+        lv_obj_set_style_border_color(circle, lv_color_hex(0x00FF00), 0);
+        if (i == 1) {
+            lv_obj_set_style_bg_color(circle, lv_color_hex(0x00FF00), 0);
+            lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
+        } else {
+            lv_obj_set_style_bg_opa(circle, LV_OPA_TRANSP, 0);
+        }
+        lv_obj_align(circle, LV_ALIGN_TOP_RIGHT, -10 - (i * 18), 12);
+    }
+
     // Current ADC value
     adc_value_label = lv_label_create(button_config_screen);
     lv_label_set_text(adc_value_label, "Current ADC: 0");
