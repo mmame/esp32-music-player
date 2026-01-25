@@ -39,7 +39,7 @@ static void create_about_ui(void)
 
     // Title
     lv_obj_t *title = lv_label_create(about_screen);
-    lv_label_set_text(title, "About");
+    lv_label_set_text(title, "ESP32 Music Player");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0x00FF00), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
@@ -70,18 +70,25 @@ static void create_about_ui(void)
     lv_obj_set_style_pad_all(info_container, 20, 0);
     lv_obj_clear_flag(info_container, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Device name
-    lv_obj_t *device_label = lv_label_create(info_container);
-    lv_label_set_text(device_label, "ESP32-8048S050C");
-    lv_obj_set_style_text_font(device_label, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(device_label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(device_label, LV_ALIGN_TOP_MID, 0, 10);
+    // GitHub URL
+    lv_obj_t *github_label = lv_label_create(info_container);
+    lv_label_set_text(github_label, "GitHub:");
+    lv_obj_set_style_text_font(github_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(github_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(github_label, LV_ALIGN_TOP_MID, 0, 10);
 
-    lv_obj_t *subtitle_label = lv_label_create(info_container);
-    lv_label_set_text(subtitle_label, "Music Player");
-    lv_obj_set_style_text_font(subtitle_label, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(subtitle_label, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(subtitle_label, LV_ALIGN_TOP_MID, 0, 45);
+    lv_obj_t *url_label = lv_label_create(info_container);
+    lv_label_set_text(url_label, "https://github.com/mmame/esp32-music-player");
+    lv_obj_set_style_text_font(url_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(url_label, lv_color_hex(0x00AAFF), 0);
+    lv_obj_align(url_label, LV_ALIGN_TOP_MID, 0, 35);
+
+    // Device note
+    lv_obj_t *device_note = lv_label_create(info_container);
+    lv_label_set_text(device_note, "Device: ESP32-8048S050C");
+    lv_obj_set_style_text_font(device_note, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(device_note, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(device_note, LV_ALIGN_TOP_MID, 0, 58);
 
     // Build info
     lv_obj_t *build_label = lv_label_create(info_container);
@@ -90,7 +97,7 @@ static void create_about_ui(void)
     lv_label_set_text(build_label, build_info);
     lv_obj_set_style_text_font(build_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(build_label, lv_color_hex(0xFFFF00), 0);
-    lv_obj_align(build_label, LV_ALIGN_TOP_LEFT, 10, 90);
+    lv_obj_align(build_label, LV_ALIGN_TOP_LEFT, 10, 70);
 
     // ESP-IDF version
     lv_obj_t *idf_label = lv_label_create(info_container);
@@ -99,7 +106,7 @@ static void create_about_ui(void)
     lv_label_set_text(idf_label, idf_info);
     lv_obj_set_style_text_font(idf_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(idf_label, lv_color_hex(0xFFFF00), 0);
-    lv_obj_align(idf_label, LV_ALIGN_TOP_LEFT, 10, 120);
+    lv_obj_align(idf_label, LV_ALIGN_TOP_LEFT, 10, 100);
 
     // Chip info
     esp_chip_info_t chip_info;
@@ -111,7 +118,7 @@ static void create_about_ui(void)
     lv_label_set_text(chip_label, chip_str);
     lv_obj_set_style_text_font(chip_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(chip_label, lv_color_hex(0xFFFF00), 0);
-    lv_obj_align(chip_label, LV_ALIGN_TOP_LEFT, 10, 150);
+    lv_obj_align(chip_label, LV_ALIGN_TOP_LEFT, 10, 130);
 
     lv_obj_t *cores_label = lv_label_create(info_container);
     char cores_str[64];
@@ -119,7 +126,7 @@ static void create_about_ui(void)
     lv_label_set_text(cores_label, cores_str);
     lv_obj_set_style_text_font(cores_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(cores_label, lv_color_hex(0xFFFF00), 0);
-    lv_obj_align(cores_label, LV_ALIGN_TOP_LEFT, 10, 180);
+    lv_obj_align(cores_label, LV_ALIGN_TOP_LEFT, 10, 160);
 
     // Features
     lv_obj_t *features_label = lv_label_create(info_container);
@@ -131,14 +138,14 @@ static void create_about_ui(void)
     lv_label_set_text(features_label, features_str);
     lv_obj_set_style_text_font(features_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(features_label, lv_color_hex(0xFFFF00), 0);
-    lv_obj_align(features_label, LV_ALIGN_TOP_LEFT, 10, 210);
+    lv_obj_align(features_label, LV_ALIGN_TOP_LEFT, 10, 190);
 
     // PSRAM info
     lv_obj_t *psram_label = lv_label_create(info_container);
     lv_label_set_text(psram_label, "PSRAM: 8 MB");
     lv_obj_set_style_text_font(psram_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(psram_label, lv_color_hex(0xFFFF00), 0);
-    lv_obj_align(psram_label, LV_ALIGN_TOP_LEFT, 10, 240);
+    lv_obj_align(psram_label, LV_ALIGN_TOP_LEFT, 10, 220);
 }
 
 // Initialize about UI
