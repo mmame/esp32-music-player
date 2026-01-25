@@ -48,11 +48,19 @@ lv_obj_t * title_label = NULL;
 lv_obj_t * info_label = NULL;
 lv_obj_t * progress_bar = NULL;
 lv_obj_t * time_label = NULL;
+lv_obj_t * time_remaining_label = NULL;
 lv_obj_t * time_total_label = NULL;
 static lv_obj_t * autoplay_checkbox = NULL;
 static lv_obj_t * continue_checkbox = NULL;
 static lv_obj_t * volume_slider = NULL;
 static lv_obj_t * audio_player_screen = NULL;
+
+// Control buttons for physical button feedback
+static lv_obj_t * btn_prev = NULL;
+static lv_obj_t * btn_play = NULL;
+static lv_obj_t * btn_pause = NULL;
+static lv_obj_t * btn_stop = NULL;
+static lv_obj_t * btn_next = NULL;
 
 // Forward declarations
 static void btn_prev_event_cb(lv_event_t *e);
@@ -301,6 +309,13 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_set_style_text_font(time_label, &lv_font_montserrat_48, 0);
     lv_label_set_text(time_label, "00:00");
     
+    // Create time remaining label (center, below progress bar)
+    time_remaining_label = lv_label_create(screen);
+    lv_obj_align(time_remaining_label, LV_ALIGN_TOP_MID, 0, 180);
+    lv_obj_set_style_text_color(time_remaining_label, lv_color_hex(0xFF8800), 0);
+    lv_obj_set_style_text_font(time_remaining_label, &lv_font_montserrat_48, 0);
+    lv_label_set_text(time_remaining_label, "-00:00");
+    
     // Create time total label (right side, below progress bar)
     time_total_label = lv_label_create(screen);
     lv_obj_align(time_total_label, LV_ALIGN_TOP_RIGHT, -40, 180);
@@ -309,18 +324,19 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_label_set_text(time_total_label, "00:00");
     
     // Create control buttons (centered below time labels)
-    int button_size = 100;
-    int button_spacing = 25;
+    int button_size = 120;
+    int button_spacing = 20;
     int total_width = (button_size * 5) + (button_spacing * 4);
-    int start_x = (SUNTON_ESP32_LCD_WIDTH - total_width) / 2;
+    int start_x = (SUNTON_ESP32_LCD_WIDTH - total_width) / 2 - 30;
     int button_y = 260;
     
     // Previous button
-    lv_obj_t * btn_prev = lv_button_create(screen);
+    btn_prev = lv_button_create(screen);
     lv_obj_set_size(btn_prev, button_size, button_size);
     lv_obj_set_pos(btn_prev, start_x, button_y);
     lv_obj_set_style_bg_color(btn_prev, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_radius(btn_prev, 40, 0);
+    lv_obj_set_style_bg_color(btn_prev, lv_color_hex(0x666666), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_prev, 20, 0);
     lv_obj_t * label_prev = lv_label_create(btn_prev);
     lv_label_set_text(label_prev, LV_SYMBOL_PREV);
     lv_obj_set_style_text_font(label_prev, &lv_font_montserrat_48, 0);
@@ -328,11 +344,12 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_add_event_cb(btn_prev, btn_prev_event_cb, LV_EVENT_CLICKED, NULL);
     
     // Play button
-    lv_obj_t * btn_play = lv_button_create(screen);
+    btn_play = lv_button_create(screen);
     lv_obj_set_size(btn_play, button_size, button_size);
     lv_obj_set_pos(btn_play, start_x + button_size + button_spacing, button_y);
     lv_obj_set_style_bg_color(btn_play, lv_color_hex(0x00AA00), 0);
-    lv_obj_set_style_radius(btn_play, 40, 0);
+    lv_obj_set_style_bg_color(btn_play, lv_color_hex(0x00FF00), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_play, 20, 0);
     lv_obj_t * label_play = lv_label_create(btn_play);
     lv_label_set_text(label_play, LV_SYMBOL_PLAY);
     lv_obj_set_style_text_font(label_play, &lv_font_montserrat_48, 0);
@@ -340,11 +357,12 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_add_event_cb(btn_play, btn_play_event_cb, LV_EVENT_CLICKED, NULL);
     
     // Pause button
-    lv_obj_t * btn_pause = lv_button_create(screen);
+    btn_pause = lv_button_create(screen);
     lv_obj_set_size(btn_pause, button_size, button_size);
     lv_obj_set_pos(btn_pause, start_x + (button_size + button_spacing) * 2, button_y);
     lv_obj_set_style_bg_color(btn_pause, lv_color_hex(0xAA6600), 0);
-    lv_obj_set_style_radius(btn_pause, 40, 0);
+    lv_obj_set_style_bg_color(btn_pause, lv_color_hex(0xFF9900), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_pause, 20, 0);
     lv_obj_t * label_pause = lv_label_create(btn_pause);
     lv_label_set_text(label_pause, LV_SYMBOL_PAUSE);
     lv_obj_set_style_text_font(label_pause, &lv_font_montserrat_48, 0);
@@ -352,11 +370,12 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_add_event_cb(btn_pause, btn_pause_event_cb, LV_EVENT_CLICKED, NULL);
     
     // Stop button
-    lv_obj_t * btn_stop = lv_button_create(screen);
+    btn_stop = lv_button_create(screen);
     lv_obj_set_size(btn_stop, button_size, button_size);
     lv_obj_set_pos(btn_stop, start_x + (button_size + button_spacing) * 3, button_y);
     lv_obj_set_style_bg_color(btn_stop, lv_color_hex(0xAA0000), 0);
-    lv_obj_set_style_radius(btn_stop, 40, 0);
+    lv_obj_set_style_bg_color(btn_stop, lv_color_hex(0xFF0000), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_stop, 20, 0);
     lv_obj_t * label_stop = lv_label_create(btn_stop);
     lv_label_set_text(label_stop, LV_SYMBOL_STOP);
     lv_obj_set_style_text_font(label_stop, &lv_font_montserrat_48, 0);
@@ -364,11 +383,12 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_add_event_cb(btn_stop, btn_stop_event_cb, LV_EVENT_CLICKED, NULL);
     
     // Next button
-    lv_obj_t * btn_next = lv_button_create(screen);
+    btn_next = lv_button_create(screen);
     lv_obj_set_size(btn_next, button_size, button_size);
     lv_obj_set_pos(btn_next, start_x + (button_size + button_spacing) * 4, button_y);
     lv_obj_set_style_bg_color(btn_next, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_radius(btn_next, 40, 0);
+    lv_obj_set_style_bg_color(btn_next, lv_color_hex(0x666666), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_next, 20, 0);
     lv_obj_t * label_next = lv_label_create(btn_next);
     lv_label_set_text(label_next, LV_SYMBOL_NEXT);
     lv_obj_set_style_text_font(label_next, &lv_font_montserrat_48, 0);
@@ -467,6 +487,11 @@ lv_obj_t * audio_player_get_progress_bar(void)
 lv_obj_t * audio_player_get_time_label(void)
 {
     return time_label;
+}
+
+lv_obj_t * audio_player_get_time_remaining_label(void)
+{
+    return time_remaining_label;
 }
 
 lv_obj_t * audio_player_get_time_total_label(void)
@@ -748,6 +773,12 @@ void audio_player_play(const char *filename)
     }
     if (time_label) {
         lv_label_set_text(time_label, "00:00");
+    }
+    if (time_remaining_label) {
+        lv_label_set_text(time_remaining_label, "-00:00");
+    }
+    if (time_remaining_label) {
+        lv_label_set_text(time_remaining_label, "-00:00");
     }
     
     // Update total time
@@ -1068,5 +1099,40 @@ void audio_player_show(void)
     if (auto_play_enabled && !is_playing && !is_paused && wav_file_count > 0) {
         ESP_LOGI(TAG, "Auto-play enabled, starting first track");
         audio_player_play(audio_files[0].name);
+    }
+}
+
+// Timer callback to restore button color after flash
+static void button_flash_timer_cb(lv_timer_t *timer)
+{
+    lv_obj_t *button = (lv_obj_t *)lv_timer_get_user_data(timer);
+    if (button) {
+        lv_obj_clear_state(button, LV_STATE_PRESSED);
+    }
+}
+
+// Flash button for visual feedback when physical button is pressed
+void audio_player_flash_button(const char *button_name)
+{
+    lv_obj_t *button = NULL;
+    
+    if (strcmp(button_name, "play") == 0) {
+        button = btn_play;
+    } else if (strcmp(button_name, "pause") == 0) {
+        button = btn_pause;
+    } else if (strcmp(button_name, "stop") == 0) {
+        button = btn_stop;
+    } else if (strcmp(button_name, "prev") == 0 || strcmp(button_name, "previous") == 0) {
+        button = btn_prev;
+    } else if (strcmp(button_name, "next") == 0) {
+        button = btn_next;
+    }
+    
+    if (button) {
+        lv_lock();
+        lv_obj_add_state(button, LV_STATE_PRESSED);
+        lv_timer_t *timer = lv_timer_create(button_flash_timer_cb, 150, button);
+        lv_timer_set_repeat_count(timer, 1);
+        lv_unlock();
     }
 }

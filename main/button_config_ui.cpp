@@ -427,6 +427,7 @@ static void button_scan_task(void *arg)
                             } else if (!playing) {
                                 // Nothing is playing - start playing
                                 ESP_LOGI(TAG, "Starting playback");
+                                audio_player_flash_button("play");
                                 audio_player_play_current_or_first();
                             } else {
                                 ESP_LOGI(TAG, "Already playing");
@@ -436,6 +437,7 @@ static void button_scan_task(void *arg)
                     case 1:
                         // Pause
                         ESP_LOGI(TAG, "Action: Pause");
+                        audio_player_flash_button("pause");
                         audio_player_pause();
                         break;
                     case 2:
@@ -452,14 +454,17 @@ static void button_scan_task(void *arg)
                             if (playing) {
                                 // Currently playing - pause it
                                 ESP_LOGI(TAG, "Currently playing, pausing");
+                                audio_player_flash_button("pause");
                                 audio_player_pause();
                             } else if (paused) {
                                 // Paused - resume it
                                 ESP_LOGI(TAG, "Resuming paused playback");
+                                audio_player_flash_button("play");
                                 audio_player_resume();
                             } else {
                                 // Nothing is playing - start playing
                                 ESP_LOGI(TAG, "Starting playback");
+                                audio_player_flash_button("play");
                                 audio_player_play_current_or_first();
                             }
                         }
@@ -467,16 +472,19 @@ static void button_scan_task(void *arg)
                     case 3:
                         // Previous track
                         ESP_LOGI(TAG, "Action: Previous");
+                        audio_player_flash_button("prev");
                         audio_player_previous();
                         break;
                     case 4:
                         // Next track
                         ESP_LOGI(TAG, "Action: Next");
+                        audio_player_flash_button("next");
                         audio_player_next();
                         break;
                     case 5:
                         // Stop
                         ESP_LOGI(TAG, "Action: Stop");
+                        audio_player_flash_button("stop");
                         audio_player_stop();
                         break;
                 }

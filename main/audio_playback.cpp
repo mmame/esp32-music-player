@@ -1,4 +1,5 @@
 #include "audio_playback.h"
+#include "audio_player_ui.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
@@ -397,6 +398,17 @@ void audio_playback_task(void *arg)
                 uint32_t minutes = elapsed_seconds / 60;
                 uint32_t seconds = elapsed_seconds % 60;
                 
+                // Calculate remaining time
+                uint32_t total_seconds = 0;
+                if (audio->type == AUDIO_TYPE_MP3 && mp3_bitrate_kbps > 0) {
+                    total_seconds = (mp3_file_size * 8) / (mp3_bitrate_kbps * 1000);
+                } else if (bytes_per_second > 0 && total_bytes > 0) {
+                    total_seconds = total_bytes / bytes_per_second;
+                }
+                uint32_t remaining_seconds = (total_seconds > elapsed_seconds) ? (total_seconds - elapsed_seconds) : 0;
+                uint32_t remaining_minutes = remaining_seconds / 60;
+                uint32_t remaining_secs = remaining_seconds % 60;
+                
                 // Update UI with LVGL lock - keep it brief
                 lv_lock();
                 if (progress_bar) {
@@ -406,6 +418,12 @@ void audio_playback_task(void *arg)
                     char time_text[16];
                     snprintf(time_text, sizeof(time_text), "%02lu:%02lu", minutes, seconds);
                     lv_label_set_text(time_label, time_text);
+                }
+                lv_obj_t *time_remaining_label = audio_player_get_time_remaining_label();
+                if (time_remaining_label) {
+                    char time_text[16];
+                    snprintf(time_text, sizeof(time_text), "-%02lu:%02lu", remaining_minutes, remaining_secs);
+                    lv_label_set_text(time_remaining_label, time_text);
                 }
                 lv_unlock();
             }
@@ -608,6 +626,10 @@ void audio_playback_task(void *arg)
                     }
                     if (time_label) {
                         lv_label_set_text(time_label, "00:00");
+                    }
+                    lv_obj_t *time_remaining_label = audio_player_get_time_remaining_label();
+                    if (time_remaining_label) {
+                        lv_label_set_text(time_remaining_label, "-00:00");
                     }
                     if (time_total_label) {
                         if (audio->type == AUDIO_TYPE_WAV && audio->sample_rate > 0 && audio->data_size > 0) {

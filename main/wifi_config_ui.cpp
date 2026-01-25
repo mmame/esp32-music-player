@@ -48,6 +48,8 @@ static lv_obj_t *ap_start_btn = NULL;
 static lv_obj_t *ap_container = NULL;
 static lv_obj_t *ap_ssid_textarea = NULL;
 static lv_obj_t *ap_password_textarea = NULL;
+static lv_obj_t *sta_password_toggle_btn = NULL;
+static lv_obj_t *ap_password_toggle_btn = NULL;
 
 // WiFi state
 static wifi_ui_mode_t current_ui_mode = WIFI_UI_MODE_AP;
@@ -473,6 +475,34 @@ static void keyboard_event_cb(lv_event_t *e)
     }
 }
 
+static void sta_password_toggle_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    
+    if (code == LV_EVENT_CLICKED) {
+        bool is_password_mode = lv_textarea_get_password_mode(password_textarea);
+        lv_textarea_set_password_mode(password_textarea, !is_password_mode);
+        
+        // Update button label
+        lv_obj_t *label = lv_obj_get_child(sta_password_toggle_btn, 0);
+        lv_label_set_text(label, is_password_mode ? "Hide" : "Show");
+    }
+}
+
+static void ap_password_toggle_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    
+    if (code == LV_EVENT_CLICKED) {
+        bool is_password_mode = lv_textarea_get_password_mode(ap_password_textarea);
+        lv_textarea_set_password_mode(ap_password_textarea, !is_password_mode);
+        
+        // Update button label
+        lv_obj_t *label = lv_obj_get_child(ap_password_toggle_btn, 0);
+        lv_label_set_text(label, is_password_mode ? "Hide" : "Show");
+    }
+}
+
 static void textarea_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -690,6 +720,18 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_add_event_cb(password_textarea, textarea_event_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(password_textarea, textarea_event_cb, LV_EVENT_DEFOCUSED, NULL);
     
+    // Password show/hide toggle button
+    sta_password_toggle_btn = lv_btn_create(sta_container);
+    lv_obj_set_size(sta_password_toggle_btn, 80, 50);
+    lv_obj_set_pos(sta_password_toggle_btn, 650, 130);
+    lv_obj_set_style_bg_color(sta_password_toggle_btn, lv_color_hex(0x555555), 0);
+    lv_obj_add_event_cb(sta_password_toggle_btn, sta_password_toggle_event_cb, LV_EVENT_CLICKED, NULL);
+    
+    lv_obj_t *sta_toggle_label = lv_label_create(sta_password_toggle_btn);
+    lv_label_set_text(sta_toggle_label, "Show");
+    lv_obj_set_style_text_font(sta_toggle_label, &lv_font_montserrat_20, 0);
+    lv_obj_center(sta_toggle_label);
+    
     // Connect button
     connect_btn = lv_btn_create(sta_container);
     lv_obj_set_size(connect_btn, 200, 50);
@@ -755,6 +797,18 @@ void wifi_config_ui_init(lv_obj_t *parent)
     lv_obj_add_event_cb(ap_password_textarea, textarea_event_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(ap_password_textarea, textarea_event_cb, LV_EVENT_DEFOCUSED, NULL);
     
+    // Password show/hide toggle button
+    ap_password_toggle_btn = lv_btn_create(ap_container);
+    lv_obj_set_size(ap_password_toggle_btn, 80, 50);
+    lv_obj_set_pos(ap_password_toggle_btn, 650, 125);
+    lv_obj_set_style_bg_color(ap_password_toggle_btn, lv_color_hex(0x555555), 0);
+    lv_obj_add_event_cb(ap_password_toggle_btn, ap_password_toggle_event_cb, LV_EVENT_CLICKED, NULL);
+    
+    lv_obj_t *ap_toggle_label = lv_label_create(ap_password_toggle_btn);
+    lv_label_set_text(ap_toggle_label, "Show");
+    lv_obj_set_style_text_font(ap_toggle_label, &lv_font_montserrat_20, 0);
+    lv_obj_center(ap_toggle_label);
+    
     // AP Start/Stop button
     ap_start_btn = lv_btn_create(wifi_config_screen);
     lv_obj_set_size(ap_start_btn, 300, 50);
@@ -787,6 +841,28 @@ void wifi_config_ui_init(lv_obj_t *parent)
 void wifi_config_show(void)
 {
     if (wifi_config_screen) {
+        // Reset password fields to hidden mode
+        if (password_textarea) {
+            lv_textarea_set_password_mode(password_textarea, true);
+        }
+        if (ap_password_textarea) {
+            lv_textarea_set_password_mode(ap_password_textarea, true);
+        }
+        
+        // Reset toggle button labels to "Show"
+        if (sta_password_toggle_btn) {
+            lv_obj_t *label = lv_obj_get_child(sta_password_toggle_btn, 0);
+            if (label) {
+                lv_label_set_text(label, "Show");
+            }
+        }
+        if (ap_password_toggle_btn) {
+            lv_obj_t *label = lv_obj_get_child(ap_password_toggle_btn, 0);
+            if (label) {
+                lv_label_set_text(label, "Show");
+            }
+        }
+        
         lv_screen_load(wifi_config_screen);
         ESP_LOGI(TAG, "WiFi config shown");
     }

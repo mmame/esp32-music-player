@@ -16,6 +16,7 @@ lv_obj_t * audio_player_get_screen(void);
 lv_obj_t * audio_player_get_title_label(void);
 lv_obj_t * audio_player_get_progress_bar(void);
 lv_obj_t * audio_player_get_time_label(void);
+lv_obj_t * audio_player_get_time_remaining_label(void);
 lv_obj_t * audio_player_get_time_total_label(void);
 lv_obj_t * audio_player_get_autoplay_checkbox(void);
 lv_obj_t * audio_player_get_continue_checkbox(void);
@@ -36,6 +37,7 @@ bool audio_player_has_files(void);  // Check if there are audio files available
 int audio_player_get_current_track(void);  // Get current track index
 void audio_player_play_current_or_first(void);  // Play current track or first if none selected
 void audio_player_show(void);
+void audio_player_flash_button(const char *button_name);  // Flash button for physical button feedback
 
 #ifdef __cplusplus
 }
