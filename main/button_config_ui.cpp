@@ -2,6 +2,7 @@
 #include "audio_player_ui.h"
 #include "file_manager_ui.h"
 #include "wifi_config_ui.h"
+#include "about_ui.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
 #include "driver/gpio.h"
@@ -105,7 +106,10 @@ static void button_config_gesture_event_cb(lv_event_t *e)
     if (code == LV_EVENT_GESTURE) {
         lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
         
-        if (dir == LV_DIR_RIGHT) {
+        if (dir == LV_DIR_LEFT) {
+            ESP_LOGI(TAG, "Swipe LEFT detected, going to About");
+            about_show();
+        } else if (dir == LV_DIR_RIGHT) {
             ESP_LOGI(TAG, "Swipe RIGHT detected, returning to WiFi config");
             wifi_config_show();
         }

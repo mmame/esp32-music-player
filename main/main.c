@@ -11,6 +11,7 @@
 #include "file_manager_ui.h"
 #include "wifi_config_ui.h"
 #include "button_config_ui.h"
+#include "about_ui.h"
 
 void app_main(void)
 {
@@ -53,6 +54,9 @@ void app_main(void)
     
     // Initialize button config UI (hidden by default)
     button_config_ui_init();
+    
+    // Initialize about UI (hidden by default)
+    about_ui_init();
     lv_unlock();
     
     // Trigger auto-play if enabled
