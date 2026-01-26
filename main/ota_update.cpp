@@ -1,0 +1,328 @@
+#include "ota_update.h"
+#include "esp_log.h"
+#include "esp_https_ota.h"
+#include "esp_http_client.h"
+#include "esp_ota_ops.h"
+#include "esp_crt_bundle.h"
+#include <string.h>
+
+static const char *TAG = "OTA_UPDATE";
+
+// OTA state
+static ota_status_t g_ota_status = OTA_STATUS_IDLE;
+static char g_available_version[32] = {0};
+static char g_error_message[256] = {0};
+static ota_progress_callback_t g_progress_callback = NULL;
+
+// Buffer for version check response
+#define VERSION_BUFFER_SIZE 1024
+static char version_buffer[VERSION_BUFFER_SIZE];
+static int version_buffer_pos = 0;
+
+extern "C" {
+
+// HTTP event handler for version check
+static esp_err_t version_http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id) {
+        case HTTP_EVENT_ON_DATA:
+            if (!esp_http_client_is_chunked_response(evt->client)) {
+                // Copy data to buffer
+                int copy_len = evt->data_len;
+                if (version_buffer_pos + copy_len >= VERSION_BUFFER_SIZE) {
+                    copy_len = VERSION_BUFFER_SIZE - version_buffer_pos - 1;
+                }
+                if (copy_len > 0) {
+                    memcpy(version_buffer + version_buffer_pos, evt->data, copy_len);
+                    version_buffer_pos += copy_len;
+                    version_buffer[version_buffer_pos] = '\0';
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    return ESP_OK;
+}
+
+// HTTP event handler for OTA download
+static esp_err_t ota_http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id) {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGE(TAG, "HTTP_EVENT_ERROR");
+            break;
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
+            break;
+        case HTTP_EVENT_HEADER_SENT:
+            ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
+            break;
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            break;
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            break;
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
+            break;
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            break;
+        default:
+            break;
+    }
+    return ESP_OK;
+}
+
+bool ota_update_init(void)
+{
+    ESP_LOGI(TAG, "OTA Update Manager initialized");
+    ESP_LOGI(TAG, "Current version: %s", FIRMWARE_VERSION);
+    
+    // Get current partition info
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+    
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            ESP_LOGI(TAG, "An OTA update has been performed. Validating...");
+            esp_ota_mark_app_valid_cancel_rollback();
+        }
+    }
+    
+    ESP_LOGI(TAG, "Running partition: %s at offset 0x%lx", 
+             running->label, running->address);
+    
+    return true;
+}
+
+bool ota_check_for_updates(ota_progress_callback_t callback)
+{
+    g_progress_callback = callback;
+    g_ota_status = OTA_STATUS_CHECKING;
+    
+    if (g_progress_callback) {
+        g_progress_callback(0, "Checking for updates...");
+    }
+    
+    // Reset buffer
+    version_buffer_pos = 0;
+    memset(version_buffer, 0, VERSION_BUFFER_SIZE);
+    
+    // Configure HTTP client for version check
+    esp_http_client_config_t config = {};
+    config.url = GITHUB_VERSION_URL;
+    config.event_handler = version_http_event_handler;
+    config.timeout_ms = 10000;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        snprintf(g_error_message, sizeof(g_error_message), "Failed to initialize HTTP client");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    esp_err_t err = esp_http_client_perform(client);
+    
+    if (err == ESP_OK) {
+        int status_code = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "HTTP Status = %d, content_length = %lld",
+                status_code,
+                esp_http_client_get_content_length(client));
+        
+        if (status_code == 200) {
+            // Parse version from JSON manually (simple parser)
+            // Looking for "version": "x.x.x"
+            const char *version_key = "\"version\"";
+            char *version_pos = strstr(version_buffer, version_key);
+            if (version_pos) {
+                // Find the opening quote after the colon
+                char *value_start = strchr(version_pos + strlen(version_key), '\"');
+                if (value_start) {
+                    value_start++; // Skip opening quote
+                    char *value_end = strchr(value_start, '\"');
+                    if (value_end && (value_end - value_start) < (int)sizeof(g_available_version)) {
+                        memcpy(g_available_version, value_start, value_end - value_start);
+                        g_available_version[value_end - value_start] = '\0';
+                        ESP_LOGI(TAG, "Available version: %s", g_available_version);
+                        
+                        // Compare versions
+                        if (strcmp(g_available_version, FIRMWARE_VERSION) != 0) {
+                            g_ota_status = OTA_STATUS_UPDATE_AVAILABLE;
+                            if (g_progress_callback) {
+                                char msg[128];
+                                snprintf(msg, sizeof(msg), "Update available: v%s", g_available_version);
+                                g_progress_callback(100, msg);
+                            }
+                            esp_http_client_cleanup(client);
+                            return true;
+                        } else {
+                            g_ota_status = OTA_STATUS_NO_UPDATE;
+                            if (g_progress_callback) {
+                                g_progress_callback(100, "You have the latest version");
+                            }
+                            esp_http_client_cleanup(client);
+                            return false;
+                        }
+                    }
+                }
+            }
+            ESP_LOGE(TAG, "Failed to parse version from JSON");
+            snprintf(g_error_message, sizeof(g_error_message), "Failed to parse version info");
+        } else {
+            ESP_LOGE(TAG, "HTTP request failed with status %d", status_code);
+            snprintf(g_error_message, sizeof(g_error_message), "Server returned status %d", status_code);
+        }
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        snprintf(g_error_message, sizeof(g_error_message), "Network error: %s", esp_err_to_name(err));
+    }
+    
+    esp_http_client_cleanup(client);
+    g_ota_status = OTA_STATUS_ERROR;
+    if (g_progress_callback) {
+        g_progress_callback(0, g_error_message);
+    }
+    return false;
+}
+
+bool ota_perform_update(ota_progress_callback_t callback)
+{
+    g_progress_callback = callback;
+    g_ota_status = OTA_STATUS_DOWNLOADING;
+    
+    if (g_progress_callback) {
+        g_progress_callback(0, "Starting download...");
+    }
+    
+    ESP_LOGI(TAG, "Starting OTA update from: %s", GITHUB_RELEASE_URL);
+    
+    esp_http_client_config_t config = {};
+    config.url = GITHUB_RELEASE_URL;
+    config.event_handler = ota_http_event_handler;
+    config.timeout_ms = 30000;
+    config.keep_alive_enable = true;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    
+    esp_https_ota_config_t ota_config = {};
+    ota_config.http_config = &config;
+    
+    esp_https_ota_handle_t https_ota_handle = NULL;
+    esp_err_t err = esp_https_ota_begin(&ota_config, &https_ota_handle);
+    
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed");
+        snprintf(g_error_message, sizeof(g_error_message), "OTA begin failed: %s", esp_err_to_name(err));
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    esp_app_desc_t app_desc;
+    err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed");
+        esp_https_ota_abort(https_ota_handle);
+        snprintf(g_error_message, sizeof(g_error_message), "Failed to get image description");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "New firmware version: %s", app_desc.version);
+    
+    g_ota_status = OTA_STATUS_INSTALLING;
+    
+    int total_size = esp_https_ota_get_image_size(https_ota_handle);
+    int downloaded = 0;
+    int last_progress = -1;
+    
+    while (1) {
+        err = esp_https_ota_perform(https_ota_handle);
+        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            break;
+        }
+        
+        downloaded = esp_https_ota_get_image_len_read(https_ota_handle);
+        int progress = (total_size > 0) ? (downloaded * 100 / total_size) : 0;
+        
+        if (progress != last_progress && g_progress_callback) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Downloading: %d%%", progress);
+            g_progress_callback(progress, msg);
+            last_progress = progress;
+        }
+        
+        ESP_LOGD(TAG, "Downloaded: %d / %d bytes", downloaded, total_size);
+    }
+    
+    if (esp_https_ota_is_complete_data_received(https_ota_handle) != true) {
+        ESP_LOGE(TAG, "Complete data was not received.");
+        esp_https_ota_abort(https_ota_handle);
+        snprintf(g_error_message, sizeof(g_error_message), "Incomplete download");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    err = esp_https_ota_finish(https_ota_handle);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            ESP_LOGE(TAG, "Image validation failed, image is corrupted");
+            snprintf(g_error_message, sizeof(g_error_message), "Image validation failed");
+        } else {
+            ESP_LOGE(TAG, "ESP HTTPS OTA upgrade failed 0x%x", err);
+            snprintf(g_error_message, sizeof(g_error_message), "OTA upgrade failed: %s", esp_err_to_name(err));
+        }
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "OTA upgrade successful!");
+    g_ota_status = OTA_STATUS_SUCCESS;
+    
+    if (g_progress_callback) {
+        g_progress_callback(100, "Update complete! Rebooting...");
+    }
+    
+    // Reboot will happen from the caller
+    return true;
+}
+
+ota_status_t ota_get_status(void)
+{
+    return g_ota_status;
+}
+
+const char* ota_get_current_version(void)
+{
+    return FIRMWARE_VERSION;
+}
+
+const char* ota_get_available_version(void)
+{
+    return g_available_version[0] != '\0' ? g_available_version : NULL;
+}
+
+const char* ota_get_error_message(void)
+{
+    return g_error_message;
+}
+
+} // extern "C"
