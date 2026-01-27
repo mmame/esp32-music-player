@@ -330,6 +330,7 @@ void audio_player_ui_init(lv_display_t * disp)
     lv_obj_align(time_remaining_label, LV_ALIGN_TOP_MID, 0, 180);
     lv_obj_set_style_text_color(time_remaining_label, lv_color_hex(0xFF8800), 0);
     lv_obj_set_style_text_font(time_remaining_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_align(time_remaining_label, LV_TEXT_ALIGN_LEFT, 0);  // Left-align text to prevent wobble
     lv_label_set_text(time_remaining_label, "-00:00");
     
     // Create time total label (right side, below progress bar)
