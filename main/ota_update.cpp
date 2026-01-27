@@ -216,7 +216,7 @@ bool ota_perform_update(ota_progress_callback_t callback)
     g_ota_status = OTA_STATUS_DOWNLOADING;
     
     if (g_progress_callback) {
-        g_progress_callback(0, "⚠ DISPLAY WILL FLICKER - NORMAL ⚠");
+        g_progress_callback(0, "DISPLAY WILL FLICKER - THAT'S NORMAL!");
     }
     
     ESP_LOGI(TAG, "Starting OTA update from: %s", GITHUB_RELEASE_URL);
