@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 // Current firmware version
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.1"
 
 // GitHub release URLs
 #define GITHUB_RELEASE_URL "https://github.com/mmame/esp32-music-player/releases/latest/download/firmware.bin"

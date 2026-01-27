@@ -190,40 +190,15 @@ def main():
             sys.exit(1)
     
     # Step 5: Build firmware (REQUIRED after version change)
-    print_step(5, "Building firmware (REQUIRED - version needs to be compiled in)")
-    if confirm("Build firmware with 'idf.py build'?"):
-        print("   Building... (this may take a few minutes)")
-        try:
-            # On Windows, use PowerShell to run idf.py
-            if sys.platform == "win32":
-                # Try using the espressif commands extension
-                result = subprocess.run(
-                    ["powershell", "-Command", "idf.py", "build"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    shell=True
-                )
-            else:
-                result = subprocess.run(
-                    ["idf.py", "build"],
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-            print_success("Build completed successfully")
-        except subprocess.CalledProcessError as e:
-            print_error("Build failed!")
-            print(e.stderr)
-            if not confirm("Continue anyway?"):
-                sys.exit(1)
-        except FileNotFoundError:
-            print_warning("'idf.py' not found in PATH")
-            print_warning("Please build manually using ESP-IDF commands or VS Code")
-            if not confirm("Continue anyway (assuming build already done)?"):
-                sys.exit(1)
-    else:
-        print_warning("Skipped build - make sure you have built the firmware manually!")
+    print_step(5, "Building firmware")
+    print(f"{Colors.WARNING}   Please build the firmware manually using one of these methods:{Colors.ENDC}")
+    print(f"   • VS Code: Use the ESP-IDF build command")
+    print(f"   • Terminal: Run 'idf.py build'")
+    print(f"\n   {Colors.BOLD}This is REQUIRED - the new version must be compiled into the firmware!{Colors.ENDC}\n")
+    
+    if not confirm("Have you built the firmware with the new version?"):
+        print_error("Please build the firmware first, then run this script again")
+        sys.exit(1)
     
     # Step 6: Check build directory
     print_step(6, "Verifying build files")
@@ -275,25 +250,44 @@ def main():
             print_error("Git not found")
     
     # Step 10: GitHub release instructions
-    print_step(10, "Create GitHub Release")
-    print(f"\n   {Colors.BOLD}Manual steps to complete on GitHub:{Colors.ENDC}")
-    print(f"   1. Go to: {Colors.OKCYAN}https://github.com/mmame/esp32-music-player/releases{Colors.ENDC}")
-    print(f"   2. Click 'Draft a new release'")
-    print(f"   3. Choose tag: {Colors.OKGREEN}v{new_version}{Colors.ENDC}")
-    print(f"   4. Release title: {Colors.OKGREEN}Release {new_version}{Colors.ENDC}")
-    print(f"   5. Description: {Colors.OKGREEN}{release_notes}{Colors.ENDC}")
-    print(f"   6. Upload these files:")
-    print(f"      • {release_dir}/firmware.bin")
-    print(f"      • {release_dir}/version.json")
-    print(f"   7. Click 'Publish release'\n")
+    print_header("Next Steps: Create GitHub Release")
+    print(f"\n{Colors.BOLD}{Colors.OKGREEN}Release files are ready!{Colors.ENDC}")
+    print(f"\n{Colors.BOLD}Now you need to create a GitHub Release manually:{Colors.ENDC}\n")
+    
+    print(f"{Colors.OKCYAN}Step-by-step instructions:{Colors.ENDC}\n")
+    print(f"   {Colors.BOLD}1.{Colors.ENDC} Open your browser and go to:")
+    print(f"      {Colors.UNDERLINE}https://github.com/mmame/esp32-music-player/releases/new{Colors.ENDC}\n")
+    
+    print(f"   {Colors.BOLD}2.{Colors.ENDC} Fill in the release form:")
+    print(f"      • Tag: {Colors.OKGREEN}v{new_version}{Colors.ENDC}")
+    print(f"      • Target: {Colors.OKGREEN}main{Colors.ENDC} (or your default branch)")
+    print(f"      • Release title: {Colors.OKGREEN}Release {new_version}{Colors.ENDC}")
+    print(f"      • Description:")
+    print(f"        {Colors.OKGREEN}{release_notes}{Colors.ENDC}\n")
+    
+    print(f"   {Colors.BOLD}3.{Colors.ENDC} Upload the release files:")
+    print(f"      Drag and drop these files to the 'Attach binaries' area:")
+    print(f"      • {Colors.OKGREEN}{release_dir}/firmware.bin{Colors.ENDC} ({get_file_size(firmware_path)})")
+    print(f"      • {Colors.OKGREEN}{release_dir}/version.json{Colors.ENDC}\n")
+    
+    print(f"   {Colors.BOLD}4.{Colors.ENDC} Publish the release:")
+    print(f"      • Check 'Set as the latest release'")
+    print(f"      • Click {Colors.OKGREEN}'Publish release'{Colors.ENDC}\n")
+    
+    print(f"{Colors.WARNING}{Colors.BOLD}IMPORTANT:{Colors.ENDC}")
+    print(f"   The OTA update system expects these exact filenames:")
+    print(f"   • firmware.bin  (NOT ESP32-8048S050C.bin)")
+    print(f"   • version.json")
+    print(f"\n   They must be uploaded to the 'latest' release on GitHub.\n")
     
     # Summary
     print_header("Release Summary")
-    print(f"Version:       {Colors.OKGREEN}{new_version}{Colors.ENDC}")
-    print(f"Release Notes: {release_notes}")
-    print(f"Release Files: {release_dir}/")
+    print(f"Version:        {Colors.OKGREEN}{new_version}{Colors.ENDC}")
+    print(f"Release Notes:  {release_notes}")
+    print(f"Release Files:  {release_dir}/")
+    print(f"Firmware Size:  {get_file_size(firmware_path)}")
     print(f"\n{Colors.OKGREEN}✓ Release preparation complete!{Colors.ENDC}")
-    print(f"\n{Colors.WARNING}Don't forget to upload files to GitHub release!{Colors.ENDC}\n")
+    print(f"{Colors.WARNING}⚠ Don't forget to create the GitHub release and upload the files!{Colors.ENDC}\n")
 
 if __name__ == "__main__":
     try:

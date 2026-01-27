@@ -77,8 +77,8 @@ static esp_err_t download_http_event_handler(esp_http_client_event_t *evt)
                 // Update progress (0-50% for download)
                 if (g_download_ctx.total_size > 0 && g_progress_callback) {
                     int progress = (g_download_ctx.downloaded * 50) / g_download_ctx.total_size;
-                    char msg[64];
-                    snprintf(msg, sizeof(msg), "Downloaded %d/%d KB", 
+                    char msg[80];
+                    snprintf(msg, sizeof(msg), "DL %d/%d KB (Display flickers)", 
                             g_download_ctx.downloaded/1024, g_download_ctx.total_size/1024);
                     g_progress_callback(progress, msg);
                 }
@@ -216,7 +216,7 @@ bool ota_perform_update(ota_progress_callback_t callback)
     g_ota_status = OTA_STATUS_DOWNLOADING;
     
     if (g_progress_callback) {
-        g_progress_callback(0, "Downloading to SD card...");
+        g_progress_callback(0, "⚠ DISPLAY WILL FLICKER - NORMAL ⚠");
     }
     
     ESP_LOGI(TAG, "Starting OTA update from: %s", GITHUB_RELEASE_URL);
@@ -312,7 +312,7 @@ bool ota_perform_update(ota_progress_callback_t callback)
     // Step 2: Flash from SD card
     g_ota_status = OTA_STATUS_INSTALLING;
     if (g_progress_callback) {
-        g_progress_callback(50, "Flashing firmware...");
+        g_progress_callback(50, "Flashing (Display flickers)");
     }
     
     f = fopen(temp_file, "rb");
@@ -395,8 +395,8 @@ bool ota_perform_update(ota_progress_callback_t callback)
         // Update progress (50-100% for flashing)
         int progress = 50 + ((written * 50) / content_length);
         if (g_progress_callback) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Flashing %d/%d KB", written/1024, content_length/1024);
+            char msg[80];
+            snprintf(msg, sizeof(msg), "Flash %d/%d KB (Display flickers)", written/1024, content_length/1024);
             g_progress_callback(progress, msg);
         }
     }
