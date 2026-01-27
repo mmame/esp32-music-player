@@ -22,6 +22,9 @@ void audio_playback_task(void *arg)
     uint8_t *buffer = (uint8_t *)heap_caps_malloc(I2S_BUFFER_SIZE, MALLOC_CAP_DMA);
     uint8_t *mp3_buffer = NULL;
     mp3dec_t *mp3_decoder = NULL;  // Allocate on heap, decoder is ~6KB
+    uint8_t *wav_read_buffer = NULL;  // WAV read-ahead buffer (16KB, allocated from SPIRAM)
+    size_t wav_buffer_pos = 0;
+    size_t wav_buffer_len = 0;
     
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate DMA buffer");
@@ -43,6 +46,24 @@ void audio_playback_task(void *arg)
     }
     
     audio_file_t *audio = &audio_files[current_track];
+    
+    // Allocate WAV read buffer from SPIRAM for smooth playback
+    if (audio->type == AUDIO_TYPE_WAV) {
+        wav_read_buffer = (uint8_t *)heap_caps_malloc(SDCARD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+        if (!wav_read_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate WAV buffer from SPIRAM, trying internal RAM");
+            wav_read_buffer = (uint8_t *)heap_caps_malloc(SDCARD_BUFFER_SIZE, MALLOC_CAP_INTERNAL);
+            if (!wav_read_buffer) {
+                ESP_LOGE(TAG, "Failed to allocate WAV buffer");
+                free(buffer);
+                esp_task_wdt_delete(NULL);
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+        memset(wav_read_buffer, 0, SDCARD_BUFFER_SIZE);
+        ESP_LOGI(TAG, "WAV buffer allocated at %p (size=%d)", wav_read_buffer, SDCARD_BUFFER_SIZE);
+    }
     
     // Allocate PCM buffer on heap (4.5KB, too large for stack)
     int16_t *pcm_buffer = NULL;
@@ -130,6 +151,15 @@ void audio_playback_task(void *arg)
         ESP_LOGI(TAG, "MP3 file size: %lu bytes", mp3_file_size);
     }
     
+    // For WAV files, pre-fill the buffer now that file pointer is at correct position
+    if (audio->type == AUDIO_TYPE_WAV && wav_read_buffer) {
+        size_t initial_read = fread(wav_read_buffer, 1, SDCARD_BUFFER_SIZE, current_file);
+        wav_buffer_len = initial_read;
+        wav_buffer_pos = 0;
+        ESP_LOGI(TAG, "WAV buffer pre-filled with %zu bytes from position %ld", 
+                 initial_read, ftell(current_file) - initial_read);
+    }
+    
     while (is_playing) {
         if (is_paused) {
             // Reset watchdog while paused to prevent timeout
@@ -193,22 +223,47 @@ void audio_playback_task(void *arg)
         
         size_t bytes_written = 0;
         
+        ESP_LOGD(TAG, "Loop iteration: is_playing=%d, audio_type=%d, WAV=%d, MP3=%d", 
+                 is_playing, audio->type, AUDIO_TYPE_WAV, AUDIO_TYPE_MP3);
+        
         if (audio->type == AUDIO_TYPE_WAV) {
-            // WAV: Simple read and write
-            size_t bytes_read = fread(buffer, 1, I2S_BUFFER_SIZE, current_file);
-            
-            if (bytes_read > 0) {
-                // Check if this is the last buffer (near EOF)
-                long current_pos = ftell(current_file);
-                fseek(current_file, 0, SEEK_END);
-                long file_end = ftell(current_file);
-                fseek(current_file, current_pos, SEEK_SET);
+            ESP_LOGD(TAG, "Entering WAV playback section: wav_buffer_pos=%zu, wav_buffer_len=%zu", 
+                     wav_buffer_pos, wav_buffer_len);
+            // WAV: Read larger chunks to reduce SD card access frequency
+            // Refill buffer when half full or less
+            if (wav_read_buffer && wav_buffer_len - wav_buffer_pos <= SDCARD_BUFFER_SIZE / 2) {
+                // Move remaining data to start
+                if (wav_buffer_pos > 0 && wav_buffer_len > wav_buffer_pos) {
+                    memmove(wav_read_buffer, wav_read_buffer + wav_buffer_pos, wav_buffer_len - wav_buffer_pos);
+                    wav_buffer_len -= wav_buffer_pos;
+                    wav_buffer_pos = 0;
+                }
                 
-                bool is_last_buffer = (file_end - current_pos) < (long)I2S_BUFFER_SIZE;
+                // Read more data from SD card
+                size_t bytes_read = fread(wav_read_buffer + wav_buffer_len, 1, 
+                                         SDCARD_BUFFER_SIZE - wav_buffer_len, current_file);
+                if (bytes_read > 0) {
+                    wav_buffer_len += bytes_read;
+                }
+            }
+            
+            // Write from buffer to I2S
+            size_t bytes_to_write = (wav_buffer_len - wav_buffer_pos < I2S_BUFFER_SIZE) ? 
+                                    (wav_buffer_len - wav_buffer_pos) : I2S_BUFFER_SIZE;
+            
+            ESP_LOGD(TAG, "WAV playback: buffer_pos=%zu, buffer_len=%zu, bytes_to_write=%zu", 
+                     wav_buffer_pos, wav_buffer_len, bytes_to_write);
+            
+            if (bytes_to_write > 0) {
+                // Copy to I2S buffer
+                memcpy(buffer, wav_read_buffer + wav_buffer_pos, bytes_to_write);
+                
+                // Check if this is the last buffer (near EOF)
+                bool is_last_buffer = (wav_buffer_len - wav_buffer_pos <= I2S_BUFFER_SIZE) && feof(current_file);
                 
                 // Apply volume scaling (treat buffer as 16-bit samples)
                 int16_t *samples = (int16_t *)buffer;
-                size_t sample_count = bytes_read / 2;
+                size_t sample_count = bytes_to_write / 2;
                 
                 for (size_t i = 0; i < sample_count; i++) {
                     // Apply volume
@@ -224,8 +279,10 @@ void audio_playback_task(void *arg)
                     }
                 }
                 
-                i2s_channel_write(tx_handle, buffer, bytes_read, &bytes_written, portMAX_DELAY);
+                i2s_channel_write(tx_handle, buffer, bytes_to_write, &bytes_written, portMAX_DELAY);
+                ESP_LOGD(TAG, "WAV i2s_channel_write: requested=%zu, written=%zu", bytes_to_write, bytes_written);
                 bytes_played += bytes_written;
+                wav_buffer_pos += bytes_written;
             } else {
                 // End of WAV file - write silence to keep I2S happy
                 memset(buffer, 0, I2S_BUFFER_SIZE);
@@ -674,6 +731,11 @@ void audio_playback_task(void *arg)
     // Zero all buffers before freeing to ensure no data leaks to next task
     memset(buffer, 0, I2S_BUFFER_SIZE);
     free(buffer);
+    
+    if (wav_read_buffer) {
+        memset(wav_read_buffer, 0, SDCARD_BUFFER_SIZE);
+        free(wav_read_buffer);
+    }
     
     if (mp3_buffer) {
         memset(mp3_buffer, 0, MP3_BUFFER_SIZE);
