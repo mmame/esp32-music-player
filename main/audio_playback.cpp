@@ -258,8 +258,16 @@ void audio_playback_task(void *arg)
                 // Copy to I2S buffer
                 memcpy(buffer, wav_read_buffer + wav_buffer_pos, bytes_to_write);
                 
-                // Check if this is the last buffer (near EOF)
-                bool is_last_buffer = (wav_buffer_len - wav_buffer_pos <= I2S_BUFFER_SIZE) && feof(current_file);
+                // Check if this is near the end based on actual bytes remaining (not feof)
+                uint32_t bytes_remaining = (total_bytes > bytes_played) ? (total_bytes - bytes_played) : 0;
+                bool is_fade_start = bytes_remaining <= (I2S_BUFFER_SIZE * 6);  // Start fade 6 buffers early (~500ms)
+                bool is_near_end = bytes_remaining <= (I2S_BUFFER_SIZE * 3);
+                bool is_last_buffer = bytes_remaining <= I2S_BUFFER_SIZE;
+                
+                if (is_fade_start || is_near_end || is_last_buffer) {
+                    ESP_LOGI(TAG, "WAV near end: bytes_played=%lu, total=%lu, remaining=%lu, fade_start=%d, near_end=%d, last=%d", 
+                             bytes_played, total_bytes, bytes_remaining, is_fade_start, is_near_end, is_last_buffer);
+                }
                 
                 // Apply volume scaling (treat buffer as 16-bit samples)
                 int16_t *samples = (int16_t *)buffer;
@@ -271,12 +279,34 @@ void audio_playback_task(void *arg)
                         samples[i] = (samples[i] * volume_level) / 100;
                     }
                     
-                    // Apply fade-out on last buffer to prevent pop
-                    if (is_last_buffer && i > sample_count / 2) {
-                        // Fade out the second half of the last buffer
-                        int32_t fade = ((sample_count - i) * 1000) / (sample_count / 2);
+                    // Apply progressive fade-out starting from 6 buffers before end
+                    if (is_last_buffer) {
+                        // Very aggressive fade on last buffer
+                        int32_t fade = ((sample_count - i) * 1000) / sample_count;
+                        samples[i] = (samples[i] * fade) / 1000;
+                    } else if (is_near_end) {
+                        // Medium fade on buffers 1-3 from end
+                        // Fade to 30% by end of this zone
+                        int32_t progress = (I2S_BUFFER_SIZE * 3 - bytes_remaining + (i * 2));
+                        int32_t total_fade_length = I2S_BUFFER_SIZE * 3;
+                        int32_t fade = 1000 - ((progress * 700) / total_fade_length);
+                        if (fade < 300) fade = 300;
+                        samples[i] = (samples[i] * fade) / 1000;
+                    } else if (is_fade_start) {
+                        // Gentle fade on buffers 4-6 from end
+                        // Fade from 100% to 70%
+                        int32_t progress = (I2S_BUFFER_SIZE * 6 - bytes_remaining + (i * 2));
+                        int32_t total_fade_length = I2S_BUFFER_SIZE * 3;  // Fade over 3 buffers
+                        int32_t fade = 1000 - ((progress * 300) / total_fade_length);
+                        if (fade < 700) fade = 700;
+                        if (fade > 1000) fade = 1000;
                         samples[i] = (samples[i] * fade) / 1000;
                     }
+                }
+                
+                // Force the last 128 samples to zero to ensure clean silence transition
+                if (is_last_buffer && sample_count > 128) {
+                    memset(&samples[sample_count - 128], 0, 128 * sizeof(int16_t));
                 }
                 
                 i2s_channel_write(tx_handle, buffer, bytes_to_write, &bytes_written, portMAX_DELAY);
@@ -284,9 +314,12 @@ void audio_playback_task(void *arg)
                 bytes_played += bytes_written;
                 wav_buffer_pos += bytes_written;
             } else {
-                // End of WAV file - write silence to keep I2S happy
+                // End of WAV file - write multiple silence buffers to prevent pop
                 memset(buffer, 0, I2S_BUFFER_SIZE);
-                i2s_channel_write(tx_handle, buffer, I2S_BUFFER_SIZE, &bytes_written, portMAX_DELAY);
+                // Write several silence buffers to ensure smooth fadeout
+                for (int i = 0; i < 5; i++) {
+                    i2s_channel_write(tx_handle, buffer, I2S_BUFFER_SIZE, &bytes_written, portMAX_DELAY);
+                }
                 bytes_written = 0;  // Signal EOF
             }
         } else if (audio->type == AUDIO_TYPE_MP3) {
@@ -488,16 +521,16 @@ void audio_playback_task(void *arg)
             // End of file
             ESP_LOGI(TAG, "Finished playing track");
             
+            // Reuse existing DMA buffer for silence (already allocated, just zero it)
+            // This avoids any potential timing issues from allocation
+            memset(buffer, 0, I2S_BUFFER_SIZE);
+            
             // Write LOTS of silence immediately to keep I2S fed during entire file transition
             // This prevents I2S DMA underrun pop during file close/open/setup
-            uint8_t *end_silence = (uint8_t *)heap_caps_calloc(I2S_BUFFER_SIZE, 1, MALLOC_CAP_DMA);
-            if (end_silence) {
-                size_t bytes_written;
-                // Write MORE to cover the entire file operations duration (10 × 8KB = 80KB)
-                for (int i = 0; i < 10; i++) {
-                    i2s_channel_write(tx_handle, end_silence, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
-                }
-                free(end_silence);
+            size_t bytes_written;
+            // Write MORE to cover the entire file operations duration (10 × 8KB = 80KB)
+            for (int i = 0; i < 10; i++) {
+                i2s_channel_write(tx_handle, buffer, I2S_BUFFER_SIZE, &bytes_written, pdMS_TO_TICKS(50));
             }
             
             // Update UI to show 100% completion
