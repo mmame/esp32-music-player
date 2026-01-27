@@ -229,23 +229,40 @@ def main():
     
     # Step 9: Git operations
     print_step(9, "Git operations")
+    
+    # Try to commit changes (if any)
     if confirm("Create git commit for version update?"):
         try:
             subprocess.run(["git", "add", "main/ota_update.h", "version.json"], check=True)
-            subprocess.run(["git", "commit", "-m", f"Release version {new_version}"], check=True)
-            print_success("Git commit created")
-            
-            if confirm("Create git tag?"):
-                tag_name = f"v{new_version}"
-                subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Release {new_version}"], check=True)
-                print_success(f"Created git tag: {tag_name}")
-                
-                if confirm("Push to GitHub?"):
-                    subprocess.run(["git", "push"], check=True)
-                    subprocess.run(["git", "push", "--tags"], check=True)
-                    print_success("Pushed to GitHub")
+            result = subprocess.run(["git", "commit", "-m", f"Release version {new_version}"], capture_output=True)
+            if result.returncode == 0:
+                print_success("Git commit created")
+            else:
+                print_warning("No changes to commit (files already up to date)")
         except subprocess.CalledProcessError as e:
-            print_error(f"Git operation failed: {e}")
+            print_warning(f"Git commit failed: {e}")
+        except FileNotFoundError:
+            print_error("Git not found")
+            sys.exit(1)
+    
+    # Always ask about creating and pushing tags (independent of commit status)
+    if confirm("Create git tag?"):
+        try:
+            tag_name = f"v{new_version}"
+            # Try to create tag, force if it already exists
+            result = subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Release {new_version}", "-f"], capture_output=True, text=True)
+            if result.returncode == 0:
+                print_success(f"Created git tag: {tag_name}")
+            else:
+                print_error(f"Failed to create tag: {result.stderr}")
+                
+            if confirm("Push to GitHub?"):
+                try:
+                    subprocess.run(["git", "push"], check=True)
+                    subprocess.run(["git", "push", "--tags", "--force"], check=True)
+                    print_success("Pushed to GitHub (including tags)")
+                except subprocess.CalledProcessError as e:
+                    print_error(f"Push failed: {e}")
         except FileNotFoundError:
             print_error("Git not found")
     
