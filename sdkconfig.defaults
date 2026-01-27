@@ -24,6 +24,7 @@ CONFIG_LV_OS_FREERTOS=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_120M=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 
 # Enabling the following configurations can help increase the PCLK frequency in the case when
 # the Frame Buffer is allocated from the PSRAM and fetched by EDMA
@@ -34,6 +35,8 @@ CONFIG_SPIRAM_RODATA=y
 CONFIG_FATFS_LFN_HEAP=y
 
 # mbedTLS - Optimize for lower memory usage with dynamic buffers
+# Use external SPIRAM for TLS buffers to avoid internal RAM exhaustion
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y

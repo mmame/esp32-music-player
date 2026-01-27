@@ -116,6 +116,8 @@ bool ota_check_for_updates(ota_progress_callback_t callback)
     config.url = GITHUB_VERSION_URL;
     config.event_handler = version_http_event_handler;
     config.timeout_ms = 10000;
+    config.buffer_size = 4096;  // Increase buffer size for headers
+    config.buffer_size_tx = 2048;  // Transmit buffer
     config.crt_bundle_attach = esp_crt_bundle_attach;
     
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -208,6 +210,8 @@ bool ota_perform_update(ota_progress_callback_t callback)
     config.url = GITHUB_RELEASE_URL;
     config.event_handler = ota_http_event_handler;
     config.timeout_ms = 30000;
+    config.buffer_size = 8192;  // Larger buffer for firmware download
+    config.buffer_size_tx = 2048;  // Transmit buffer
     config.keep_alive_enable = true;
     config.crt_bundle_attach = esp_crt_bundle_attach;
     
