@@ -785,6 +785,12 @@ void audio_player_play(const char *filename)
     if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
         *dot = '\0';
     }
+    // Replace underscores with spaces for display
+    for (char *p = title_without_ext; *p != '\0'; p++) {
+        if (*p == '_') {
+            *p = ' ';
+        }
+    }
     lv_label_set_text(title_label, title_without_ext);
     set_title_scroll_speed(title_label, title_without_ext);
     
@@ -890,6 +896,12 @@ void audio_player_load(const char *filename)
     char *dot = strrchr(title_without_ext, '.');
     if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
         *dot = '\0';
+    }
+    // Replace underscores with spaces for display
+    for (char *p = title_without_ext; *p != '\0'; p++) {
+        if (*p == '_') {
+            *p = ' ';
+        }
     }
     const char *type_str = audio->type == AUDIO_TYPE_MP3 ? "MP3" : "WAV";
     

@@ -703,6 +703,12 @@ void audio_playback_task(void *arg)
                     if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
                         *dot = '\0';
                     }
+                    // Replace underscores with spaces for display
+                    for (char *p = title_without_ext; *p != '\0'; p++) {
+                        if (*p == '_') {
+                            *p = ' ';
+                        }
+                    }
                     lv_label_set_text(title_label, title_without_ext);
                     set_title_scroll_speed(title_label, title_without_ext);
                     
@@ -951,6 +957,12 @@ void audio_player_scan_wav_files(void)
         char *dot = strrchr(title_without_ext, '.');
         if (dot && (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".mp3") == 0)) {
             *dot = '\0';
+        }
+        // Replace underscores with spaces for display
+        for (char *p = title_without_ext; *p != '\0'; p++) {
+            if (*p == '_') {
+                *p = ' ';
+            }
         }
         lv_label_set_text(title_label, title_without_ext);
         set_title_scroll_speed(title_label, title_without_ext);
