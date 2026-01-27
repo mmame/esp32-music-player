@@ -45,31 +45,46 @@ static esp_err_t version_http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-// HTTP event handler for OTA download
-static esp_err_t ota_http_event_handler(esp_http_client_event_t *evt)
+// Download context for OTA
+typedef struct {
+    FILE *file;
+    int downloaded;
+    int total_size;
+} download_context_t;
+
+static download_context_t g_download_ctx;
+
+// HTTP event handler for firmware download
+static esp_err_t download_http_event_handler(esp_http_client_event_t *evt)
 {
     switch (evt->event_id) {
-        case HTTP_EVENT_ERROR:
-            ESP_LOGE(TAG, "HTTP_EVENT_ERROR");
-            break;
-        case HTTP_EVENT_ON_CONNECTED:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
-            break;
-        case HTTP_EVENT_HEADER_SENT:
-            ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
-            break;
         case HTTP_EVENT_ON_HEADER:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            if (strcasecmp(evt->header_key, "Content-Length") == 0) {
+                g_download_ctx.total_size = atoi(evt->header_value);
+                ESP_LOGI(TAG, "Download size: %d bytes", g_download_ctx.total_size);
+            }
             break;
+            
         case HTTP_EVENT_ON_DATA:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            if (g_download_ctx.file && evt->data_len > 0) {
+                size_t written = fwrite(evt->data, 1, evt->data_len, g_download_ctx.file);
+                if (written != evt->data_len) {
+                    ESP_LOGE(TAG, "SD card write error");
+                    return ESP_FAIL;
+                }
+                g_download_ctx.downloaded += evt->data_len;
+                
+                // Update progress (0-50% for download)
+                if (g_download_ctx.total_size > 0 && g_progress_callback) {
+                    int progress = (g_download_ctx.downloaded * 50) / g_download_ctx.total_size;
+                    char msg[64];
+                    snprintf(msg, sizeof(msg), "Downloaded %d/%d KB", 
+                            g_download_ctx.downloaded/1024, g_download_ctx.total_size/1024);
+                    g_progress_callback(progress, msg);
+                }
+            }
             break;
-        case HTTP_EVENT_ON_FINISH:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
-            break;
-        case HTTP_EVENT_DISCONNECTED:
-            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
-            break;
+            
         default:
             break;
     }
@@ -201,29 +216,45 @@ bool ota_perform_update(ota_progress_callback_t callback)
     g_ota_status = OTA_STATUS_DOWNLOADING;
     
     if (g_progress_callback) {
-        g_progress_callback(0, "Starting download...");
+        g_progress_callback(0, "Downloading to SD card...");
     }
     
     ESP_LOGI(TAG, "Starting OTA update from: %s", GITHUB_RELEASE_URL);
     
+    // Step 1: Download firmware to SD card using event handler
+    const char *temp_file = "/sdcard/firmware_temp.bin";
+    FILE *f = fopen(temp_file, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open SD card file for writing");
+        snprintf(g_error_message, sizeof(g_error_message), "SD card write error");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    // Initialize download context
+    g_download_ctx.file = f;
+    g_download_ctx.downloaded = 0;
+    g_download_ctx.total_size = 0;
+    
+    // Configure HTTP client with event handler for automatic redirect support
     esp_http_client_config_t config = {};
     config.url = GITHUB_RELEASE_URL;
-    config.event_handler = ota_http_event_handler;
+    config.event_handler = download_http_event_handler;
     config.timeout_ms = 30000;
-    config.buffer_size = 8192;  // Larger buffer for firmware download
-    config.buffer_size_tx = 2048;  // Transmit buffer
+    config.buffer_size = 8192;
+    config.buffer_size_tx = 2048;
     config.keep_alive_enable = true;
     config.crt_bundle_attach = esp_crt_bundle_attach;
     
-    esp_https_ota_config_t ota_config = {};
-    ota_config.http_config = &config;
-    
-    esp_https_ota_handle_t https_ota_handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_config, &https_ota_handle);
-    
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed");
-        snprintf(g_error_message, sizeof(g_error_message), "OTA begin failed: %s", esp_err_to_name(err));
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to init HTTP client");
+        fclose(f);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "HTTP init failed");
         g_ota_status = OTA_STATUS_ERROR;
         if (g_progress_callback) {
             g_progress_callback(0, g_error_message);
@@ -231,12 +262,18 @@ bool ota_perform_update(ota_progress_callback_t callback)
         return false;
     }
     
-    esp_app_desc_t app_desc;
-    err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
+    // Perform HTTP request - this handles redirects automatically
+    esp_err_t err = esp_http_client_perform(client);
+    int status_code = esp_http_client_get_status_code(client);
+    
+    fclose(f);
+    g_download_ctx.file = NULL;
+    
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed");
-        esp_https_ota_abort(https_ota_handle);
-        snprintf(g_error_message, sizeof(g_error_message), "Failed to get image description");
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "Download failed: %s", esp_err_to_name(err));
         g_ota_status = OTA_STATUS_ERROR;
         if (g_progress_callback) {
             g_progress_callback(0, g_error_message);
@@ -244,37 +281,45 @@ bool ota_perform_update(ota_progress_callback_t callback)
         return false;
     }
     
-    ESP_LOGI(TAG, "New firmware version: %s", app_desc.version);
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "HTTP Status = %d", status_code);
+        esp_http_client_cleanup(client);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "Server returned HTTP %d", status_code);
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
     
+    int content_length = g_download_ctx.total_size;
+    esp_http_client_cleanup(client);
+    
+    if (content_length <= 0) {
+        ESP_LOGE(TAG, "Invalid download size: %d", content_length);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "Invalid download size");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Download complete: %d bytes, starting flash from SD card", content_length);
+    
+    // Step 2: Flash from SD card
     g_ota_status = OTA_STATUS_INSTALLING;
-    
-    int total_size = esp_https_ota_get_image_size(https_ota_handle);
-    int downloaded = 0;
-    int last_progress = -1;
-    
-    while (1) {
-        err = esp_https_ota_perform(https_ota_handle);
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-            break;
-        }
-        
-        downloaded = esp_https_ota_get_image_len_read(https_ota_handle);
-        int progress = (total_size > 0) ? (downloaded * 100 / total_size) : 0;
-        
-        if (progress != last_progress && g_progress_callback) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Downloading: %d%%", progress);
-            g_progress_callback(progress, msg);
-            last_progress = progress;
-        }
-        
-        ESP_LOGD(TAG, "Downloaded: %d / %d bytes", downloaded, total_size);
+    if (g_progress_callback) {
+        g_progress_callback(50, "Flashing firmware...");
     }
     
-    if (esp_https_ota_is_complete_data_received(https_ota_handle) != true) {
-        ESP_LOGE(TAG, "Complete data was not received.");
-        esp_https_ota_abort(https_ota_handle);
-        snprintf(g_error_message, sizeof(g_error_message), "Incomplete download");
+    f = fopen(temp_file, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open downloaded file");
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "Failed to open temp file");
         g_ota_status = OTA_STATUS_ERROR;
         if (g_progress_callback) {
             g_progress_callback(0, g_error_message);
@@ -282,15 +327,28 @@ bool ota_perform_update(ota_progress_callback_t callback)
         return false;
     }
     
-    err = esp_https_ota_finish(https_ota_handle);
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        ESP_LOGE(TAG, "No OTA partition found");
+        fclose(f);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "No OTA partition");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Writing to partition: %s at 0x%lx", update_partition->label, update_partition->address);
+    
+    esp_ota_handle_t ota_handle;
+    err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
     if (err != ESP_OK) {
-        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
-            ESP_LOGE(TAG, "Image validation failed, image is corrupted");
-            snprintf(g_error_message, sizeof(g_error_message), "Image validation failed");
-        } else {
-            ESP_LOGE(TAG, "ESP HTTPS OTA upgrade failed 0x%x", err);
-            snprintf(g_error_message, sizeof(g_error_message), "OTA upgrade failed: %s", esp_err_to_name(err));
-        }
+        ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+        fclose(f);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "OTA begin failed");
         g_ota_status = OTA_STATUS_ERROR;
         if (g_progress_callback) {
             g_progress_callback(0, g_error_message);
@@ -298,14 +356,83 @@ bool ota_perform_update(ota_progress_callback_t callback)
         return false;
     }
     
-    ESP_LOGI(TAG, "OTA upgrade successful!");
-    g_ota_status = OTA_STATUS_SUCCESS;
+    uint8_t *buffer = (uint8_t *)malloc(4096);
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate flash buffer");
+        esp_ota_abort(ota_handle);
+        fclose(f);
+        remove(temp_file);
+        snprintf(g_error_message, sizeof(g_error_message), "Memory error");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
     
+    int written = 0;
+    while (true) {
+        size_t bytes_read = fread(buffer, 1, 4096, f);
+        if (bytes_read == 0) break;
+        
+        err = esp_ota_write(ota_handle, buffer, bytes_read);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
+            free(buffer);
+            esp_ota_abort(ota_handle);
+            fclose(f);
+            remove(temp_file);
+            snprintf(g_error_message, sizeof(g_error_message), "Flash write failed");
+            g_ota_status = OTA_STATUS_ERROR;
+            if (g_progress_callback) {
+                g_progress_callback(0, g_error_message);
+            }
+            return false;
+        }
+        
+        written += bytes_read;
+        
+        // Update progress (50-100% for flashing)
+        int progress = 50 + ((written * 50) / content_length);
+        if (g_progress_callback) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Flashing %d/%d KB", written/1024, content_length/1024);
+            g_progress_callback(progress, msg);
+        }
+    }
+    
+    free(buffer);
+    fclose(f);
+    remove(temp_file);
+    
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+        snprintf(g_error_message, sizeof(g_error_message), "OTA end failed: %s", esp_err_to_name(err));
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        snprintf(g_error_message, sizeof(g_error_message), "Set boot partition failed");
+        g_ota_status = OTA_STATUS_ERROR;
+        if (g_progress_callback) {
+            g_progress_callback(0, g_error_message);
+        }
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "OTA update successful!");
+    g_ota_status = OTA_STATUS_SUCCESS;
     if (g_progress_callback) {
         g_progress_callback(100, "Update complete! Rebooting...");
     }
     
-    // Reboot will happen from the caller
     return true;
 }
 
