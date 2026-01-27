@@ -1,5 +1,8 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPath": "C:/Users/default.DESKTOP-FC9SLHI/esp/v5.5.2",
+  "idf.toolsPath": "C:/Users/default.DESKTOP-FC9SLHI/.espressif",
+  "idf.pythonBinPath": "C:/Users/default.DESKTOP-FC9SLHI/.espressif/python_env/idf5.5_py3.10_env/Scripts/python.exe",
   "idf.openOcdConfigs": [
     "interface/ftdi/esp_ftdi.cfg",
     "target/esp32s3.cfg"

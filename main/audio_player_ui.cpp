@@ -568,7 +568,17 @@ static void save_audio_config(void)
 void set_title_scroll_speed(lv_obj_t *label, const char *text) {
     // Get the actual rendered width of the text in pixels
     const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
-    int32_t text_width = lv_text_get_width(text, strlen(text), font, 0);
+    lv_point_t size;
+    lv_text_get_size(
+        &size,
+        text,
+        font,
+        0,              // letter spacing
+        0,              // line spacing
+        LV_COORD_MAX,   // max width
+        LV_TEXT_FLAG_NONE
+    );
+    int32_t text_width = size.x;
     
     // Get label width for reference
     int32_t label_width = lv_obj_get_width(label);
