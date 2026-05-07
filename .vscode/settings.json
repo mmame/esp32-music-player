@@ -13,4 +13,5 @@
     "IDF_TARGET": "esp32s3"
   },
   "idf.portWin": "COM11",
+  "idf.currentSetup": "C:\\Users\\default.DESKTOP-FC9SLHI\\esp\\v5.5.2\\esp-idf",
 }
