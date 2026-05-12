@@ -253,6 +253,7 @@ static void audio_task(void *arg)
             s_cmd_play_initiated_us = esp_timer_get_time(); // keep setAudioInfo suppressed
             flush_audio_buffers();
             player.stop();
+            flush_audio_buffers();
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_is_playing = false;
             g_is_paused  = false;
