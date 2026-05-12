@@ -5,7 +5,7 @@
  * Layout (800×480):
  *   Left panel  (x=0..599,  w=600): title, "NOW PLAYING", progress bar, STOP button
  *   Divider     (x=597..599, w=2):  vertical separator
- *   Right panel (x=600..799, w=200): VOL / TMP / EXP vertical bar indicators
+ *   Right panel (x=600..799, w=200): VOL / TMP vertical bar indicators
  *
  * Thread safety: all *_async() functions post lv_async_call() items to the
  * LVGL task.  The STOP button callback and all non-async functions run inside
@@ -42,9 +42,10 @@ static const char *TAG = "ui_player";
 #define STOP_Y           340    /* STOP button top edge                     */
 #define STOP_W           300    /* STOP button width                        */
 #define STOP_H           90     /* STOP button height                       */
+#define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
 
-/* Right panel – three indicator columns */
-#define COL_W            (RIGHT_W / 3)   /* ≈ 66 px per column              */
+/* Right panel – two indicator columns */
+#define COL_W            (RIGHT_W / 2)   /* 100 px per column               */
 #define BAR_W            34              /* indicator bar width              */
 #define BAR_H            300             /* indicator bar height             */
 #define BAR_TOP_Y        55              /* bar top edge inside right panel  */
@@ -66,10 +67,11 @@ static const char *TAG = "ui_player";
 static lv_obj_t *s_screen         = NULL;
 static lv_obj_t *s_title_lbl      = NULL;
 static lv_obj_t *s_progress_bar   = NULL;
+static lv_obj_t *s_time_lbl       = NULL;  /* "elapsed / total" below progress bar */
 
-/* Three poti bars + value labels */
-static lv_obj_t *s_bar[3]         = {NULL, NULL, NULL};  /* VOL, TMP, EXP */
-static lv_obj_t *s_val_lbl[3]     = {NULL, NULL, NULL};
+/* Two poti bars + value labels */
+static lv_obj_t *s_bar[2]         = {NULL, NULL};  /* VOL, TMP */
+static lv_obj_t *s_val_lbl[2]     = {NULL, NULL};
 
 /* Indeterminate progress animation */
 static lv_anim_t s_prog_anim;
@@ -249,6 +251,15 @@ void ui_player_create(void)
     lv_obj_set_style_bg_opa(s_progress_bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_progress_bar, 4, LV_PART_INDICATOR);
 
+    /* Time label: "elapsed / total" right-aligned below the progress bar -- */
+    s_time_lbl = lv_label_create(left);
+    lv_label_set_text(s_time_lbl, "0:00 / 0:00");
+    lv_obj_set_style_text_font(s_time_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_time_lbl, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_set_width(s_time_lbl, SPLIT_X - 2 * PROGRESS_PAD_X);
+    lv_obj_set_style_text_align(s_time_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(s_time_lbl, PROGRESS_PAD_X, TIME_LABEL_Y);
+
     /* STOP button -------------------------------------------------------- */
     lv_obj_t *stop_btn = lv_button_create(left);
     lv_obj_set_size(stop_btn, STOP_W, STOP_H);
@@ -291,7 +302,6 @@ void ui_player_create(void)
 
     create_indicator_col(right, 0, "VOL");
     create_indicator_col(right, 1, "TMP");
-    create_indicator_col(right, 2, "EXP");
 
     ESP_LOGI(TAG, "Player view created");
 }
@@ -307,7 +317,6 @@ typedef struct {
 typedef struct {
     uint8_t volume;
     uint8_t tempo;
-    uint8_t expression;
 } async_poti_payload_t;
 
 static void async_cb_show(void *user_data)
@@ -319,8 +328,10 @@ static void async_cb_show(void *user_data)
     snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_AUDIO "  %s", p->song_name);
     lv_label_set_text(s_title_lbl, title_buf);
 
-    /* Reset and start progress animation */
-    start_progress_anim();
+    /* Reset progress – real data arrives immediately via update_progress_async */
+    stop_progress_anim();
+    if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+    if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
 
     /* Load the player screen with a left-slide transition */
     lv_screen_load_anim(s_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 250, 0, false);
@@ -332,8 +343,15 @@ static void async_cb_hide(void *user_data)
 {
     (void)user_data;
     stop_progress_anim();
+    if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
+    if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
     ui_songlist_show();
 }
+
+typedef struct {
+    uint8_t  pct;
+    uint16_t dur_s;
+} async_progress_payload_t;
 
 static void async_cb_update_potis(void *user_data)
 {
@@ -350,10 +368,26 @@ static void async_cb_update_potis(void *user_data)
         snprintf(buf, sizeof(buf), "%3u", p->tempo);
         lv_label_set_text(s_val_lbl[1], buf);
     }
-    if (s_bar[2]) {
-        lv_bar_set_value(s_bar[2], p->expression, LV_ANIM_ON);
-        snprintf(buf, sizeof(buf), "%3u", p->expression);
-        lv_label_set_text(s_val_lbl[2], buf);
+    free(p);
+}
+
+static void async_cb_update_progress(void *user_data)
+{
+    async_progress_payload_t *p = (async_progress_payload_t *)user_data;
+
+    /* Stop indeterminate animation if still running from a previous session */
+    stop_progress_anim();
+
+    if (s_progress_bar) {
+        lv_bar_set_value(s_progress_bar, p->pct, LV_ANIM_OFF);
+    }
+    if (s_time_lbl) {
+        uint16_t elapsed_s = (uint16_t)((uint32_t)p->dur_s * p->pct / 100);
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%u:%02u / %u:%02u",
+                 elapsed_s / 60, elapsed_s % 60,
+                 p->dur_s  / 60, p->dur_s  % 60);
+        lv_label_set_text(s_time_lbl, buf);
     }
 
     free(p);
@@ -383,15 +417,26 @@ void ui_player_hide_async(void)
     lv_async_call(async_cb_hide, NULL);
 }
 
-void ui_player_update_potis_async(uint8_t volume, uint8_t tempo, uint8_t expression)
+void ui_player_update_potis_async(uint8_t volume, uint8_t tempo)
 {
     if (!s_screen) return;
 
     async_poti_payload_t *p = malloc(sizeof(async_poti_payload_t));
     if (!p) { ESP_LOGE(TAG, "OOM in update_potis_async"); return; }
 
-    p->volume     = volume;
-    p->tempo      = tempo;
-    p->expression = expression;
+    p->volume = volume;
+    p->tempo  = tempo;
     lv_async_call(async_cb_update_potis, p);
+}
+
+void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s)
+{
+    if (!s_screen) return;
+
+    async_progress_payload_t *p = malloc(sizeof(async_progress_payload_t));
+    if (!p) { ESP_LOGE(TAG, "OOM in update_progress_async"); return; }
+
+    p->pct   = position_pct;
+    p->dur_s = duration_s;
+    lv_async_call(async_cb_update_progress, p);
 }

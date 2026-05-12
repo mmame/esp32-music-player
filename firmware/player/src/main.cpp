@@ -56,9 +56,11 @@ static AudioPlayer   player(audioSource, sonicOut, wavDecoder);
 
 // ─── Shared playback state (protected by s_state_mutex) ──────────────────────
 static SemaphoreHandle_t s_state_mutex = nullptr;
-static float    g_speed      = 1.0f;   // 0.2–4.0
-static uint8_t  g_volume     = 80;     // 0–100
-static bool     g_is_playing = false;
+static float    g_speed           = 1.0f;   // 0.2–4.0
+static uint8_t  g_volume          = 80;     // 0–100
+static bool     g_is_playing      = false;
+static uint32_t g_song_data_bytes = 0;      // WAV audio data bytes (file size minus 44-byte header)
+static int64_t  g_play_start_us   = 0;      // esp_timer_get_time() at song start
 static AudioInfo g_fmt;
 
 // Commands posted from Core 0 io_task to Core 1 audio_task
@@ -124,9 +126,13 @@ static void scan_playlist(void)
             (name[len-2] == 'a' || name[len-2] == 'A') &&
             (name[len-1] == 'v' || name[len-1] == 'V'))
         {
-            strncpy(g_song_names[g_song_count], name, MAX_NAME - 1);
-            g_song_names[g_song_count][MAX_NAME - 1] = '\0';
-            ESP_LOGI(TAG, "  [%2u] %s", g_song_count + 1, name);
+            // Store without the .wav extension (display names stay clean;
+            // the extension is re-appended when building the playback path).
+            size_t copy_len = len - 4;  // drop ".wav"
+            if (copy_len >= MAX_NAME) copy_len = MAX_NAME - 1;
+            memcpy(g_song_names[g_song_count], name, copy_len);
+            g_song_names[g_song_count][copy_len] = '\0';
+            ESP_LOGI(TAG, "  [%2u] %s", g_song_count + 1, g_song_names[g_song_count]);
             g_song_count++;
         }
         f.close();
@@ -158,11 +164,20 @@ static void on_stop_song(void)
 
 // ─── Format change notifier ───────────────────────────────────────────────────
 
+// Set by FormatChangeNotifier::setAudioInfo() whenever a new track's audio
+// format arrives (i.e. a new file started decoding).  Read and cleared only
+// from audio_task (Core 1) so no mutex is needed.
+static bool s_track_format_arrived = false;
+// True when the upcoming format change was initiated by an explicit command
+// (s_cmd_play_id / s_cmd_next) rather than AudioPlayer's internal auto-advance.
+static bool s_track_cmd_initiated  = false;
+
 struct FormatChangeNotifier : public AudioInfoSupport {
     void setAudioInfo(AudioInfo info) override {
         g_fmt = info;
         sonicOut.begin(info);
         sonicOut.setSpeed(g_speed);
+        s_track_format_arrived = true;   // signal audio_task that a new track started
         ESP_LOGI(TAG, "[Format] %d Hz  %dch  %d-bit",
                  info.sample_rate, info.channels, info.bits_per_sample);
     }
@@ -192,14 +207,25 @@ static void audio_task(void *arg)
             s_cmd_play_id = -1;
             if (play_id < (int16_t)g_song_count) {
                 // Build full path "/filename.wav"
-                char path[MAX_NAME + 2];
-                snprintf(path, sizeof(path), "/%s", g_song_names[play_id]);
+                char path[MAX_NAME + 6];  // '/' + name + '.wav' + NUL
+                snprintf(path, sizeof(path), "/%s.wav", g_song_names[play_id]);
                 ESP_LOGI(TAG, "[Audio] Playing: %s", path);
+                s_track_cmd_initiated = true;   // suppress auto-advance logic
                 player.setPath(path);
                 player.play();
+                // Stat the file to know total audio data bytes (for progress %)
+                uint32_t data_bytes = 0;
+                File sf = SD.open(path);
+                if (sf) {
+                    size_t fsz = sf.size();
+                    data_bytes = (fsz > 44) ? (uint32_t)(fsz - 44) : 0;
+                    sf.close();
+                }
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                g_current_song = play_id;
-                g_is_playing   = true;
+                g_current_song    = play_id;
+                g_is_playing      = true;
+                g_song_data_bytes = data_bytes;
+                g_play_start_us   = esp_timer_get_time();
                 xSemaphoreGive(s_state_mutex);
             }
         }
@@ -207,15 +233,65 @@ static void audio_task(void *arg)
         // Handle next-track command
         if (s_cmd_next) {
             s_cmd_next = false;
+            s_track_cmd_initiated = true;   // suppress auto-advance logic
             player.next();
+            int16_t new_song;
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_current_song = (g_current_song + 1) % (int16_t)g_song_count;
-            g_is_playing   = true;
+            new_song = g_current_song;
             xSemaphoreGive(s_state_mutex);
-            ESP_LOGI(TAG, "[Audio] Next track → [%d] '%s'", g_current_song, g_song_names[g_current_song]);
+            char npath[MAX_NAME + 6];
+            snprintf(npath, sizeof(npath), "/%s.wav", g_song_names[new_song]);
+            uint32_t ndata = 0;
+            File nf = SD.open(npath);
+            if (nf) {
+                size_t fsz = nf.size();
+                ndata = (fsz > 44) ? (uint32_t)(fsz - 44) : 0;
+                nf.close();
+            }
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            g_song_data_bytes = ndata;
+            g_play_start_us   = esp_timer_get_time();
+            g_is_playing      = true;
+            xSemaphoreGive(s_state_mutex);
+            ESP_LOGI(TAG, "[Audio] Next track → [%d] '%s'", new_song, g_song_names[new_song]);
         }
 
-        player.copy();
+        // Detect AudioPlayer's internal auto-advance (end of track → next song)
+        if (s_track_format_arrived) {
+            s_track_format_arrived = false;
+            if (!s_track_cmd_initiated) {
+                // Auto-advance: update song index and timing state
+                int16_t new_song;
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                g_current_song = (g_current_song + 1) % (int16_t)g_song_count;
+                new_song = g_current_song;
+                xSemaphoreGive(s_state_mutex);
+                char apath[MAX_NAME + 6];
+                snprintf(apath, sizeof(apath), "/%s.wav", g_song_names[new_song]);
+                uint32_t adata = 0;
+                File af = SD.open(apath);
+                if (af) {
+                    size_t fsz = af.size();
+                    adata = (fsz > 44) ? (uint32_t)(fsz - 44) : 0;
+                    af.close();
+                }
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                g_song_data_bytes = adata;
+                g_play_start_us   = esp_timer_get_time();
+                g_is_playing      = true;
+                xSemaphoreGive(s_state_mutex);
+                ESP_LOGI(TAG, "[Audio] Auto-advanced to [%d] '%s'", new_song, g_song_names[new_song]);
+            } else {
+                s_track_cmd_initiated = false; // consume the flag
+            }
+        }
+
+        if (g_is_playing) {
+            player.copy();
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10)); // yield so setup() can finish on Core 1
+        }
     }
 }
 
@@ -296,21 +372,42 @@ static void io_task(void *arg)
             last_status_ms = now;
 
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-            bool     playing   = g_is_playing;
-            uint8_t  vol       = g_volume;
-            float    spd       = g_speed;
-            int16_t  cur       = g_current_song;
+            bool     playing    = g_is_playing;
+            uint8_t  vol        = g_volume;
+            float    spd        = g_speed;
+            int16_t  cur        = g_current_song;
+            uint32_t data_bytes = g_song_data_bytes;
+            int64_t  start_us   = g_play_start_us;
             xSemaphoreGive(s_state_mutex);
 
             const char *song_name = (cur >= 0 && cur < (int16_t)g_song_count)
                                     ? g_song_names[cur]
                                     : "";
-            uint8_t tempo_byte = speed_to_tempo_byte(spd);
+            uint8_t  tempo_byte   = speed_to_tempo_byte(spd);
+            uint8_t  position_pct = 0;
+            uint16_t duration_s   = 0;
+
+            // Compute playback position and speed-adjusted duration.
+            // g_fmt is written once at song start (Core 1) before io_task reads it;
+            // sample_rate is guaranteed non-zero after player.begin().
+            if (playing && data_bytes > 0 && g_fmt.sample_rate > 0) {
+                uint32_t bytes_per_sec = (uint32_t)g_fmt.sample_rate
+                                       * (uint32_t)g_fmt.channels
+                                       * (uint32_t)(g_fmt.bits_per_sample / 8);
+                float total_audio_s       = (float)data_bytes / (float)bytes_per_sec;
+                float speed_adj_dur_s     = total_audio_s / spd;  // shorter when faster
+                float elapsed_s           = (float)(esp_timer_get_time() - start_us) / 1000000.0f;
+                float pct                 = elapsed_s / speed_adj_dur_s * 100.0f;
+                position_pct = (pct >= 100.0f) ? 100u : (pct < 0.0f ? 0u : (uint8_t)pct);
+                duration_s   = (speed_adj_dur_s > 65535.0f) ? 65535u : (uint16_t)speed_adj_dur_s;
+            }
 
             uart_master_send_state(song_name,
                                    playing ? 1u : 0u,
                                    vol,
-                                   tempo_byte);
+                                   tempo_byte,
+                                   position_pct,
+                                   duration_s);
         }
 
         vTaskDelay(pdMS_TO_TICKS(5));   // yield 5 ms – enough headroom for UART
@@ -405,7 +502,7 @@ void setup()
         if (type == MetaDataType::Title)
             ESP_LOGI(TAG, "[Track] %s", str);
     });
-    player.begin();
+    player.begin(false);   // do not auto-play on power-up
     player.setVolume((float)g_volume / 100.0f);
     player.setBufferSize(16384);
     ESP_LOGI(TAG, "AudioPlayer started: vol=%u/100  readBuf=16384 B", g_volume);

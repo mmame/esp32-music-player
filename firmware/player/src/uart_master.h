@@ -91,15 +91,27 @@ void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t co
 /**
  * @brief Send CMD_SET_STATE to update the display with the current player state.
  *
- * @param song_name   Null-terminated current track name (may be "").
- * @param is_playing  1 = playing, 0 = stopped/paused.
- * @param volume      0–100.
- * @param tempo       Speed as 0–100 (maps 0.2×–4.0× linearly on 50 = 1.0×).
+ * Payload layout (little-endian):
+ *   [0]       is_playing   : uint8_t   (1 = playing, 0 = stopped)
+ *   [1]       volume       : uint8_t   (0–100)
+ *   [2]       tempo        : uint8_t   (0–100, 50 = 1.0× speed)
+ *   [3]       position_pct : uint8_t   (0–100, playback progress)
+ *   [4..5]    duration_s   : uint16_t  (speed-adjusted song length in seconds)
+ *   [6..N-1]  song_name    : char[]    (no null terminator; length = LEN - 6)
+ *
+ * @param song_name    Null-terminated current track name (may be "").
+ * @param is_playing   1 = playing, 0 = stopped/paused.
+ * @param volume       0–100.
+ * @param tempo        Speed as 0–100 (50 = 1.0×).
+ * @param position_pct Playback progress 0–100 %.
+ * @param duration_s   Speed-adjusted total song duration in seconds.
  */
 void uart_master_send_state(const char *song_name,
                             uint8_t is_playing,
                             uint8_t volume,
-                            uint8_t tempo);
+                            uint8_t tempo,
+                            uint8_t position_pct,
+                            uint16_t duration_s);
 
 /**
  * @brief Send CMD_POTI_UPDATE so the display can refresh its visual bars.

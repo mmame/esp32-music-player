@@ -5,7 +5,7 @@
  * Screen layout (800×480):
  *
  *   ┌───────────────────────────────────────┬──────────────────┐
- *   │  ♪  SONG TITLE           (Mon. 28)    │  VOL   TMP   EXP │
+ *   │  ♪  SONG TITLE           (Mon. 28)    │  VOL   TMP       │
  *   │                                       │  ███   ███   ███  │
  *   │  NOW PLAYING ●                        │  ███   ███   ███  │
  *   │                                       │  ███   ███   ███  │
@@ -55,14 +55,23 @@ void ui_player_show_async(const char *song_name);
 void ui_player_hide_async(void);
 
 /**
- * @brief Update the three live poti bar indicators.
+ * @brief Update the two live poti bar indicators.
  *        Safe to call from any task / core.
  *
  * @param volume      0–100
  * @param tempo       0–100 (mapped from actual BPM range by the host)
- * @param expression  0–100
  */
-void ui_player_update_potis_async(uint8_t volume, uint8_t tempo, uint8_t expression);
+void ui_player_update_potis_async(uint8_t volume, uint8_t tempo);
+
+/**
+ * @brief Update the progress bar and elapsed/total time label.
+ *        Called every ~100 ms while a song is playing.
+ *        Safe to call from any task / core.
+ *
+ * @param position_pct  Current playback position 0–100 %.
+ * @param duration_s    Speed-adjusted total song length in seconds.
+ */
+void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s);
 
 #ifdef __cplusplus
 }

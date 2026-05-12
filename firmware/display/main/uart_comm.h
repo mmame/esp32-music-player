@@ -33,6 +33,10 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define MAX_PAYLOAD_LEN         128
 #define MAX_SONG_NAME_LEN       64
 
+/* Accumulation buffer for multi-packet CMD_SONG_LIST merging.
+ * Sized for SONGLIST_MAX_SONGS (64) × max entry = 64 × (2+64+1) + 3 terminator. */
+#define SONGLIST_BUF_SIZE       4352
+
 /* Command IDs */
 #define CMD_SET_STATE   0x01    /* Host → Display: update player state          */
 #define CMD_SYNC        0x02    /* Host → Display: request sync / ACK           */
@@ -46,10 +50,12 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 
 /* ---------- Global system state ---------- */
 typedef struct {
-    char    song_name[MAX_SONG_NAME_LEN];   /* null-terminated UTF-8 */
-    uint8_t is_playing;                     /* 1 = playing, 0 = paused/stopped */
-    uint8_t volume;                         /* 0–100 */
-    uint8_t tempo;                          /* BPM */
+    char     song_name[MAX_SONG_NAME_LEN];  /* null-terminated UTF-8 */
+    uint8_t  is_playing;                    /* 1 = playing, 0 = paused/stopped */
+    uint8_t  volume;                        /* 0–100 */
+    uint8_t  tempo;                         /* 0–100 (50 = 1.0× speed) */
+    uint8_t  position_pct;                  /* playback progress 0–100 % */
+    uint16_t duration_s;                    /* speed-adjusted total length in seconds */
 } music_player_state_t;
 
 /** Shared player state – read by the UI, written by the UART task. */

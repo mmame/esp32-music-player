@@ -20,7 +20,7 @@ extern "C" {
 #endif
 
 /* Maximum songs the list can display at once */
-#define SONGLIST_MAX_SONGS  64
+#define SONGLIST_MAX_SONGS  128
 
 /* ---------- Lifecycle ----------------------------------------------------- */
 
@@ -63,7 +63,7 @@ void ui_songlist_show_async(void);
  * The function copies the data internally, so the caller's buffer may be
  * reused immediately after this call returns.
  */
-void ui_songlist_update_async(const uint8_t *data, uint8_t len);
+void ui_songlist_update_async(const uint8_t *data, uint16_t len);
 
 /**
  * @brief Schedule an encoder-move event from any task / core.

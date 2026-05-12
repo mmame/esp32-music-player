@@ -50,8 +50,8 @@ static void focus_item(int16_t idx);
 /* ---------- async payload structs ---------------------------------------- */
 
 typedef struct {
-    uint8_t data[MAX_PAYLOAD_LEN];
-    uint8_t len;
+    uint8_t *data; /* heap-allocated; freed by the async callback */
+    uint16_t len;
 } async_songlist_payload_t;
 
 typedef struct {
@@ -77,9 +77,10 @@ void ui_songlist_create(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0xE0E0FF), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
 
-    /* List – fills remaining vertical space */
+    /* List – fills remaining vertical space below the title */
     s_list = lv_list_create(s_screen);
-    lv_obj_set_size(s_list, LV_PCT(100), LV_PCT(100) - 60);
+    lv_coord_t list_h = (lv_coord_t)lv_disp_get_ver_res(lv_disp_get_default()) - 56;
+    lv_obj_set_size(s_list, LV_PCT(100), list_h);
     lv_obj_align(s_list, LV_ALIGN_TOP_MID, 0, 56);
     lv_obj_set_style_bg_color(s_list, lv_color_hex(0x16213E), 0);
     lv_obj_set_style_bg_opa(s_list, LV_OPA_COVER, 0);
@@ -250,6 +251,7 @@ static void async_cb_update_list(void *user_data)
     ESP_LOGI(TAG, "Song list updated: %u songs", s_song_count);
     rebuild_list();
 
+    free(p->data);
     free(p);
 }
 
@@ -277,7 +279,7 @@ static void async_cb_encoder_btn(void *user_data)
  * Public async bridges (called from UART task, Core 0)
  * ========================================================================= */
 
-void ui_songlist_update_async(const uint8_t *data, uint8_t len)
+void ui_songlist_update_async(const uint8_t *data, uint16_t len)
 {
     if (!s_screen) {
         ESP_LOGW(TAG, "update_async called before ui_songlist_create()");
@@ -289,9 +291,14 @@ void ui_songlist_update_async(const uint8_t *data, uint8_t len)
         ESP_LOGE(TAG, "OOM in update_async");
         return;
     }
-    uint8_t copy_len = len < MAX_PAYLOAD_LEN ? len : MAX_PAYLOAD_LEN;
-    memcpy(p->data, data, copy_len);
-    p->len = copy_len;
+    p->data = malloc(len);
+    if (!p->data) {
+        ESP_LOGE(TAG, "OOM in update_async (data buffer)");
+        free(p);
+        return;
+    }
+    memcpy(p->data, data, len);
+    p->len = len;
 
     lv_async_call(async_cb_update_list, p);
 }

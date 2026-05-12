@@ -43,6 +43,16 @@ static SemaphoreHandle_t s_state_mutex = NULL;
 /** Track previous is_playing to detect play/stop transitions. */
 static uint8_t s_was_playing = 0;
 
+/* ---------- CMD_SONG_LIST accumulation ----------------------------------- */
+
+/**
+ * Multiple CMD_SONG_LIST packets may arrive before the end-of-list terminator.
+ * We accumulate all chunks here and only forward the merged buffer to the UI
+ * once the terminator (song_id == 0, name == '\0') is detected.
+ */
+static uint8_t  s_songlist_buf[SONGLIST_BUF_SIZE];
+static uint16_t s_songlist_len = 0;
+
 /* ---------- Touch state -------------------------------------------------- */
 
 /**
@@ -225,11 +235,15 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     /* ------------------------------------------------------------------ */
     case CMD_SET_STATE: {
         /*
-         * Payload layout:
-         *   [0]       is_playing : uint8_t
-         *   [1]       volume     : uint8_t  (0–100)
-         *   [2]       tempo      : uint8_t  (BPM)
-         *   [3..N-1]  song_name  : char[]   (not null-terminated in packet)
+         * Payload layout (new, 6-byte header):
+         *   [0]       is_playing   : uint8_t
+         *   [1]       volume       : uint8_t  (0–100)
+         *   [2]       tempo        : uint8_t  (0–100, 50 = 1.0×)
+         *   [3]       position_pct : uint8_t  (0–100 %)
+         *   [4..5]    duration_s   : uint16_t (speed-adjusted length, LE)
+         *   [6..N-1]  song_name    : char[]   (not null-terminated in packet)
+         *
+         * Old layout (3-byte header) is still accepted with a warning.
          */
         if (len < 3) {
             ESP_LOGW(TAG, "CMD_SET_STATE: payload too short (%u bytes)", len);
@@ -238,28 +252,38 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
 
         uint8_t new_is_playing = payload[0];
 
+        uint8_t  position_pct = 0;
+        uint16_t duration_s   = 0;
+        uint8_t  name_offset  = 3;
+
+        if (len >= 6) {
+            position_pct = payload[3];
+            duration_s   = (uint16_t)payload[4] | ((uint16_t)payload[5] << 8);
+            name_offset  = 6;
+        } else {
+            ESP_LOGW(TAG, "CMD_SET_STATE: old 3-byte header (len=%u), position/duration unavailable", len);
+        }
+
         /* Snapshot song name directly from payload before taking mutex */
         char song_name_snap[MAX_SONG_NAME_LEN] = {0};
-        if (len > 3) {
-            uint8_t name_len = len - 3;
+        if (len > name_offset) {
+            uint8_t name_len = len - name_offset;
             if (name_len >= MAX_SONG_NAME_LEN) name_len = MAX_SONG_NAME_LEN - 1;
-            memcpy(song_name_snap, &payload[3], name_len);
+            memcpy(song_name_snap, &payload[name_offset], name_len);
         }
 
         xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-
-        g_player_state.is_playing = new_is_playing;
-        g_player_state.volume     = payload[1];
-        g_player_state.tempo      = payload[2];
+        g_player_state.is_playing   = new_is_playing;
+        g_player_state.volume       = payload[1];
+        g_player_state.tempo        = payload[2];
+        g_player_state.position_pct = position_pct;
+        g_player_state.duration_s   = duration_s;
         memcpy(g_player_state.song_name, song_name_snap, MAX_SONG_NAME_LEN);
-
         xSemaphoreGive(s_state_mutex);
 
-        ESP_LOGI(TAG, "State updated: song='%s'  vol=%u  bpm=%u  playing=%u",
-                 song_name_snap,
-                 g_player_state.volume,
-                 g_player_state.tempo,
-                 new_is_playing);
+        ESP_LOGD(TAG, "State: song='%s'  vol=%u  tempo=%u  playing=%u  pos=%u%%  dur=%us",
+                 song_name_snap, g_player_state.volume, g_player_state.tempo,
+                 new_is_playing, position_pct, duration_s);
 
         /* Trigger view transitions on play/stop edges */
         if (new_is_playing && !s_was_playing) {
@@ -268,6 +292,11 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             ui_player_hide_async();
         }
         s_was_playing = new_is_playing;
+
+        /* Forward live progress to the UI every tick while playing */
+        if (new_is_playing) {
+            ui_player_update_progress_async(position_pct, duration_s);
+        }
         break;
     }
 
@@ -278,15 +307,54 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         break;
 
     /* ------------------------------------------------------------------ */
-    case CMD_SONG_LIST:
+    case CMD_SONG_LIST: {
         /*
          * Payload: packed null-terminated song entries.
          * Each entry: [id_lo:u8][id_hi:u8][name:char...]['\0']
-         * Terminated by: [0x00][0x00] (id=0, empty name)
+         * Terminator: song_id == 0 followed by '\0' name byte.
+         *
+         * The host may split the list across several CMD_SONG_LIST packets.
+         * Accumulate chunks until the terminator is found, then hand the
+         * merged buffer to the UI layer in one call.
          */
-        ESP_LOGI(TAG, "CMD_SONG_LIST received (%u bytes)", len);
-        ui_songlist_update_async(payload, len);
+        ESP_LOGI(TAG, "CMD_SONG_LIST chunk received (%u bytes, accumulated=%u)",
+                 len, s_songlist_len);
+
+        /* Guard against buffer overflow – discard and restart on overflow */
+        if ((uint32_t)s_songlist_len + len > SONGLIST_BUF_SIZE) {
+            ESP_LOGW(TAG, "CMD_SONG_LIST: accumulation buffer overflow – discarding");
+            s_songlist_len = 0;
+        }
+        if (len > 0) {
+            memcpy(s_songlist_buf + s_songlist_len, payload, len);
+            s_songlist_len += len;
+        }
+
+        /* Scan accumulated data for the end-of-list terminator:
+         * entry with song_id == 0 immediately followed by a '\0' name byte. */
+        bool found_terminator = false;
+        const uint8_t *scan     = s_songlist_buf;
+        const uint8_t *scan_end = s_songlist_buf + s_songlist_len;
+        while (scan + 2 <= scan_end) {
+            uint16_t sid = (uint16_t)scan[0] | ((uint16_t)scan[1] << 8);
+            scan += 2;
+            /* Accept terminator whether it carries an empty name byte or not */
+            if (sid == 0 && (scan >= scan_end || *scan == '\0')) {
+                found_terminator = true;
+                break;
+            }
+            /* Skip past the null-terminated song name */
+            while (scan < scan_end && *scan != '\0') scan++;
+            if (scan < scan_end) scan++; /* consume '\0' */
+        }
+
+        if (found_terminator) {
+            ESP_LOGI(TAG, "CMD_SONG_LIST complete: %u bytes total", s_songlist_len);
+            ui_songlist_update_async(s_songlist_buf, s_songlist_len);
+            s_songlist_len = 0; /* reset for next list transfer */
+        }
         break;
+    }
 
     /* ------------------------------------------------------------------ */
     case CMD_ENCODER_MOVE:
@@ -322,7 +390,7 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             ESP_LOGW(TAG, "CMD_POTI_UPDATE: payload too short (%u bytes)", len);
             break;
         }
-        ui_player_update_potis_async(payload[0], payload[1], payload[2]);
+        ui_player_update_potis_async(payload[0], payload[1]);
         break;
 
     /* ------------------------------------------------------------------ */
