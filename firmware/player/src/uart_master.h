@@ -1,0 +1,134 @@
+/**
+ * @file uart_master.h
+ * @brief UART master protocol layer for the music-player (Host/Player side).
+ *
+ * Packet format – identical to the display firmware's uart_comm.h:
+ *   [MAGIC: 8 bytes "ROGEL202"][CMD: 1 byte][LEN: 1 byte][PAYLOAD: LEN bytes][CHECKSUM: 1 byte]
+ *
+ * Checksum = XOR of CMD ^ LEN ^ payload[0] ^ ... ^ payload[LEN-1]
+ *
+ * Command direction reference:
+ *   Host → Display : CMD_SET_STATE, CMD_SYNC, CMD_SONG_LIST,
+ *                    CMD_ENCODER_MOVE, CMD_ENCODER_BTN, CMD_POTI_UPDATE
+ *   Display → Host : CMD_PLAY_SONG, CMD_STOP_SONG, CMD_ACK
+ */
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "pins.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ── Hardware configuration ───────────────────────────────────────────────── */
+#define UM_BAUD_RATE        921600
+#define UM_RX_BUF_SIZE      2048
+
+/* ── Protocol constants ───────────────────────────────────────────────────── */
+
+/* 8-byte magic "ROGEL202" */
+static const uint8_t UM_MAGIC[8] = {
+    0x52, 0x4F, 0x47, 0x45, 0x4C, 0x32, 0x30, 0x32
+};
+
+#define UM_MAX_PAYLOAD      128
+#define UM_MAX_SONG_NAME    64
+
+/* Command IDs – kept in sync with display firmware uart_comm.h */
+#define CMD_SET_STATE       0x01  /* Host → Display: player state update       */
+#define CMD_SYNC            0x02  /* Host → Display: heartbeat / ACK request   */
+#define CMD_SONG_LIST       0x03  /* Host → Display: full playlist             */
+#define CMD_ENCODER_MOVE    0x04  /* Host → Display: encoder delta             */
+#define CMD_ENCODER_BTN     0x05  /* Host → Display: encoder button            */
+#define CMD_PLAY_SONG       0x06  /* Display → Host: user chose a song (id)    */
+#define CMD_POTI_UPDATE     0x07  /* Host → Display: live poti values          */
+#define CMD_STOP_SONG       0x08  /* Display → Host: stop playback             */
+#define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
+
+/* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
+
+/**
+ * @brief Called when the display requests a specific song by 16-bit ID.
+ *        The ID corresponds to the 1-based index sent in CMD_SONG_LIST.
+ */
+typedef void (*um_on_play_song_cb_t)(uint16_t song_id);
+
+/**
+ * @brief Called when the display sends CMD_STOP_SONG.
+ */
+typedef void (*um_on_stop_song_cb_t)(void);
+
+/* ── Initialisation ───────────────────────────────────────────────────────── */
+
+/**
+ * @brief Initialise UART1 and start the receive task on Core 0.
+ *
+ * @param on_play_song  Callback invoked when CMD_PLAY_SONG arrives (may be NULL).
+ * @param on_stop_song  Callback invoked when CMD_STOP_SONG arrives (may be NULL).
+ */
+void uart_master_init(um_on_play_song_cb_t on_play_song,
+                      um_on_stop_song_cb_t on_stop_song);
+
+/* ── Outgoing packet helpers ──────────────────────────────────────────────── */
+
+/**
+ * @brief Send CMD_SONG_LIST to the display.
+ *
+ * @param names   Array of null-terminated song-name strings (MAX 62 songs).
+ * @param count   Number of entries in @p names.
+ *
+ * Wire format per entry: [id_lo:u8][id_hi:u8][name:char…]['\0']
+ * Terminator            : [0x00][0x00]
+ *
+ * The function splits into multiple packets if the playlist exceeds
+ * UM_MAX_PAYLOAD bytes.
+ */
+void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t count);
+
+/**
+ * @brief Send CMD_SET_STATE to update the display with the current player state.
+ *
+ * @param song_name   Null-terminated current track name (may be "").
+ * @param is_playing  1 = playing, 0 = stopped/paused.
+ * @param volume      0–100.
+ * @param tempo       Speed as 0–100 (maps 0.2×–4.0× linearly on 50 = 1.0×).
+ */
+void uart_master_send_state(const char *song_name,
+                            uint8_t is_playing,
+                            uint8_t volume,
+                            uint8_t tempo);
+
+/**
+ * @brief Send CMD_POTI_UPDATE so the display can refresh its visual bars.
+ *
+ * @param volume      0–100.
+ * @param tempo       0–100.
+ * @param expression  0–100 (reserved, send 0 if unused).
+ */
+void uart_master_send_poti_update(uint8_t volume, uint8_t tempo, uint8_t expression);
+
+/**
+ * @brief Send CMD_ENCODER_MOVE so the display can scroll its song list.
+ *
+ * @param delta  Signed step count (positive = clockwise / down).
+ */
+void uart_master_send_encoder_move(int8_t delta);
+
+/**
+ * @brief Send CMD_ENCODER_BTN so the display knows the encoder was pressed.
+ */
+void uart_master_send_encoder_btn(void);
+
+/**
+ * @brief Send CMD_SYNC and wait up to @p timeout_ms for CMD_ACK.
+ *
+ * @return true if an ACK was received within the timeout, false otherwise.
+ */
+bool uart_master_sync(uint32_t timeout_ms);
+
+#ifdef __cplusplus
+}
+#endif
