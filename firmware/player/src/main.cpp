@@ -409,16 +409,11 @@ static void io_task(void *arg)
                 uart_master_send_encoder_move(clamped);
             }
 
-            // ── Encoder button → play selected song ───────────────────────
+            // ── Encoder button → notify display; it will send CMD_PLAY_SONG back ──
             if (btn) {
-                int16_t idx = (g_song_count > 0) ? g_selected_song : -1;
-                if (idx >= 0) {
-                    ESP_LOGI(TAG, "Encoder button: starting [%d] '%s'",
-                             idx, g_song_names[idx]);
-                    s_cmd_play_id = idx;
-                } else {
-                    ESP_LOGW(TAG, "Encoder button: no songs in playlist");
-                }
+                ESP_LOGI(TAG, "Encoder button: notifying display (selected [%d] '%s')",
+                         g_selected_song,
+                         g_song_count > 0 ? g_song_names[g_selected_song] : "(none)");
                 uart_master_send_encoder_btn();
             }
         }
