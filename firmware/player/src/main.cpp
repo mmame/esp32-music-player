@@ -191,28 +191,27 @@ static void on_resume_song(void)
 
 // ─── Format change notifier ───────────────────────────────────────────────────
 
-// Set by FormatChangeNotifier::setAudioInfo() whenever a genuinely new track's
-// audio format arrives.  Read and cleared only from audio_task (Core 1) so no
-// mutex is needed.
-static bool  s_track_format_arrived = false;
-// True when the upcoming format change was initiated by an explicit command
-// (s_cmd_play_id / s_cmd_next) rather than AudioPlayer's internal auto-advance.
-static bool  s_track_cmd_initiated  = false;
-// AudioTools fires setAudioInfo() twice per song start (decoder + output chain).
-// We debounce: only the first fire in a 500 ms window is treated as a new track.
-static int64_t s_last_format_us = 0;
-#define FORMAT_DEBOUNCE_US  (500LL * 1000LL)
+// Raised by setAudioInfo() when a track starts outside the suppression window.
+// This means the AudioPlayer auto-advanced – we want to stop playback.
+// Read and cleared only from audio_task (Core 1) – no mutex needed.
+static bool    s_track_format_arrived   = false;
+
+// Timestamp (us) of the most recent commanded play (s_cmd_play_id or s_cmd_next).
+// setAudioInfo() calls that arrive within CMD_PLAY_SUPPRESS_US of this moment
+// are caused by the commanded play itself (player.stop / sonicOut.begin / player.play)
+// and must be ignored.  Calls that arrive AFTER the window are auto-advances.
+static int64_t s_cmd_play_initiated_us  = 0;
+#define CMD_PLAY_SUPPRESS_US  (2000LL * 1000LL)   // 2 seconds
 
 struct FormatChangeNotifier : public AudioInfoSupport {
     void setAudioInfo(AudioInfo info) override {
         g_fmt = info;
         sonicOut.begin(info);
         sonicOut.setSpeed(g_speed);
-        int64_t now = esp_timer_get_time();
-        if (now - s_last_format_us > FORMAT_DEBOUNCE_US) {
-            s_track_format_arrived = true;  // signal audio_task – first fire only
+        if (esp_timer_get_time() - s_cmd_play_initiated_us > CMD_PLAY_SUPPRESS_US) {
+            // Outside suppression window → this is an AudioPlayer auto-advance
+            s_track_format_arrived = true;
         }
-        s_last_format_us = now;
         ESP_LOGI(TAG, "[Format] %d Hz  %dch  %d-bit",
                  info.sample_rate, info.channels, info.bits_per_sample);
     }
@@ -220,18 +219,19 @@ struct FormatChangeNotifier : public AudioInfoSupport {
 } g_formatNotifier;
 
 // ─── Buffer flush helper ──────────────────────────────────────────────────────
-// Called from audio_task (Core 1) after player.stop() and before player.play().
-// Writes silence into I2S to drain the DMA ring buffer, then resets SonicStream
-// so no stale WSOLA state leaks into the next track.
+// Called after player.stop() and before player.play().  Must only be called
+// within the CMD_PLAY_SUPPRESS_US window (s_cmd_play_initiated_us already set)
+// so that sonicOut.begin() – if it happens to trigger setAudioInfo – is ignored.
 static void flush_audio_buffers(void)
 {
-    // Fill the I2S DMA ring with silence (buffer_count × buffer_size bytes).
-    // I2S is configured as 64 × 1024 = 65536 bytes; write double to be safe.
+    // Overwrite the I2S DMA ring buffer (64 × 1024 B) with silence exactly once.
     static const uint8_t silence[1024] = {0};
-    for (int i = 0; i < 128; i++) {
+    for (int i = 0; i < 64; i++) {
         i2sOut.write(silence, sizeof(silence));
     }
-    // Reset SonicStream to discard any buffered WSOLA frames.
+    // Reset SonicStream’s internal WSOLA buffers so no old frames leak into
+    // the next track.  FormatChangeNotifier is registered on AudioPlayer, not
+    // on sonicOut, so begin() here does not raise s_track_format_arrived.
     sonicOut.begin(g_fmt);
     sonicOut.setSpeed(g_speed);
     ESP_LOGI(TAG, "[Audio] Buffers flushed");
@@ -247,8 +247,12 @@ static void audio_task(void *arg)
         // Handle stop command
         if (s_cmd_stop) {
             s_cmd_stop = false;
-            player.stop();
+            // Flush silence into the DMA ring BEFORE stopping so the DAC
+            // never gets to output the last buffered audio frame (important
+            // when stopping from a paused state where copy() was not running).
+            s_cmd_play_initiated_us = esp_timer_get_time(); // keep setAudioInfo suppressed
             flush_audio_buffers();
+            player.stop();
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_is_playing = false;
             g_is_paused  = false;
@@ -292,11 +296,23 @@ static void audio_task(void *arg)
                 char path[MAX_NAME + 6];  // '/' + name + '.wav' + NUL
                 snprintf(path, sizeof(path), "/%s.wav", g_song_names[play_id]);
                 ESP_LOGI(TAG, "[Audio] Playing: %s", path);
-                s_track_cmd_initiated = true;   // suppress auto-advance logic
+
+                // Mark as playing IMMEDIATELY so io_task disables the encoder
+                // during the ~370 ms flush that follows.
+                // Also record the command time so setAudioInfo() calls triggered
+                // by stop/flush/play are suppressed (not mistaken for auto-advance).
+                s_cmd_play_initiated_us = esp_timer_get_time();
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                g_current_song = play_id;
+                g_is_playing   = true;
+                g_is_paused    = false;
+                xSemaphoreGive(s_state_mutex);
+
                 player.stop();
                 flush_audio_buffers();
                 player.setPath(path);
                 player.play();
+
                 // Stat the file to know total audio data bytes (for progress %)
                 uint32_t data_bytes = 0;
                 File sf = SD.open(path);
@@ -306,8 +322,6 @@ static void audio_task(void *arg)
                     sf.close();
                 }
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                g_current_song    = play_id;
-                g_is_playing      = true;
                 g_song_data_bytes = data_bytes;
                 g_audio_pos_s     = 0.0f;
                 g_wall_ref_us     = esp_timer_get_time();
@@ -318,7 +332,7 @@ static void audio_task(void *arg)
         // Handle next-track command
         if (s_cmd_next) {
             s_cmd_next = false;
-            s_track_cmd_initiated = true;   // suppress auto-advance logic
+            s_cmd_play_initiated_us = esp_timer_get_time(); // suppress format notifications
             player.next();
             int16_t new_song;
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
@@ -348,16 +362,13 @@ static void audio_task(void *arg)
         // to the song list.
         if (s_track_format_arrived) {
             s_track_format_arrived = false;
-            if (!s_track_cmd_initiated) {
-                player.stop();
-                flush_audio_buffers();
-                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                g_is_playing = false;
-                xSemaphoreGive(s_state_mutex);
-                ESP_LOGI(TAG, "[Audio] Song finished – stopping, returning to song list");
-            } else {
-                s_track_cmd_initiated = false; // consume the flag for commanded starts
-            }
+            // Always an auto-advance here (commanded plays are suppressed in setAudioInfo)
+            player.stop();
+            flush_audio_buffers();
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            g_is_playing = false;
+            xSemaphoreGive(s_state_mutex);
+            ESP_LOGI(TAG, "[Audio] Song finished – stopping, returning to song list");
         }
 
         if (g_is_playing && !g_is_paused) {
