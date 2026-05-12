@@ -161,7 +161,9 @@ static void lvgl_port_task(void *arg)
     uint32_t task_delay_ms = CONFIG_LVGL_TASK_MAX_DELAY_MS;
     while (1)
     {
+        lv_lock();
         task_delay_ms = lv_timer_handler();
+        lv_unlock();
         if (task_delay_ms > CONFIG_LVGL_TASK_MAX_DELAY_MS)
         {
             task_delay_ms = CONFIG_LVGL_TASK_MAX_DELAY_MS;

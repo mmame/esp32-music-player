@@ -25,6 +25,8 @@ static const char *TAG = "uart_master";
 
 static um_on_play_song_cb_t s_on_play_song = nullptr;
 static um_on_stop_song_cb_t s_on_stop_song = nullptr;
+static um_on_pause_cb_t     s_on_pause     = nullptr;
+static um_on_resume_cb_t    s_on_resume    = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem = nullptr;
@@ -89,10 +91,14 @@ static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len
  * ══════════════════════════════════════════════════════════════════════════════ */
 
 void uart_master_init(um_on_play_song_cb_t on_play_song,
-                      um_on_stop_song_cb_t on_stop_song)
+                      um_on_stop_song_cb_t on_stop_song,
+                      um_on_pause_cb_t     on_pause,
+                      um_on_resume_cb_t    on_resume)
 {
     s_on_play_song = on_play_song;
     s_on_stop_song = on_stop_song;
+    s_on_pause     = on_pause;
+    s_on_resume    = on_resume;
 
     s_ack_sem  = xSemaphoreCreateBinary();
     s_tx_mutex = xSemaphoreCreateMutex();
@@ -353,6 +359,16 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     case CMD_STOP_SONG:
         ESP_LOGI(TAG, "CMD_STOP_SONG received");
         if (s_on_stop_song) s_on_stop_song();
+        break;
+
+    case CMD_PAUSE:
+        ESP_LOGI(TAG, "CMD_PAUSE received");
+        if (s_on_pause) s_on_pause();
+        break;
+
+    case CMD_RESUME:
+        ESP_LOGI(TAG, "CMD_RESUME received");
+        if (s_on_resume) s_on_resume();
         break;
 
     case CMD_ACK:

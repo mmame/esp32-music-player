@@ -59,14 +59,22 @@ static SemaphoreHandle_t s_state_mutex = nullptr;
 static float    g_speed           = 1.0f;   // 0.2–4.0
 static uint8_t  g_volume          = 80;     // 0–100
 static bool     g_is_playing      = false;
+static bool     g_is_paused       = false;  // true while paused (g_is_playing stays true)
 static uint32_t g_song_data_bytes = 0;      // WAV audio data bytes (file size minus 44-byte header)
-static int64_t  g_play_start_us   = 0;      // esp_timer_get_time() at song start
+// Position tracking: audio_pos_s accumulates elapsed audio-seconds at the
+// speed that was active at the time.  wall_ref_us is the wall-clock snapshot
+// taken when audio_pos_s was last flushed (song start or speed change).
+// audio_consumed = g_audio_pos_s + (now - g_wall_ref_us) / 1e6 * g_speed
+static float    g_audio_pos_s     = 0.0f;
+static int64_t  g_wall_ref_us     = 0;
 static AudioInfo g_fmt;
 
 // Commands posted from Core 0 io_task to Core 1 audio_task
 static volatile bool    s_cmd_stop       = false;
 static volatile int16_t s_cmd_play_id    = -1; // ≥0 means "start this song"
 static volatile bool    s_cmd_next       = false;
+static volatile bool    s_cmd_pause      = false;
+static volatile bool    s_cmd_resume     = false;
 
 // Currently highlighted song in the local playlist (tracks encoder position).
 // Access only from the io_task (Core 0) – no mutex needed.
@@ -85,8 +93,15 @@ static float tempo_to_speed(uint8_t t)
 
 static void apply_speed(float speed)
 {
-    g_speed = speed < SPEED_MIN ? SPEED_MIN : (speed > SPEED_MAX ? SPEED_MAX : speed);
-    sonicOut.setSpeed(g_speed);
+    float clamped = speed < SPEED_MIN ? SPEED_MIN : (speed > SPEED_MAX ? SPEED_MAX : speed);
+    sonicOut.setSpeed(clamped);
+    // Flush audio-time accumulated at the OLD speed before switching.
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    int64_t now = esp_timer_get_time();
+    g_audio_pos_s += (float)(now - g_wall_ref_us) / 1000000.0f * g_speed;
+    g_wall_ref_us  = now;
+    g_speed        = clamped;
+    xSemaphoreGive(s_state_mutex);
 }
 
 // speed → 0–100 byte (sent over UART); 50 = 1.0×
@@ -162,27 +177,65 @@ static void on_stop_song(void)
     s_cmd_stop = true;
 }
 
+static void on_pause_song(void)
+{
+    ESP_LOGI(TAG, "CMD_PAUSE received");
+    s_cmd_pause = true;
+}
+
+static void on_resume_song(void)
+{
+    ESP_LOGI(TAG, "CMD_RESUME received");
+    s_cmd_resume = true;
+}
+
 // ─── Format change notifier ───────────────────────────────────────────────────
 
-// Set by FormatChangeNotifier::setAudioInfo() whenever a new track's audio
-// format arrives (i.e. a new file started decoding).  Read and cleared only
-// from audio_task (Core 1) so no mutex is needed.
-static bool s_track_format_arrived = false;
+// Set by FormatChangeNotifier::setAudioInfo() whenever a genuinely new track's
+// audio format arrives.  Read and cleared only from audio_task (Core 1) so no
+// mutex is needed.
+static bool  s_track_format_arrived = false;
 // True when the upcoming format change was initiated by an explicit command
 // (s_cmd_play_id / s_cmd_next) rather than AudioPlayer's internal auto-advance.
-static bool s_track_cmd_initiated  = false;
+static bool  s_track_cmd_initiated  = false;
+// AudioTools fires setAudioInfo() twice per song start (decoder + output chain).
+// We debounce: only the first fire in a 500 ms window is treated as a new track.
+static int64_t s_last_format_us = 0;
+#define FORMAT_DEBOUNCE_US  (500LL * 1000LL)
 
 struct FormatChangeNotifier : public AudioInfoSupport {
     void setAudioInfo(AudioInfo info) override {
         g_fmt = info;
         sonicOut.begin(info);
         sonicOut.setSpeed(g_speed);
-        s_track_format_arrived = true;   // signal audio_task that a new track started
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_format_us > FORMAT_DEBOUNCE_US) {
+            s_track_format_arrived = true;  // signal audio_task – first fire only
+        }
+        s_last_format_us = now;
         ESP_LOGI(TAG, "[Format] %d Hz  %dch  %d-bit",
                  info.sample_rate, info.channels, info.bits_per_sample);
     }
     AudioInfo audioInfo() override { return g_fmt; }
 } g_formatNotifier;
+
+// ─── Buffer flush helper ──────────────────────────────────────────────────────
+// Called from audio_task (Core 1) after player.stop() and before player.play().
+// Writes silence into I2S to drain the DMA ring buffer, then resets SonicStream
+// so no stale WSOLA state leaks into the next track.
+static void flush_audio_buffers(void)
+{
+    // Fill the I2S DMA ring with silence (buffer_count × buffer_size bytes).
+    // I2S is configured as 64 × 1024 = 65536 bytes; write double to be safe.
+    static const uint8_t silence[1024] = {0};
+    for (int i = 0; i < 128; i++) {
+        i2sOut.write(silence, sizeof(silence));
+    }
+    // Reset SonicStream to discard any buffered WSOLA frames.
+    sonicOut.begin(g_fmt);
+    sonicOut.setSpeed(g_speed);
+    ESP_LOGI(TAG, "[Audio] Buffers flushed");
+}
 
 // ─── Audio task – Core 1 ──────────────────────────────────────────────────────
 
@@ -195,10 +248,39 @@ static void audio_task(void *arg)
         if (s_cmd_stop) {
             s_cmd_stop = false;
             player.stop();
+            flush_audio_buffers();
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_is_playing = false;
+            g_is_paused  = false;
             xSemaphoreGive(s_state_mutex);
             ESP_LOGI(TAG, "[Audio] Stopped");
+        }
+
+        // Handle pause command
+        if (s_cmd_pause) {
+            s_cmd_pause = false;
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            if (g_is_playing && !g_is_paused) {
+                // Flush accumulated audio time before freezing the clock
+                int64_t now = esp_timer_get_time();
+                g_audio_pos_s += (float)(now - g_wall_ref_us) / 1000000.0f * g_speed;
+                g_wall_ref_us  = now;
+                g_is_paused    = true;
+                ESP_LOGI(TAG, "[Audio] Paused");
+            }
+            xSemaphoreGive(s_state_mutex);
+        }
+
+        // Handle resume command
+        if (s_cmd_resume) {
+            s_cmd_resume = false;
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            if (g_is_playing && g_is_paused) {
+                g_wall_ref_us = esp_timer_get_time(); // restart wall clock from now
+                g_is_paused   = false;
+                ESP_LOGI(TAG, "[Audio] Resumed");
+            }
+            xSemaphoreGive(s_state_mutex);
         }
 
         // Handle play-by-ID command
@@ -211,6 +293,8 @@ static void audio_task(void *arg)
                 snprintf(path, sizeof(path), "/%s.wav", g_song_names[play_id]);
                 ESP_LOGI(TAG, "[Audio] Playing: %s", path);
                 s_track_cmd_initiated = true;   // suppress auto-advance logic
+                player.stop();
+                flush_audio_buffers();
                 player.setPath(path);
                 player.play();
                 // Stat the file to know total audio data bytes (for progress %)
@@ -225,7 +309,8 @@ static void audio_task(void *arg)
                 g_current_song    = play_id;
                 g_is_playing      = true;
                 g_song_data_bytes = data_bytes;
-                g_play_start_us   = esp_timer_get_time();
+                g_audio_pos_s     = 0.0f;
+                g_wall_ref_us     = esp_timer_get_time();
                 xSemaphoreGive(s_state_mutex);
             }
         }
@@ -251,43 +336,31 @@ static void audio_task(void *arg)
             }
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_song_data_bytes = ndata;
-            g_play_start_us   = esp_timer_get_time();
+            g_audio_pos_s     = 0.0f;
+            g_wall_ref_us     = esp_timer_get_time();
             g_is_playing      = true;
             xSemaphoreGive(s_state_mutex);
             ESP_LOGI(TAG, "[Audio] Next track → [%d] '%s'", new_song, g_song_names[new_song]);
         }
 
-        // Detect AudioPlayer's internal auto-advance (end of track → next song)
+        // Detect AudioPlayer's internal auto-advance (end of track → next song).
+        // We do NOT want to continue playing – stop and let the display return
+        // to the song list.
         if (s_track_format_arrived) {
             s_track_format_arrived = false;
             if (!s_track_cmd_initiated) {
-                // Auto-advance: update song index and timing state
-                int16_t new_song;
+                player.stop();
+                flush_audio_buffers();
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                g_current_song = (g_current_song + 1) % (int16_t)g_song_count;
-                new_song = g_current_song;
+                g_is_playing = false;
                 xSemaphoreGive(s_state_mutex);
-                char apath[MAX_NAME + 6];
-                snprintf(apath, sizeof(apath), "/%s.wav", g_song_names[new_song]);
-                uint32_t adata = 0;
-                File af = SD.open(apath);
-                if (af) {
-                    size_t fsz = af.size();
-                    adata = (fsz > 44) ? (uint32_t)(fsz - 44) : 0;
-                    af.close();
-                }
-                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                g_song_data_bytes = adata;
-                g_play_start_us   = esp_timer_get_time();
-                g_is_playing      = true;
-                xSemaphoreGive(s_state_mutex);
-                ESP_LOGI(TAG, "[Audio] Auto-advanced to [%d] '%s'", new_song, g_song_names[new_song]);
+                ESP_LOGI(TAG, "[Audio] Song finished – stopping, returning to song list");
             } else {
-                s_track_cmd_initiated = false; // consume the flag
+                s_track_cmd_initiated = false; // consume the flag for commanded starts
             }
         }
 
-        if (g_is_playing) {
+        if (g_is_playing && !g_is_paused) {
             player.copy();
         } else {
             vTaskDelay(pdMS_TO_TICKS(10)); // yield so setup() can finish on Core 1
@@ -309,36 +382,45 @@ static void io_task(void *arg)
     while (true) {
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
 
-        // ── Encoder rotation → update local selection + notify display ──
+        // ── Encoder – ignored while a song is playing or paused ──────────
+        // Read and discard PCNT counts regardless so they don't accumulate.
         int16_t steps = encoder_read_steps();
-        if (steps != 0) {
-            int8_t clamped = (int8_t)(steps > 127 ? 127 : (steps < -128 ? -128 : steps));
+        bool    btn   = encoder_btn_pressed();
 
-            // Advance local selection, clamped to valid playlist range
-            if (g_song_count > 0) {
-                g_selected_song += clamped;
-                if (g_selected_song < 0) g_selected_song = 0;
-                if (g_selected_song >= (int16_t)g_song_count)
-                    g_selected_song = (int16_t)g_song_count - 1;
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        bool enc_active = g_is_playing;
+        xSemaphoreGive(s_state_mutex);
+
+        if (!enc_active) {
+            // ── Encoder rotation → update local selection + notify display ──
+            if (steps != 0) {
+                int8_t clamped = (int8_t)(steps > 127 ? 127 : (steps < -128 ? -128 : steps));
+
+                if (g_song_count > 0) {
+                    g_selected_song += clamped;
+                    if (g_selected_song < 0) g_selected_song = 0;
+                    if (g_selected_song >= (int16_t)g_song_count)
+                        g_selected_song = (int16_t)g_song_count - 1;
+                }
+
+                ESP_LOGI(TAG, "Encoder move: %+d  →  selected [%d] '%s'",
+                         clamped, g_selected_song,
+                         g_song_count > 0 ? g_song_names[g_selected_song] : "(none)");
+                uart_master_send_encoder_move(clamped);
             }
 
-            ESP_LOGI(TAG, "Encoder move: %+d  →  selected [%d] '%s'",
-                     clamped, g_selected_song,
-                     g_song_count > 0 ? g_song_names[g_selected_song] : "(none)");
-            uart_master_send_encoder_move(clamped);
-        }
-
-        // ── Encoder button → play selected song ───────────────────────────
-        if (encoder_btn_pressed()) {
-            int16_t idx = (g_song_count > 0) ? g_selected_song : -1;
-            if (idx >= 0) {
-                ESP_LOGI(TAG, "Encoder button: starting [%d] '%s'",
-                         idx, g_song_names[idx]);
-                s_cmd_play_id = idx;
-            } else {
-                ESP_LOGW(TAG, "Encoder button: no songs in playlist");
+            // ── Encoder button → play selected song ───────────────────────
+            if (btn) {
+                int16_t idx = (g_song_count > 0) ? g_selected_song : -1;
+                if (idx >= 0) {
+                    ESP_LOGI(TAG, "Encoder button: starting [%d] '%s'",
+                             idx, g_song_names[idx]);
+                    s_cmd_play_id = idx;
+                } else {
+                    ESP_LOGW(TAG, "Encoder button: no songs in playlist");
+                }
+                uart_master_send_encoder_btn();
             }
-            uart_master_send_encoder_btn();
         }
 
         // ── Potentiometers every ~10 ms ───────────────────────────────────
@@ -373,11 +455,13 @@ static void io_task(void *arg)
 
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             bool     playing    = g_is_playing;
+            bool     paused     = g_is_paused;
             uint8_t  vol        = g_volume;
             float    spd        = g_speed;
             int16_t  cur        = g_current_song;
             uint32_t data_bytes = g_song_data_bytes;
-            int64_t  start_us   = g_play_start_us;
+            float    audio_pos  = g_audio_pos_s;
+            int64_t  wall_ref   = g_wall_ref_us;
             xSemaphoreGive(s_state_mutex);
 
             const char *song_name = (cur >= 0 && cur < (int16_t)g_song_count)
@@ -387,19 +471,19 @@ static void io_task(void *arg)
             uint8_t  position_pct = 0;
             uint16_t duration_s   = 0;
 
-            // Compute playback position and speed-adjusted duration.
-            // g_fmt is written once at song start (Core 1) before io_task reads it;
-            // sample_rate is guaranteed non-zero after player.begin().
             if (playing && data_bytes > 0 && g_fmt.sample_rate > 0) {
                 uint32_t bytes_per_sec = (uint32_t)g_fmt.sample_rate
                                        * (uint32_t)g_fmt.channels
                                        * (uint32_t)(g_fmt.bits_per_sample / 8);
-                float total_audio_s       = (float)data_bytes / (float)bytes_per_sec;
-                float speed_adj_dur_s     = total_audio_s / spd;  // shorter when faster
-                float elapsed_s           = (float)(esp_timer_get_time() - start_us) / 1000000.0f;
-                float pct                 = elapsed_s / speed_adj_dur_s * 100.0f;
+                float total_audio_s = (float)data_bytes / (float)bytes_per_sec;
+                // While paused, wall clock is frozen – use only accumulated audio_pos
+                float wall_elapsed_s  = paused ? 0.0f
+                                               : (float)(esp_timer_get_time() - wall_ref) / 1000000.0f;
+                float audio_consumed  = audio_pos + wall_elapsed_s * spd;
+                float pct             = audio_consumed / total_audio_s * 100.0f;
                 position_pct = (pct >= 100.0f) ? 100u : (pct < 0.0f ? 0u : (uint8_t)pct);
-                duration_s   = (speed_adj_dur_s > 65535.0f) ? 65535u : (uint16_t)speed_adj_dur_s;
+                float dur = total_audio_s / spd;
+                duration_s = (dur > 65535.0f) ? 65535u : (uint16_t)dur;
             }
 
             uart_master_send_state(song_name,
@@ -520,7 +604,7 @@ void setup()
 
     // --- UART master ---
     ESP_LOGI(TAG, "Initializing UART master...");
-    uart_master_init(on_play_song, on_stop_song);
+    uart_master_init(on_play_song, on_stop_song, on_pause_song, on_resume_song);
     ESP_LOGI(TAG, "UART master initialized");
 
     // Give the display a moment to boot, then send the playlist

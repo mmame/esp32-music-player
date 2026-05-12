@@ -300,7 +300,9 @@ void ui_songlist_update_async(const uint8_t *data, uint16_t len)
     memcpy(p->data, data, len);
     p->len = len;
 
+    lv_lock();
     lv_async_call(async_cb_update_list, p);
+    lv_unlock();
 }
 
 void ui_songlist_encoder_move_async(int8_t steps)
@@ -313,13 +315,17 @@ void ui_songlist_encoder_move_async(int8_t steps)
         return;
     }
     p->steps = steps;
+    lv_lock();
     lv_async_call(async_cb_encoder_move, p);
+    lv_unlock();
 }
 
 void ui_songlist_encoder_btn_async(void)
 {
     if (!s_screen) return;
+    lv_lock();
     lv_async_call(async_cb_encoder_btn, NULL);
+    lv_unlock();
 }
 
 /* =========================================================================
@@ -341,5 +347,7 @@ static void async_cb_show_songlist(void *arg)
 
 void ui_songlist_show_async(void)
 {
+    lv_lock();
     lv_async_call(async_cb_show_songlist, NULL);
+    lv_unlock();
 }

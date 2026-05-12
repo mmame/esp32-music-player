@@ -46,6 +46,8 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_PLAY_SONG   0x06    /* Display → Host: user selected a song         */
 #define CMD_POTI_UPDATE 0x07    /* Host → Display: live poti values             */
 #define CMD_STOP_SONG   0x08    /* Display → Host: stop playback                */
+#define CMD_PAUSE       0x09    /* Display → Host: pause playback               */
+#define CMD_RESUME      0x0A    /* Display → Host: resume playback              */
 #define CMD_ACK         0xFF    /* Display → Host: sync acknowledgement         */
 
 /* ---------- Global system state ---------- */

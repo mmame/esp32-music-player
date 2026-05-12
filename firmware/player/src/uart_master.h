@@ -10,7 +10,7 @@
  * Command direction reference:
  *   Host → Display : CMD_SET_STATE, CMD_SYNC, CMD_SONG_LIST,
  *                    CMD_ENCODER_MOVE, CMD_ENCODER_BTN, CMD_POTI_UPDATE
- *   Display → Host : CMD_PLAY_SONG, CMD_STOP_SONG, CMD_ACK
+ *   Display → Host : CMD_PLAY_SONG, CMD_STOP_SONG, CMD_PAUSE, CMD_RESUME, CMD_ACK
  */
 #pragma once
 
@@ -46,6 +46,8 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_PLAY_SONG       0x06  /* Display → Host: user chose a song (id)    */
 #define CMD_POTI_UPDATE     0x07  /* Host → Display: live poti values          */
 #define CMD_STOP_SONG       0x08  /* Display → Host: stop playback             */
+#define CMD_PAUSE           0x09  /* Display → Host: pause playback            */
+#define CMD_RESUME          0x0A  /* Display → Host: resume playback           */
 #define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -61,6 +63,12 @@ typedef void (*um_on_play_song_cb_t)(uint16_t song_id);
  */
 typedef void (*um_on_stop_song_cb_t)(void);
 
+/** @brief Called when the display sends CMD_PAUSE. */
+typedef void (*um_on_pause_cb_t)(void);
+
+/** @brief Called when the display sends CMD_RESUME. */
+typedef void (*um_on_resume_cb_t)(void);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -68,9 +76,13 @@ typedef void (*um_on_stop_song_cb_t)(void);
  *
  * @param on_play_song  Callback invoked when CMD_PLAY_SONG arrives (may be NULL).
  * @param on_stop_song  Callback invoked when CMD_STOP_SONG arrives (may be NULL).
+ * @param on_pause      Callback invoked when CMD_PAUSE arrives (may be NULL).
+ * @param on_resume     Callback invoked when CMD_RESUME arrives (may be NULL).
  */
 void uart_master_init(um_on_play_song_cb_t on_play_song,
-                      um_on_stop_song_cb_t on_stop_song);
+                      um_on_stop_song_cb_t on_stop_song,
+                      um_on_pause_cb_t     on_pause,
+                      um_on_resume_cb_t    on_resume);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

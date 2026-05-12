@@ -39,9 +39,12 @@ static const char *TAG = "ui_player";
 #define PROGRESS_Y       130    /* progress bar top edge                    */
 #define PROGRESS_H       22     /* progress bar height                      */
 #define PROGRESS_PAD_X   30     /* horizontal padding inside left panel     */
-#define STOP_Y           340    /* STOP button top edge                     */
+#define STOP_Y           370    /* STOP button top edge                     */
 #define STOP_W           300    /* STOP button width                        */
-#define STOP_H           90     /* STOP button height                       */
+#define STOP_H           80     /* STOP button height                       */
+#define PAUSE_Y          260    /* PAUSE/RESUME button top edge             */
+#define PAUSE_W          300    /* PAUSE/RESUME button width                */
+#define PAUSE_H          80     /* PAUSE/RESUME button height               */
 #define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
 
 /* Right panel – two indicator columns */
@@ -72,6 +75,11 @@ static lv_obj_t *s_time_lbl       = NULL;  /* "elapsed / total" below progress b
 /* Two poti bars + value labels */
 static lv_obj_t *s_bar[2]         = {NULL, NULL};  /* VOL, TMP */
 static lv_obj_t *s_val_lbl[2]     = {NULL, NULL};
+
+/* Pause/Resume toggle button and its label */
+static lv_obj_t *s_pause_btn      = NULL;
+static lv_obj_t *s_pause_lbl      = NULL;
+static bool      s_is_paused      = false;
 
 /* Indeterminate progress animation */
 static lv_anim_t s_prog_anim;
@@ -122,6 +130,30 @@ static void send_stop_song(void)
     pkt[10] = CMD_STOP_SONG;   /* checksum */
     uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
     ESP_LOGI(TAG, "CMD_STOP_SONG sent");
+}
+
+/** Send CMD_PAUSE (no payload). */
+static void send_pause_song(void)
+{
+    uint8_t pkt[11];
+    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
+    pkt[8]  = CMD_PAUSE;
+    pkt[9]  = 0x00;
+    pkt[10] = CMD_PAUSE;   /* checksum */
+    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    ESP_LOGI(TAG, "CMD_PAUSE sent");
+}
+
+/** Send CMD_RESUME (no payload). */
+static void send_resume_song(void)
+{
+    uint8_t pkt[11];
+    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
+    pkt[8]  = CMD_RESUME;
+    pkt[9]  = 0x00;
+    pkt[10] = CMD_RESUME;   /* checksum */
+    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    ESP_LOGI(TAG, "CMD_RESUME sent");
 }
 
 /** Helper: create one vertical indicator column on the right panel. */
@@ -175,11 +207,32 @@ static void create_indicator_col(lv_obj_t *parent,
 }
 
 /* =========================================================================
+ * PAUSE/RESUME button callback – runs in LVGL task
+ * ========================================================================= */
+static void on_pause_clicked(lv_event_t *e)
+{
+    (void)e;
+    s_is_paused = !s_is_paused;
+    if (s_is_paused) {
+        send_pause_song();
+        if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PLAY "  RESUME");
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x27AE60), 0); /* green */
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1E8449), LV_STATE_PRESSED);
+    } else {
+        send_resume_song();
+        if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0); /* blue */
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
+    }
+}
+
+/* =========================================================================
  * STOP button callback – runs in LVGL task
  * ========================================================================= */
 static void on_stop_clicked(lv_event_t *e)
 {
     (void)e;
+    s_is_paused = false;  /* reset pause state for next song */
     stop_progress_anim();
     send_stop_song();
     ui_songlist_show(); /* we are in the LVGL task – can call directly */
@@ -260,6 +313,26 @@ void ui_player_create(void)
     lv_obj_set_style_text_align(s_time_lbl, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(s_time_lbl, PROGRESS_PAD_X, TIME_LABEL_Y);
 
+    /* PAUSE / RESUME toggle button --------------------------------------- */
+    s_pause_btn = lv_button_create(left);
+    lv_obj_set_size(s_pause_btn, PAUSE_W, PAUSE_H);
+    lv_obj_set_pos(s_pause_btn,
+                   (SPLIT_X - PAUSE_W) / 2,
+                   PAUSE_Y);
+    lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0); /* blue = playing */
+    lv_obj_set_style_bg_opa(s_pause_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(s_pause_btn, 12, 0);
+    lv_obj_set_style_border_width(s_pause_btn, 0, 0);
+    lv_obj_set_style_shadow_width(s_pause_btn, 0, 0);
+    lv_obj_add_event_cb(s_pause_btn, on_pause_clicked, LV_EVENT_CLICKED, NULL);
+
+    s_pause_lbl = lv_label_create(s_pause_btn);
+    lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
+    lv_obj_set_style_text_font(s_pause_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_pause_lbl, lv_color_white(), 0);
+    lv_obj_center(s_pause_lbl);
+
     /* STOP button -------------------------------------------------------- */
     lv_obj_t *stop_btn = lv_button_create(left);
     lv_obj_set_size(stop_btn, STOP_W, STOP_H);
@@ -323,6 +396,14 @@ static void async_cb_show(void *user_data)
 {
     async_show_payload_t *p = (async_show_payload_t *)user_data;
 
+    /* Reset pause state for the new song */
+    s_is_paused = false;
+    if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
+    if (s_pause_btn) {
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0);
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
+    }
+
     /* Update title */
     char title_buf[MAX_SONG_NAME_LEN + 6]; /* +6: LV_SYMBOL_AUDIO(3) + "  "(2) + '\0'(1) */
     snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_AUDIO "  %s", p->song_name);
@@ -332,8 +413,6 @@ static void async_cb_show(void *user_data)
     stop_progress_anim();
     if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
-
-    /* Load the player screen with a left-slide transition */
     lv_screen_load_anim(s_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 250, 0, false);
 
     free(p);
@@ -342,6 +421,12 @@ static void async_cb_show(void *user_data)
 static void async_cb_hide(void *user_data)
 {
     (void)user_data;
+    s_is_paused = false;  /* reset for next song */
+    if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
+    if (s_pause_btn) {
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0);
+        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
+    }
     stop_progress_anim();
     if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
@@ -408,13 +493,17 @@ void ui_player_show_async(const char *song_name)
     if (!p) { ESP_LOGE(TAG, "OOM in show_async"); return; }
 
     strlcpy(p->song_name, song_name ? song_name : "", MAX_SONG_NAME_LEN);
+    lv_lock();
     lv_async_call(async_cb_show, p);
+    lv_unlock();
 }
 
 void ui_player_hide_async(void)
 {
     if (!s_screen) return;
+    lv_lock();
     lv_async_call(async_cb_hide, NULL);
+    lv_unlock();
 }
 
 void ui_player_update_potis_async(uint8_t volume, uint8_t tempo)
@@ -426,7 +515,9 @@ void ui_player_update_potis_async(uint8_t volume, uint8_t tempo)
 
     p->volume = volume;
     p->tempo  = tempo;
+    lv_lock();
     lv_async_call(async_cb_update_potis, p);
+    lv_unlock();
 }
 
 void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s)
@@ -438,5 +529,7 @@ void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s)
 
     p->pct   = position_pct;
     p->dur_s = duration_s;
+    lv_lock();
     lv_async_call(async_cb_update_progress, p);
+    lv_unlock();
 }
