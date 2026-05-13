@@ -132,7 +132,7 @@ extern "C" {
 #define SONIC_MAX_CHANNELS 32
 
 /* These are used to down-sample some inputs to improve speed */
-#define SONIC_AMDF_FREQ 6000
+#define SONIC_AMDF_FREQ 4000
 
 struct sonicStreamStruct;
 typedef struct sonicStreamStruct* sonicStream;
