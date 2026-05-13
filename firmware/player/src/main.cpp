@@ -859,7 +859,7 @@ void setup()
     });
     player.begin(false);   // do not auto-play on power-up
     player.setVolume((float)g_volume / 100.0f);
-    player.setBufferSize(32768);   // StreamCopy chunk: 32 KB/call – reads from PSRAM, very fast
+    player.setBufferSize(8192);   // StreamCopy chunk: 8 KB/call – reads from PSRAM, very fast
     ESP_LOGI(TAG, "AudioPlayer started: vol=%u/100  readBuf=65535B", g_volume);
 
     // --- Shared state mutex ---
