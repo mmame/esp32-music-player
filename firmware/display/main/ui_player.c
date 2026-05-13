@@ -37,7 +37,7 @@ static const char *TAG = "ui_player";
 #define TITLE_Y          28     /* song title top edge                      */
 #define NOWPLAY_Y        82     /* "NOW PLAYING" label top edge             */
 #define PROGRESS_Y       130    /* progress bar top edge                    */
-#define PROGRESS_H       22     /* progress bar height                      */
+#define PROGRESS_H       44     /* progress bar height                      */
 #define PROGRESS_PAD_X   30     /* horizontal padding inside left panel     */
 #define STOP_Y           370    /* STOP button top edge                     */
 #define STOP_W           300    /* STOP button width                        */
@@ -82,7 +82,6 @@ static lv_obj_t *s_pause_lbl      = NULL;
 static bool      s_is_paused      = false;
 
 /* Indeterminate progress animation */
-static lv_anim_t s_prog_anim;
 static bool      s_prog_anim_active = false;
 
 /* =========================================================================
@@ -92,22 +91,6 @@ static bool      s_prog_anim_active = false;
 static void prog_anim_exec_cb(void *bar, int32_t val)
 {
     lv_bar_set_value((lv_obj_t *)bar, val, LV_ANIM_OFF);
-}
-
-static void start_progress_anim(void)
-{
-    if (s_prog_anim_active || !s_progress_bar) return;
-
-    lv_anim_init(&s_prog_anim);
-    lv_anim_set_var(&s_prog_anim, s_progress_bar);
-    lv_anim_set_exec_cb(&s_prog_anim, prog_anim_exec_cb);
-    lv_anim_set_values(&s_prog_anim, 0, 100);
-    lv_anim_set_duration(&s_prog_anim, 2800);
-    lv_anim_set_playback_duration(&s_prog_anim, 2800);
-    lv_anim_set_repeat_count(&s_prog_anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&s_prog_anim, lv_anim_path_ease_in_out);
-    lv_anim_start(&s_prog_anim);
-    s_prog_anim_active = true;
 }
 
 static void stop_progress_anim(void)
@@ -154,6 +137,19 @@ static void send_resume_song(void)
     pkt[10] = CMD_RESUME;   /* checksum */
     uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
     ESP_LOGI(TAG, "CMD_RESUME sent");
+}
+
+/** Send CMD_SEEK with a 0–100 % position. */
+static void send_seek(uint8_t pct)
+{
+    uint8_t pkt[12];  /* magic(8) + cmd(1) + len(1) + payload(1) + checksum(1) */
+    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
+    pkt[8]  = CMD_SEEK;
+    pkt[9]  = 0x01;
+    pkt[10] = pct;
+    pkt[11] = CMD_SEEK ^ 0x01 ^ pct;  /* checksum */
+    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    ESP_LOGI(TAG, "CMD_SEEK sent: pct=%u", (unsigned)pct);
 }
 
 /** Helper: create one vertical indicator column on the right panel. */
@@ -204,6 +200,45 @@ static void create_indicator_col(lv_obj_t *parent,
     lv_obj_set_pos(val, col_x, VAL_LABEL_Y);
 
     s_val_lbl[col_idx] = val;
+}
+
+/* =========================================================================
+ * Progress bar click callback – runs in LVGL task
+ * ========================================================================= */
+static void on_progress_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (!s_progress_bar) return;
+
+    lv_indev_t *indev = lv_event_get_indev(e);
+    if (!indev) return;
+
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+
+    lv_area_t bar_area;
+    lv_obj_get_coords(s_progress_bar, &bar_area);
+
+    int32_t bar_w = bar_area.x2 - bar_area.x1;
+    if (bar_w <= 0) return;
+
+    int32_t x_rel = point.x - bar_area.x1;
+    if (x_rel < 0)     x_rel = 0;
+    if (x_rel > bar_w) x_rel = bar_w;
+
+    uint8_t pct = (uint8_t)(x_rel * 100 / bar_w);
+    ESP_LOGI(TAG, "Progress bar clicked: x=%d → seek %u%%", (int)point.x, (unsigned)pct);
+
+    /* Optimistic UI: show the selected position immediately without waiting
+     * for the audio player to confirm. Cancel any running animation first
+     * (but do NOT reset to 0 like stop_progress_anim() does). */
+    if (s_prog_anim_active) {
+        lv_anim_delete(s_progress_bar, prog_anim_exec_cb);
+        s_prog_anim_active = false;
+    }
+    lv_bar_set_value(s_progress_bar, pct, LV_ANIM_OFF);
+
+    send_seek(pct);
 }
 
 /* =========================================================================
@@ -304,6 +339,10 @@ void ui_player_create(void)
     lv_obj_set_style_bg_opa(s_progress_bar, LV_OPA_COVER, LV_PART_INDICATOR);
     lv_obj_set_style_radius(s_progress_bar, 4, LV_PART_INDICATOR);
 
+    /* Make progress bar tappable for seek */
+    lv_obj_add_flag(s_progress_bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_progress_bar, on_progress_clicked, LV_EVENT_CLICKED, NULL);
+
     /* Time label: "elapsed / total" right-aligned below the progress bar -- */
     s_time_lbl = lv_label_create(left);
     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
@@ -390,6 +429,8 @@ typedef struct {
 typedef struct {
     uint8_t volume;
     uint8_t tempo;
+    uint8_t speed_min_x10;  /* SPEED_MIN × 10, e.g. 4 → 0.4× */
+    uint8_t speed_max_x10;  /* SPEED_MAX × 10, e.g. 20 → 2.0× */
 } async_poti_payload_t;
 
 static void async_cb_show(void *user_data)
@@ -441,7 +482,7 @@ typedef struct {
 static void async_cb_update_potis(void *user_data)
 {
     async_poti_payload_t *p = (async_poti_payload_t *)user_data;
-    char buf[8];
+    char buf[12];
 
     if (s_bar[0]) {
         lv_bar_set_value(s_bar[0], p->volume, LV_ANIM_ON);
@@ -450,7 +491,10 @@ static void async_cb_update_potis(void *user_data)
     }
     if (s_bar[1]) {
         lv_bar_set_value(s_bar[1], p->tempo, LV_ANIM_ON);
-        snprintf(buf, sizeof(buf), "%3u", p->tempo);
+        /* Derive actual speed multiplier (fixed-point ×100 for two decimal places) */
+        uint32_t speed_x100 = (uint32_t)p->speed_min_x10 * 10
+                            + ((uint32_t)(p->speed_max_x10 - p->speed_min_x10) * 10 * p->tempo + 50) / 100;
+        snprintf(buf, sizeof(buf), "%u.%02u", (unsigned)(speed_x100 / 100), (unsigned)(speed_x100 % 100));
         lv_label_set_text(s_val_lbl[1], buf);
     }
     free(p);
@@ -506,15 +550,18 @@ void ui_player_hide_async(void)
     lv_unlock();
 }
 
-void ui_player_update_potis_async(uint8_t volume, uint8_t tempo)
+void ui_player_update_potis_async(uint8_t volume, uint8_t tempo,
+                                  uint8_t speed_min_x10, uint8_t speed_max_x10)
 {
     if (!s_screen) return;
 
     async_poti_payload_t *p = malloc(sizeof(async_poti_payload_t));
     if (!p) { ESP_LOGE(TAG, "OOM in update_potis_async"); return; }
 
-    p->volume = volume;
-    p->tempo  = tempo;
+    p->volume        = volume;
+    p->tempo         = tempo;
+    p->speed_min_x10 = speed_min_x10;
+    p->speed_max_x10 = speed_max_x10;
     lv_lock();
     lv_async_call(async_cb_update_potis, p);
     lv_unlock();

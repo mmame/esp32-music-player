@@ -27,6 +27,8 @@ static um_on_play_song_cb_t s_on_play_song = nullptr;
 static um_on_stop_song_cb_t s_on_stop_song = nullptr;
 static um_on_pause_cb_t     s_on_pause     = nullptr;
 static um_on_resume_cb_t    s_on_resume    = nullptr;
+static um_on_display_ready_cb_t s_on_display_ready = nullptr;
+static um_on_seek_cb_t      s_on_seek      = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem = nullptr;
@@ -90,15 +92,17 @@ static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len
  * Public API
  * ══════════════════════════════════════════════════════════════════════════════ */
 
-void uart_master_init(um_on_play_song_cb_t on_play_song,
-                      um_on_stop_song_cb_t on_stop_song,
-                      um_on_pause_cb_t     on_pause,
-                      um_on_resume_cb_t    on_resume)
+void uart_master_init(um_on_play_song_cb_t    on_play_song,
+                      um_on_stop_song_cb_t    on_stop_song,
+                      um_on_pause_cb_t        on_pause,
+                      um_on_resume_cb_t       on_resume,
+                      um_on_display_ready_cb_t on_display_ready)
 {
-    s_on_play_song = on_play_song;
-    s_on_stop_song = on_stop_song;
-    s_on_pause     = on_pause;
-    s_on_resume    = on_resume;
+    s_on_play_song     = on_play_song;
+    s_on_stop_song     = on_stop_song;
+    s_on_pause         = on_pause;
+    s_on_resume        = on_resume;
+    s_on_display_ready = on_display_ready;
 
     s_ack_sem  = xSemaphoreCreateBinary();
     s_tx_mutex = xSemaphoreCreateMutex();
@@ -212,11 +216,13 @@ void uart_master_send_state(const char *song_name,
 
 /* ── CMD_POTI_UPDATE ───────────────────────────────────────────────────────── */
 
-void uart_master_send_poti_update(uint8_t volume, uint8_t tempo, uint8_t expression)
+void uart_master_send_poti_update(uint8_t volume, uint8_t tempo, uint8_t expression,
+                                  uint8_t speed_min_x10, uint8_t speed_max_x10)
 {
-    uint8_t payload[3] = { volume, tempo, expression };
-    ESP_LOGD(TAG, "TX CMD_POTI_UPDATE vol=%u tempo=%u expr=%u", volume, tempo, expression);
-    send_packet(CMD_POTI_UPDATE, payload, 3);
+    uint8_t payload[5] = { volume, tempo, expression, speed_min_x10, speed_max_x10 };
+    ESP_LOGD(TAG, "TX CMD_POTI_UPDATE vol=%u tempo=%u expr=%u spd_min=%u spd_max=%u",
+             volume, tempo, expression, speed_min_x10, speed_max_x10);
+    send_packet(CMD_POTI_UPDATE, payload, 5);
 }
 
 /* ── CMD_ENCODER_MOVE ──────────────────────────────────────────────────────── */
@@ -253,6 +259,11 @@ bool uart_master_sync(uint32_t timeout_ms)
         ESP_LOGW(TAG, "SYNC: no ACK within %u ms", (unsigned)timeout_ms);
     }
     return got_ack;
+}
+
+void uart_master_set_seek_callback(um_on_seek_cb_t on_seek)
+{
+    s_on_seek = on_seek;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -369,6 +380,27 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     case CMD_RESUME:
         ESP_LOGI(TAG, "CMD_RESUME received");
         if (s_on_resume) s_on_resume();
+        break;
+
+    case CMD_DISPLAY_READY:
+        ESP_LOGI(TAG, "CMD_DISPLAY_READY received – display was reset");
+        if (s_on_display_ready) s_on_display_ready();
+        break;
+
+    case CMD_SEEK:
+        /*
+         * Payload: 1 byte – target position 0–100 %.
+         */
+        if (len < 1) {
+            ESP_LOGW(TAG, "CMD_SEEK: missing payload");
+            break;
+        }
+        {
+            uint8_t pct = payload[0];
+            if (pct > 100) pct = 100;
+            ESP_LOGI(TAG, "CMD_SEEK: pct=%u", pct);
+            if (s_on_seek) s_on_seek(pct);
+        }
         break;
 
     case CMD_ACK:

@@ -118,6 +118,16 @@ void uart_comm_init(void)
         tskIDLE_PRIORITY + 2,
         NULL, 0);
     configASSERT(ret == pdPASS);
+
+    /* Notify the host that the display has just (re)started and needs
+     * a fresh song list.  Packet: [MAGIC 8B][CMD 1B][LEN=0 1B][CHKSUM 1B] */
+    uint8_t ready_pkt[11];
+    memcpy(&ready_pkt[0], UART_MAGIC_BYTES, 8);
+    ready_pkt[8]  = CMD_DISPLAY_READY;
+    ready_pkt[9]  = 0x00;
+    ready_pkt[10] = CMD_DISPLAY_READY;   /* checksum = CMD ^ 0x00 */
+    uart_write_bytes(UART_COMM_PORT, ready_pkt, sizeof(ready_pkt));
+    ESP_LOGI(TAG, "CMD_DISPLAY_READY sent");
 }
 
 void uart_comm_update_touch(bool active, int16_t x, int16_t y)
@@ -381,16 +391,22 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     /* ------------------------------------------------------------------ */
     case CMD_POTI_UPDATE:
         /*
-         * Payload layout (3 bytes):
-         *   [0]  volume     : uint8_t  (0–100)
-         *   [1]  tempo      : uint8_t  (0–100, mapped by host from BPM)
-         *   [2]  expression : uint8_t  (0–100)
+         * Payload layout (5 bytes):
+         *   [0]  volume        : uint8_t  (0–100)
+         *   [1]  tempo         : uint8_t  (0–100, 50 = 1.0×)
+         *   [2]  expression    : uint8_t  (0–100, reserved)
+         *   [3]  speed_min_x10 : uint8_t  (SPEED_MIN × 10)
+         *   [4]  speed_max_x10 : uint8_t  (SPEED_MAX × 10)
          */
         if (len < 3) {
             ESP_LOGW(TAG, "CMD_POTI_UPDATE: payload too short (%u bytes)", len);
             break;
         }
-        ui_player_update_potis_async(payload[0], payload[1]);
+        {
+            uint8_t speed_min_x10 = (len >= 5) ? payload[3] : 4;   /* default 0.4× */
+            uint8_t speed_max_x10 = (len >= 5) ? payload[4] : 20;  /* default 2.0× */
+            ui_player_update_potis_async(payload[0], payload[1], speed_min_x10, speed_max_x10);
+        }
         break;
 
     /* ------------------------------------------------------------------ */

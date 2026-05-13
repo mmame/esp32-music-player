@@ -48,6 +48,8 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_STOP_SONG       0x08  /* Display → Host: stop playback             */
 #define CMD_PAUSE           0x09  /* Display → Host: pause playback            */
 #define CMD_RESUME          0x0A  /* Display → Host: resume playback           */
+#define CMD_DISPLAY_READY   0x0B  /* Display → Host: display reset, request resync */
+#define CMD_SEEK            0x0C  /* Display → Host: seek to position (1-byte 0-100%) */
 #define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -69,6 +71,13 @@ typedef void (*um_on_pause_cb_t)(void);
 /** @brief Called when the display sends CMD_RESUME. */
 typedef void (*um_on_resume_cb_t)(void);
 
+/** @brief Called when the display sends CMD_DISPLAY_READY (display was reset). */
+typedef void (*um_on_display_ready_cb_t)(void);
+/**
+ * @brief Called when the display sends CMD_SEEK.
+ * @param position_pct  Requested playback position 0–100 %.
+ */
+typedef void (*um_on_seek_cb_t)(uint8_t position_pct);
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -78,11 +87,21 @@ typedef void (*um_on_resume_cb_t)(void);
  * @param on_stop_song  Callback invoked when CMD_STOP_SONG arrives (may be NULL).
  * @param on_pause      Callback invoked when CMD_PAUSE arrives (may be NULL).
  * @param on_resume     Callback invoked when CMD_RESUME arrives (may be NULL).
+ * @param on_display_ready Callback invoked when CMD_DISPLAY_READY arrives (may be NULL).
  */
-void uart_master_init(um_on_play_song_cb_t on_play_song,
-                      um_on_stop_song_cb_t on_stop_song,
-                      um_on_pause_cb_t     on_pause,
-                      um_on_resume_cb_t    on_resume);
+void uart_master_init(um_on_play_song_cb_t    on_play_song,
+                      um_on_stop_song_cb_t    on_stop_song,
+                      um_on_pause_cb_t        on_pause,
+                      um_on_resume_cb_t       on_resume,
+                      um_on_display_ready_cb_t on_display_ready);
+
+/**
+ * @brief Register a seek callback after init.
+ *        Safe to call at any time; replaces the current callback.
+ *
+ * @param on_seek  Callback invoked when CMD_SEEK arrives (may be NULL).
+ */
+void uart_master_set_seek_callback(um_on_seek_cb_t on_seek);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 
@@ -128,11 +147,21 @@ void uart_master_send_state(const char *song_name,
 /**
  * @brief Send CMD_POTI_UPDATE so the display can refresh its visual bars.
  *
- * @param volume      0–100.
- * @param tempo       0–100.
- * @param expression  0–100 (reserved, send 0 if unused).
+ * Payload layout (5 bytes):
+ *   [0]  volume        : uint8_t  (0–100)
+ *   [1]  tempo         : uint8_t  (0–100, 50 = 1.0×)
+ *   [2]  expression    : uint8_t  (0–100, reserved)
+ *   [3]  speed_min_x10 : uint8_t  (SPEED_MIN × 10, e.g. 4 for 0.4×)
+ *   [4]  speed_max_x10 : uint8_t  (SPEED_MAX × 10, e.g. 20 for 2.0×)
+ *
+ * @param volume        0–100.
+ * @param tempo         0–100.
+ * @param expression    0–100 (reserved, send 0 if unused).
+ * @param speed_min_x10 SPEED_MIN scaled by 10.
+ * @param speed_max_x10 SPEED_MAX scaled by 10.
  */
-void uart_master_send_poti_update(uint8_t volume, uint8_t tempo, uint8_t expression);
+void uart_master_send_poti_update(uint8_t volume, uint8_t tempo, uint8_t expression,
+                                  uint8_t speed_min_x10, uint8_t speed_max_x10);
 
 /**
  * @brief Send CMD_ENCODER_MOVE so the display can scroll its song list.

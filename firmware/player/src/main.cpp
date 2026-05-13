@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file main.cpp
  * @brief WAV player – Master controller.
  *
@@ -8,7 +8,7 @@
  * Core 0 (medium priority) – io_task:   UART rx/tx, encoder, potentiometers
  *
  * Audio pipeline (write direction):
- *   SD card → AudioPlayer → WAVDecoder → SonicStream (WSOLA) → I2SStream → DAC
+ *   SD card → PSRAMTaskStream (512 KB PSRAM ring buffer) → WAVDecoder → SonicStream (WSOLA) → I2SStream → DAC
  *
  * UART link (921600 baud, UART1):
  *   TX: CMD_SONG_LIST, CMD_SET_STATE, CMD_POTI_UPDATE, CMD_ENCODER_MOVE,
@@ -20,6 +20,7 @@
 #include "AudioTools.h"
 #include "AudioTools/Disk/AudioSourceSD.h"
 #include "AudioTools/AudioCodecs/CodecWAV.h"
+#include "AudioTools/Communication/HTTP/URLStreamBufferedT.h"
 #include "SonicStream.h"
 #include "uart_master.h"
 #include "encoder.h"
@@ -29,12 +30,16 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include <atomic>
 
 #include <SD.h>
 #include <SPI.h>
 #include <string.h>
 #include <math.h>
 #include "pins.h"
+#include "esp_pm.h"
+
 
 static const char *TAG = "main";
 
@@ -47,13 +52,217 @@ static char     g_song_names[MAX_SONGS][MAX_NAME];
 static uint8_t  g_song_count   = 0;
 static int16_t  g_current_song = -1;  // index into g_song_names, -1 = none
 
-// ─── Audio pipeline objects ───────────────────────────────────────────────────
-static I2SStream     i2sOut;
-static SonicStream   sonicOut(i2sOut);
-static AudioSourceSD audioSource("/", ".wav");
-static WAVDecoder    wavDecoder;
-static AudioPlayer   player(audioSource, sonicOut, wavDecoder);
+// ─── PSRAM-backed buffered SD stream ─────────────────────────────────────────
+// A 512 KB ring buffer sits in PSRAM between the SD File and the audio pipeline.
+// A FreeRTOS fill-task on Core 0 reads SD → PSRAM; audio_task on Core 1 reads
+// purely from PSRAM.  Lock-free single-producer/single-consumer design:
+//   head_ is owned exclusively by the consumer (Core 1)
+//   tail_ is owned exclusively by the producer (Core 0)
+class PSRAMTaskStream : public AudioStream {
+public:
+    static constexpr size_t BUF_SIZE   = 1024UL * 1024;  // 1 MB ring buffer
+    static constexpr size_t FILL_CHUNK = 8192;           // SD → PSRAM read size
 
+    PSRAMTaskStream() = default;
+    ~PSRAMTaskStream() {
+        terminate();
+        if (buf_) { heap_caps_free(buf_); buf_ = nullptr; }
+    }
+
+    void setFile(File *f) { p_file_ = f; }
+
+    // Allocate PSRAM (once) and start the fill task on Core 0.
+    bool begin() {
+        if (!buf_) {
+            // Allocate ring buffer + SD read temp buffer together in PSRAM.
+            buf_ = static_cast<uint8_t *>(
+                heap_caps_malloc(BUF_SIZE + FILL_CHUNK,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (!buf_) {
+                ESP_LOGE("PSRAMBuf", "PSRAM alloc failed (%zu KB)",
+                         (BUF_SIZE + FILL_CHUNK) / 1024);
+                return false;
+            }
+            tmp_buf_ = buf_ + BUF_SIZE;   // temp buffer after the ring buffer
+            ESP_LOGI("PSRAMBuf", "PSRAM ring buffer: %zu KB @ %p",
+                     BUF_SIZE / 1024, buf_);
+        }
+        head_.store(0, std::memory_order_relaxed);
+        tail_.store(0, std::memory_order_relaxed);
+        eof_.store(false,  std::memory_order_relaxed);
+        stop_.store(false, std::memory_order_relaxed);
+        xTaskCreatePinnedToCore(fill_task_fn, "sd_fill",
+                                8192,   // stack: no large locals, but File I/O
+                                this,
+                                configMAX_PRIORITIES - 2,
+                                &task_,
+                                0 /* Core 0 */);
+        return true;
+    }
+
+    // Stop fill task and reset ring buffer for the next song.
+    void end() {
+        terminate();
+        head_.store(0, std::memory_order_relaxed);
+        tail_.store(0, std::memory_order_relaxed);
+        eof_.store(false, std::memory_order_relaxed);
+    }
+
+    // Seek the underlying SD file to byte_offset, flush the ring buffer, and
+    // restart the fill task.  Called from audio_task (Core 1) only.
+    bool seekFile(uint32_t byte_offset) {
+        if (!p_file_) return false;
+        terminate();   // stop fill task
+        bool ok = p_file_->seek(byte_offset);
+        head_.store(0, std::memory_order_relaxed);
+        tail_.store(0, std::memory_order_relaxed);
+        eof_.store(false,  std::memory_order_relaxed);
+        stop_.store(false, std::memory_order_relaxed);
+        xTaskCreatePinnedToCore(fill_task_fn, "sd_fill",
+                                8192, this,
+                                configMAX_PRIORITIES - 2,
+                                &task_, 0 /* Core 0 */);
+        return ok;
+    }
+
+    // ── Stream interface – called from audio_task (Core 1) ───────────────────
+    int available() override {
+        size_t h = head_.load(std::memory_order_acquire);
+        size_t t = tail_.load(std::memory_order_acquire);
+        return (int)((t - h + BUF_SIZE) % BUF_SIZE);
+    }
+
+    size_t readBytes(uint8_t *out, size_t n) override {
+        size_t done = 0;
+        while (done < n) {
+            size_t h     = head_.load(std::memory_order_acquire);
+            size_t t     = tail_.load(std::memory_order_acquire);
+            size_t avail = (t - h + BUF_SIZE) % BUF_SIZE;
+            if (!avail) break;
+            // Contiguous bytes up to ring-buffer wrap-around point
+            size_t contig = BUF_SIZE - h;
+            size_t take   = avail < (n - done) ? avail : (n - done);
+            if (take > contig) take = contig;
+            memcpy(out + done, buf_ + h, take);
+            head_.store((h + take) % BUF_SIZE, std::memory_order_release);
+            done += take;
+        }
+        return done;
+    }
+
+    int read() override {
+        uint8_t b;
+        return readBytes(&b, 1) == 1 ? (int)b : -1;
+    }
+
+    int peek() override {
+        size_t h = head_.load(std::memory_order_acquire);
+        size_t t = tail_.load(std::memory_order_acquire);
+        return (h != t) ? (int)buf_[h] : -1;
+    }
+
+    size_t write(uint8_t) override { return 0; }
+
+    // Stays "valid" until SD is drained AND the ring buffer is empty.
+    operator bool() override {
+        return available() > 0 || !eof_.load(std::memory_order_acquire);
+    }
+
+private:
+    File                 *p_file_  = nullptr;
+    uint8_t              *buf_     = nullptr;  // PSRAM ring buffer
+    uint8_t              *tmp_buf_ = nullptr;  // PSRAM SD read temp (after buf_)
+    std::atomic<size_t>   head_{0};  // consumer read index  (Core 1)
+    std::atomic<size_t>   tail_{0};  // producer write index (Core 0)
+    std::atomic<bool>     eof_{false};
+    std::atomic<bool>     stop_{false};
+    TaskHandle_t          task_ = nullptr;
+
+    void terminate() {
+        stop_.store(true, std::memory_order_release);
+        // Wait up to 100 ms for the fill task to self-delete.
+        for (int i = 0; i < 100 && task_ != nullptr; i++)
+            vTaskDelay(pdMS_TO_TICKS(1));
+        if (task_ != nullptr) { vTaskDelete(task_); task_ = nullptr; }
+    }
+
+    static void fill_task_fn(void *arg) {
+        auto *self = static_cast<PSRAMTaskStream *>(arg);
+
+        while (!self->stop_.load(std::memory_order_acquire)) {
+            if (!self->p_file_) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
+
+            // Free space in ring buffer (keep 1 slot to tell full from empty)
+            size_t h     = self->head_.load(std::memory_order_acquire);
+            size_t t     = self->tail_.load(std::memory_order_relaxed);
+            size_t space = (h - t - 1 + BUF_SIZE) % BUF_SIZE;
+
+            if (space < FILL_CHUNK) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+
+            int src_avail = self->p_file_->available();
+            if (src_avail <= 0) {
+                self->eof_.store(true, std::memory_order_release);
+                vTaskDelay(pdMS_TO_TICKS(2));
+                continue;
+            }
+            self->eof_.store(false, std::memory_order_release);
+
+            size_t to_read = (size_t)src_avail < space  ? (size_t)src_avail : space;
+            if (to_read > FILL_CHUNK) to_read = FILL_CHUNK;
+
+            size_t got = self->p_file_->read(self->tmp_buf_, to_read);
+            if (!got) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+
+            // Write into ring buffer, handling wrap-around
+            size_t contig = BUF_SIZE - t;
+            size_t first  = got < contig ? got : contig;
+            memcpy(self->buf_ + t, self->tmp_buf_, first);
+            if (got > first)
+                memcpy(self->buf_, self->tmp_buf_ + first, got - first);
+            self->tail_.store((t + got) % BUF_SIZE, std::memory_order_release);
+        }
+
+        self->task_ = nullptr;
+        vTaskDelete(nullptr);
+    }
+};
+
+// BufferedAudioSourceSD: inserts a PSRAMTaskStream between AudioSourceSD
+// and the AudioPlayer.  The player reads purely from PSRAM; SD I/O is fully
+// decoupled and any SD latency spike (FAT re-allocation, etc.) is absorbed
+// without stalling the audio pipeline.
+class BufferedAudioSourceSD : public AudioSourceSD {
+public:
+    BufferedAudioSourceSD(const char *path, const char *ext)
+        : AudioSourceSD(path, ext) {}
+
+    Stream *selectStream(int index)        override { return wrap(AudioSourceSD::selectStream(index)); }
+    Stream *selectStream(const char *path) override { return wrap(AudioSourceSD::selectStream(path)); }
+    Stream *nextStream(int offset)         override { return wrap(AudioSourceSD::nextStream(offset)); }
+
+    // Seek to a byte offset within the open file (called while playing).
+    // The WAV header has already been parsed by the decoder; we stay inside
+    // the PCM data region (past the 44-byte header).
+    bool seekTo(uint32_t byte_offset) { return psramBuf.seekFile(byte_offset); }
+
+private:
+    PSRAMTaskStream psramBuf;
+
+    Stream *wrap(Stream *raw) {
+        if (!raw) return nullptr;
+        psramBuf.end();                 // stop fill task, clear old data
+        psramBuf.setFile(&file);        // 'file' is AudioSourceSD::file (protected)
+        if (!psramBuf.begin()) return nullptr;
+        return &psramBuf;
+    }
+};
+
+// ─── Audio pipeline objects ───────────────────────────────────────────────────
+static I2SStream              i2sOut;
+static SonicStream            sonicOut(i2sOut);
+static BufferedAudioSourceSD  audioSource("/", ".wav");
+static WAVDecoder             wavDecoder;
+static AudioPlayer            player(audioSource, sonicOut, wavDecoder);
 // ─── Shared playback state (protected by s_state_mutex) ──────────────────────
 static SemaphoreHandle_t s_state_mutex = nullptr;
 static float    g_speed           = 1.0f;   // 0.2–4.0
@@ -69,12 +278,13 @@ static float    g_audio_pos_s     = 0.0f;
 static int64_t  g_wall_ref_us     = 0;
 static AudioInfo g_fmt;
 
-// Commands posted from Core 0 io_task to Core 1 audio_task
+// Commands posted from Core 0 io_task / UART-rx task to Core 1 audio_task
 static volatile bool    s_cmd_stop       = false;
-static volatile int16_t s_cmd_play_id    = -1; // ≥0 means "start this song"
+static volatile int16_t s_cmd_play_id    = -1;  // ≥0 means "start this song"
 static volatile bool    s_cmd_next       = false;
 static volatile bool    s_cmd_pause      = false;
 static volatile bool    s_cmd_resume     = false;
+static volatile int16_t s_cmd_seek_pct   = -1;  // 0–100 seek target, -1 = no pending seek
 
 // Currently highlighted song in the local playlist (tracks encoder position).
 // Access only from the io_task (Core 0) – no mutex needed.
@@ -189,6 +399,34 @@ static void on_resume_song(void)
     s_cmd_resume = true;
 }
 
+static void on_display_ready(void)
+{
+    // Display was reset – resend the full song list so it can rebuild its UI.
+    ESP_LOGI(TAG, "CMD_DISPLAY_READY received – resending song list (%u tracks)", g_song_count);
+    uart_master_send_song_list(
+        (const char (*)[UM_MAX_SONG_NAME])g_song_names,
+        g_song_count);
+
+    // Re-send current volume and tempo so the display bars are immediately
+    // populated after the reset, even before the next potentiometer change.
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    uint8_t vol   = g_volume;
+    float   speed = g_speed;
+    xSemaphoreGive(s_state_mutex);
+
+    uint8_t tempo = speed_to_tempo_byte(speed);
+    uart_master_send_poti_update(vol, tempo, 0,
+        (uint8_t)(SPEED_MIN * 10.0f + 0.5f),
+        (uint8_t)(SPEED_MAX * 10.0f + 0.5f));
+    ESP_LOGI(TAG, "CMD_DISPLAY_READY – poti resent: vol=%u tempo=%u", vol, tempo);
+}
+
+static void on_seek_song(uint8_t position_pct)
+{
+    ESP_LOGI(TAG, "CMD_SEEK received: pct=%u", position_pct);
+    s_cmd_seek_pct = (int16_t)position_pct;
+}
+
 // ─── Format change notifier ───────────────────────────────────────────────────
 
 // Raised by setAudioInfo() when a track starts outside the suppression window.
@@ -218,24 +456,6 @@ struct FormatChangeNotifier : public AudioInfoSupport {
     AudioInfo audioInfo() override { return g_fmt; }
 } g_formatNotifier;
 
-// ─── Buffer flush helper ──────────────────────────────────────────────────────
-// Called after player.stop() and before player.play().  Must only be called
-// within the CMD_PLAY_SUPPRESS_US window (s_cmd_play_initiated_us already set)
-// so that sonicOut.begin() – if it happens to trigger setAudioInfo – is ignored.
-static void flush_audio_buffers(void)
-{
-    // Overwrite the I2S DMA ring buffer (64 × 1024 B) with silence exactly once.
-    static const uint8_t silence[1024] = {0};
-    for (int i = 0; i < 64; i++) {
-        i2sOut.write(silence, sizeof(silence));
-    }
-    // Reset SonicStream’s internal WSOLA buffers so no old frames leak into
-    // the next track.  FormatChangeNotifier is registered on AudioPlayer, not
-    // on sonicOut, so begin() here does not raise s_track_format_arrived.
-    sonicOut.begin(g_fmt);
-    sonicOut.setSpeed(g_speed);
-    ESP_LOGI(TAG, "[Audio] Buffers flushed");
-}
 
 // ─── Audio task – Core 1 ──────────────────────────────────────────────────────
 
@@ -247,13 +467,9 @@ static void audio_task(void *arg)
         // Handle stop command
         if (s_cmd_stop) {
             s_cmd_stop = false;
-            // Flush silence into the DMA ring BEFORE stopping so the DAC
-            // never gets to output the last buffered audio frame (important
-            // when stopping from a paused state where copy() was not running).
-            s_cmd_play_initiated_us = esp_timer_get_time(); // keep setAudioInfo suppressed
-            flush_audio_buffers();
+            s_cmd_play_initiated_us = esp_timer_get_time();
+            player.setMuted(true);  // avoid any trailing audio while stopping
             player.stop();
-            flush_audio_buffers();
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_is_playing = false;
             g_is_paused  = false;
@@ -288,6 +504,39 @@ static void audio_task(void *arg)
             xSemaphoreGive(s_state_mutex);
         }
 
+        // Handle seek command – reposition within the currently-playing file.
+        int16_t seek_pct = s_cmd_seek_pct;
+        if (seek_pct >= 0) {
+            s_cmd_seek_pct = -1;
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            bool     playing    = g_is_playing;
+            uint32_t data_bytes = g_song_data_bytes;
+            uint32_t sr         = (uint32_t)g_fmt.sample_rate;
+            uint32_t ch         = (uint32_t)g_fmt.channels;
+            uint32_t bps        = (uint32_t)(g_fmt.bits_per_sample / 8);
+            xSemaphoreGive(s_state_mutex);
+
+            if (playing && data_bytes > 0 && sr > 0) {
+                // Compute byte offset, aligned down to a PCM frame boundary.
+                uint32_t frame_sz  = ch * bps;
+                if (frame_sz == 0) frame_sz = 4; // fallback: stereo 16-bit
+                uint32_t raw_data_off = (uint32_t)((uint64_t)seek_pct * data_bytes / 100);
+                uint32_t aligned_off  = (raw_data_off / frame_sz) * frame_sz;
+                uint32_t file_offset  = 44u + aligned_off;
+
+                ESP_LOGI(TAG, "[Seek] %d%% → file offset %u (aligned)", (int)seek_pct, file_offset);
+                audioSource.seekTo(file_offset);
+
+                // Update position tracking to reflect the new playback position.
+                uint32_t bytes_per_sec = sr * ch * bps;
+                float new_pos_s = (float)aligned_off / (float)bytes_per_sec;
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                g_audio_pos_s = new_pos_s;
+                g_wall_ref_us = esp_timer_get_time();
+                xSemaphoreGive(s_state_mutex);
+            }
+        }
+
         // Handle play-by-ID command
         int16_t play_id = s_cmd_play_id;
         if (play_id >= 0) {
@@ -299,7 +548,6 @@ static void audio_task(void *arg)
                 ESP_LOGI(TAG, "[Audio] Playing: %s", path);
 
                 // Mark as playing IMMEDIATELY so io_task disables the encoder
-                // during the ~370 ms flush that follows.
                 // Also record the command time so setAudioInfo() calls triggered
                 // by stop/flush/play are suppressed (not mistaken for auto-advance).
                 s_cmd_play_initiated_us = esp_timer_get_time();
@@ -309,10 +557,11 @@ static void audio_task(void *arg)
                 g_is_paused    = false;
                 xSemaphoreGive(s_state_mutex);
 
-                player.stop();
-                flush_audio_buffers();
+                //player.stop();
+                player.setMuted(true);  // avoid any trailing audio while stopping
                 player.setPath(path);
                 player.play();
+                player.setMuted(false);  // avoid any trailing audio while stopping
 
                 // Stat the file to know total audio data bytes (for progress %)
                 uint32_t data_bytes = 0;
@@ -322,6 +571,7 @@ static void audio_task(void *arg)
                     data_bytes = (fsz > 44) ? (uint32_t)(fsz - 44) : 0;
                     sf.close();
                 }
+
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                 g_song_data_bytes = data_bytes;
                 g_audio_pos_s     = 0.0f;
@@ -365,7 +615,6 @@ static void audio_task(void *arg)
             s_track_format_arrived = false;
             // Always an auto-advance here (commanded plays are suppressed in setAudioInfo)
             player.stop();
-            flush_audio_buffers();
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             g_is_playing = false;
             xSemaphoreGive(s_state_mutex);
@@ -450,7 +699,9 @@ static void io_task(void *arg)
                 ESP_LOGI(TAG, "Poti update: vol=%u  tempo=%u%%  speed=%.2fx", vol, tempo_pct, g_speed);
 
                 // Notify display
-                uart_master_send_poti_update(vol, tempo_pct, 0);
+                uart_master_send_poti_update(vol, tempo_pct, 0,
+                    (uint8_t)(SPEED_MIN * 10.0f + 0.5f),
+                    (uint8_t)(SPEED_MAX * 10.0f + 0.5f));
                 last_vol        = vol;
                 last_tempo_byte = tempo_pct;
             }
@@ -543,8 +794,20 @@ static void play_test_tone(uint32_t duration_ms)
 
 // ─── Arduino setup ───────────────────────────────────────────────────────────
 
-void setup()
+void setup() 
 {
+
+    //disable Bluetooth
+    btStop();
+
+    // 2. Power Management configuration: full power
+    esp_pm_config_esp32s3_t pm_config = {
+        .max_freq_mhz = 240, // Full 240 MHz
+        .min_freq_mhz = 240, // Prevent downclocking
+        .light_sleep_enable = false // Disable light sleep
+    };
+    esp_pm_configure(&pm_config);
+
     Serial.begin(115200);
     AudioLogger::instance().begin(Serial, AudioLogger::Warning);
 
@@ -574,6 +837,7 @@ void setup()
     i2sCfg.bits_per_sample = 16;
     i2sCfg.buffer_count    = 64;
     i2sCfg.buffer_size     = 1024;
+    i2sCfg.auto_clear    = true;
     i2sOut.begin(i2sCfg);
     ESP_LOGI(TAG, "I2S started: %d Hz  2ch  16-bit  buf=%dx%d",
              i2sCfg.sample_rate, i2sCfg.buffer_count, i2sCfg.buffer_size);
@@ -595,8 +859,8 @@ void setup()
     });
     player.begin(false);   // do not auto-play on power-up
     player.setVolume((float)g_volume / 100.0f);
-    player.setBufferSize(16384);
-    ESP_LOGI(TAG, "AudioPlayer started: vol=%u/100  readBuf=16384 B", g_volume);
+    player.setBufferSize(32768);   // StreamCopy chunk: 32 KB/call – reads from PSRAM, very fast
+    ESP_LOGI(TAG, "AudioPlayer started: vol=%u/100  readBuf=65535B", g_volume);
 
     // --- Shared state mutex ---
     s_state_mutex = xSemaphoreCreateMutex();
@@ -611,7 +875,8 @@ void setup()
 
     // --- UART master ---
     ESP_LOGI(TAG, "Initializing UART master...");
-    uart_master_init(on_play_song, on_stop_song, on_pause_song, on_resume_song);
+    uart_master_init(on_play_song, on_stop_song, on_pause_song, on_resume_song, on_display_ready);
+    uart_master_set_seek_callback(on_seek_song);
     ESP_LOGI(TAG, "UART master initialized");
 
     // Give the display a moment to boot, then send the playlist

@@ -58,10 +58,13 @@ void ui_player_hide_async(void);
  * @brief Update the two live poti bar indicators.
  *        Safe to call from any task / core.
  *
- * @param volume      0–100
- * @param tempo       0–100 (mapped from actual BPM range by the host)
+ * @param volume        0–100
+ * @param tempo         0–100 (mapped from actual speed range by the host)
+ * @param speed_min_x10 Minimum speed × 10 (e.g. 4 → 0.4×)
+ * @param speed_max_x10 Maximum speed × 10 (e.g. 20 → 2.0×)
  */
-void ui_player_update_potis_async(uint8_t volume, uint8_t tempo);
+void ui_player_update_potis_async(uint8_t volume, uint8_t tempo,
+                                  uint8_t speed_min_x10, uint8_t speed_max_x10);
 
 /**
  * @brief Update the progress bar and elapsed/total time label.
