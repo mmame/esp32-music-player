@@ -14,15 +14,12 @@
 #define PIN_SPI_MISO    47
 
 /* ── I2S external DAC ────────────────────────────────────────────────────── */
-//#define SCK_PIN     11
 #define MY_I2S_BCK      13  /* Bit clock                                      */
 #define MY_I2S_WS       12  /* Word select / LRCK                             */
 #define MY_I2S_DATA     14  /* Serial data / DIN                              */
 
 /* ── UART1 link to Display-ESP ───────────────────────────────────────────── */
 #define UM_UART_NUM     1   /* UART peripheral index                          */
-//#define UM_TX_PIN       44  /* Player TX  →  Display RX                       */
-//#define UM_RX_PIN       43  /* Player RX  ←  Display TX                       */
 #define UM_TX_PIN       40  /* Player TX  →  Display RX                       */
 #define UM_RX_PIN       41  /* Player RX  ←  Display TX                       */
 

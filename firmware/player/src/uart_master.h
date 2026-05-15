@@ -54,15 +54,10 @@ static const uint8_t UM_MAGIC[8] = {
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
 
-/**
- * @brief Called when the display requests a specific song by 16-bit ID.
- *        The ID corresponds to the 1-based index sent in CMD_SONG_LIST.
- */
+/** @brief Called when the display requests a specific song by 16-bit ID (1-based). */
 typedef void (*um_on_play_song_cb_t)(uint16_t song_id);
 
-/**
- * @brief Called when the display sends CMD_STOP_SONG.
- */
+/** @brief Called when the display sends CMD_STOP_SONG. */
 typedef void (*um_on_stop_song_cb_t)(void);
 
 /** @brief Called when the display sends CMD_PAUSE. */
@@ -73,33 +68,27 @@ typedef void (*um_on_resume_cb_t)(void);
 
 /** @brief Called when the display sends CMD_DISPLAY_READY (display was reset). */
 typedef void (*um_on_display_ready_cb_t)(void);
+
 /**
  * @brief Called when the display sends CMD_SEEK.
  * @param position_pct  Requested playback position 0–100 %.
  */
 typedef void (*um_on_seek_cb_t)(uint8_t position_pct);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
  * @brief Initialise UART1 and start the receive task on Core 0.
- *
- * @param on_play_song  Callback invoked when CMD_PLAY_SONG arrives (may be NULL).
- * @param on_stop_song  Callback invoked when CMD_STOP_SONG arrives (may be NULL).
- * @param on_pause      Callback invoked when CMD_PAUSE arrives (may be NULL).
- * @param on_resume     Callback invoked when CMD_RESUME arrives (may be NULL).
- * @param on_display_ready Callback invoked when CMD_DISPLAY_READY arrives (may be NULL).
  */
-void uart_master_init(um_on_play_song_cb_t    on_play_song,
-                      um_on_stop_song_cb_t    on_stop_song,
-                      um_on_pause_cb_t        on_pause,
-                      um_on_resume_cb_t       on_resume,
+void uart_master_init(um_on_play_song_cb_t     on_play_song,
+                      um_on_stop_song_cb_t     on_stop_song,
+                      um_on_pause_cb_t         on_pause,
+                      um_on_resume_cb_t        on_resume,
                       um_on_display_ready_cb_t on_display_ready);
 
 /**
  * @brief Register a seek callback after init.
  *        Safe to call at any time; replaces the current callback.
- *
- * @param on_seek  Callback invoked when CMD_SEEK arrives (may be NULL).
  */
 void uart_master_set_seek_callback(um_on_seek_cb_t on_seek);
 
@@ -108,14 +97,8 @@ void uart_master_set_seek_callback(um_on_seek_cb_t on_seek);
 /**
  * @brief Send CMD_SONG_LIST to the display.
  *
- * @param names   Array of null-terminated song-name strings (MAX 62 songs).
- * @param count   Number of entries in @p names.
- *
  * Wire format per entry: [id_lo:u8][id_hi:u8][name:char…]['\0']
  * Terminator            : [0x00][0x00]
- *
- * The function splits into multiple packets if the playlist exceeds
- * UM_MAX_PAYLOAD bytes.
  */
 void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t count);
 
@@ -129,20 +112,13 @@ void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t co
  *   [3]       position_pct : uint8_t   (0–100, playback progress)
  *   [4..5]    duration_s   : uint16_t  (speed-adjusted song length in seconds)
  *   [6..N-1]  song_name    : char[]    (no null terminator; length = LEN - 6)
- *
- * @param song_name    Null-terminated current track name (may be "").
- * @param is_playing   1 = playing, 0 = stopped/paused.
- * @param volume       0–100.
- * @param tempo        Speed as 0–100 (50 = 1.0×).
- * @param position_pct Playback progress 0–100 %.
- * @param duration_s   Speed-adjusted total song duration in seconds.
  */
 void uart_master_send_state(const char *song_name,
-                            uint8_t is_playing,
-                            uint8_t volume,
-                            uint8_t tempo,
-                            uint8_t position_pct,
-                            uint16_t duration_s);
+                            uint8_t     is_playing,
+                            uint8_t     volume,
+                            uint8_t     tempo,
+                            uint8_t     position_pct,
+                            uint16_t    duration_s);
 
 /**
  * @brief Send CMD_POTI_UPDATE so the display can refresh its visual bars.
@@ -151,34 +127,21 @@ void uart_master_send_state(const char *song_name,
  *   [0]  volume        : uint8_t  (0–100)
  *   [1]  tempo         : uint8_t  (0–100, 50 = 1.0×)
  *   [2]  expression    : uint8_t  (0–100, reserved)
- *   [3]  speed_min_x10 : uint8_t  (SPEED_MIN × 10, e.g. 4 for 0.4×)
+ *   [3]  speed_min_x10 : uint8_t  (SPEED_MIN × 10, e.g. 5 for 0.5×)
  *   [4]  speed_max_x10 : uint8_t  (SPEED_MAX × 10, e.g. 20 for 2.0×)
- *
- * @param volume        0–100.
- * @param tempo         0–100.
- * @param expression    0–100 (reserved, send 0 if unused).
- * @param speed_min_x10 SPEED_MIN scaled by 10.
- * @param speed_max_x10 SPEED_MAX scaled by 10.
  */
 void uart_master_send_poti_update(uint8_t volume, uint8_t tempo, uint8_t expression,
                                   uint8_t speed_min_x10, uint8_t speed_max_x10);
 
-/**
- * @brief Send CMD_ENCODER_MOVE so the display can scroll its song list.
- *
- * @param delta  Signed step count (positive = clockwise / down).
- */
+/** @brief Send CMD_ENCODER_MOVE so the display can scroll its song list. */
 void uart_master_send_encoder_move(int8_t delta);
 
-/**
- * @brief Send CMD_ENCODER_BTN so the display knows the encoder was pressed.
- */
+/** @brief Send CMD_ENCODER_BTN so the display knows the encoder was pressed. */
 void uart_master_send_encoder_btn(void);
 
 /**
  * @brief Send CMD_SYNC and wait up to @p timeout_ms for CMD_ACK.
- *
- * @return true if an ACK was received within the timeout, false otherwise.
+ * @return true if ACK was received within the timeout.
  */
 bool uart_master_sync(uint32_t timeout_ms);
 

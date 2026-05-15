@@ -6,8 +6,8 @@
  * Accumulated step counts are read atomically and then cleared.
  *
  * Wire:
- *   ENC_PIN_A  – encoder channel A (any GPIO with input support)
- *   ENC_PIN_B  – encoder channel B
+ *   ENC_PIN_A   – encoder channel A (any GPIO with input support)
+ *   ENC_PIN_B   – encoder channel B
  *   ENC_PIN_BTN – encoder push-button (active-low with internal pull-up)
  */
 #pragma once
@@ -38,6 +38,7 @@ extern "C" {
 /**
  * @brief Initialise PCNT unit and button GPIO.
  *        Must be called once before encoder_read_steps() or encoder_btn_pressed().
+ *        Assumes gpio_install_isr_service() has already been called.
  */
 void encoder_init(void);
 

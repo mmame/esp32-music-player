@@ -7,7 +7,6 @@
  */
 
 #include "uart_master.h"
-#include "compat.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,17 +20,20 @@
 
 static const char *TAG = "uart_master";
 
+/* Typed UART port constant – avoids int→uart_port_t conversion errors in C++ */
+static constexpr uart_port_t UART_PORT = static_cast<uart_port_t>(UM_UART_NUM);
+
 /* ── Internal state ────────────────────────────────────────────────────────── */
 
-static um_on_play_song_cb_t s_on_play_song = nullptr;
-static um_on_stop_song_cb_t s_on_stop_song = nullptr;
-static um_on_pause_cb_t     s_on_pause     = nullptr;
-static um_on_resume_cb_t    s_on_resume    = nullptr;
-static um_on_display_ready_cb_t s_on_display_ready = nullptr;
-static um_on_seek_cb_t      s_on_seek      = nullptr;
+static um_on_play_song_cb_t      s_on_play_song     = nullptr;
+static um_on_stop_song_cb_t      s_on_stop_song     = nullptr;
+static um_on_pause_cb_t          s_on_pause         = nullptr;
+static um_on_resume_cb_t         s_on_resume        = nullptr;
+static um_on_display_ready_cb_t  s_on_display_ready = nullptr;
+static um_on_seek_cb_t           s_on_seek          = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
-static SemaphoreHandle_t s_ack_sem = nullptr;
+static SemaphoreHandle_t s_ack_sem  = nullptr;
 
 /** Mutex serialising concurrent calls to uart_write_bytes. */
 static SemaphoreHandle_t s_tx_mutex = nullptr;
@@ -52,13 +54,8 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len);
 
 /* ── Generic framing helper ────────────────────────────────────────────────── */
 
-/**
- * Build and transmit one framed packet.
- * Thread-safe: acquires s_tx_mutex before writing.
- */
 static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len)
 {
-    /* Guard against overflow – callers must ensure payload_len ≤ UM_MAX_PAYLOAD */
     if (payload_len > UM_MAX_PAYLOAD) {
         ESP_LOGW(TAG, "send_packet: payload too large (%u), clamping", payload_len);
         payload_len = UM_MAX_PAYLOAD;
@@ -71,10 +68,7 @@ static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len
     }
 
     /* Frame: [MAGIC 8B][CMD 1B][LEN 1B][PAYLOAD][CHECKSUM 1B] */
-    const uint8_t header_len = (uint8_t)(sizeof(UM_MAGIC) + 2u);
-    const uint8_t total      = header_len + payload_len + 1u;
     uint8_t buf[sizeof(UM_MAGIC) + 2 + UM_MAX_PAYLOAD + 1];
-
     memcpy(&buf[0], UM_MAGIC, sizeof(UM_MAGIC));
     buf[8] = cmd;
     buf[9] = payload_len;
@@ -83,8 +77,10 @@ static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len
     }
     buf[10 + payload_len] = checksum;
 
+    const uint8_t total = (uint8_t)(sizeof(UM_MAGIC) + 2u + payload_len + 1u);
+
     xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
-    uart_write_bytes(UM_UART_NUM, buf, total);
+    uart_write_bytes(UART_PORT, buf, total);
     xSemaphoreGive(s_tx_mutex);
 }
 
@@ -92,10 +88,10 @@ static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len
  * Public API
  * ══════════════════════════════════════════════════════════════════════════════ */
 
-void uart_master_init(um_on_play_song_cb_t    on_play_song,
-                      um_on_stop_song_cb_t    on_stop_song,
-                      um_on_pause_cb_t        on_pause,
-                      um_on_resume_cb_t       on_resume,
+void uart_master_init(um_on_play_song_cb_t     on_play_song,
+                      um_on_stop_song_cb_t     on_stop_song,
+                      um_on_pause_cb_t         on_pause,
+                      um_on_resume_cb_t        on_resume,
                       um_on_display_ready_cb_t on_display_ready)
 {
     s_on_play_song     = on_play_song;
@@ -119,47 +115,43 @@ void uart_master_init(um_on_play_song_cb_t    on_play_song,
         .source_clk          = UART_SCLK_DEFAULT,
     };
 
-    ESP_ERROR_CHECK(uart_driver_install(UM_UART_NUM, UM_RX_BUF_SIZE, 0, 0, nullptr, 0));
-    ESP_ERROR_CHECK(uart_param_config(UM_UART_NUM, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(UM_UART_NUM,
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, UM_RX_BUF_SIZE, 0, 0, nullptr, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &cfg));
+    ESP_ERROR_CHECK(uart_set_pin(UART_PORT,
                                  UM_TX_PIN, UM_RX_PIN,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
     ESP_LOGI(TAG, "UART%d ready at %d baud (TX=%d, RX=%d)",
              UM_UART_NUM, UM_BAUD_RATE, UM_TX_PIN, UM_RX_PIN);
 
-    /* Receive task pinned to Core 0 (communication core) */
     BaseType_t ret = xTaskCreatePinnedToCore(
         rx_task, "uart_rx",
         4096, nullptr,
-        configMAX_PRIORITIES - 2,  /* high priority, below audio on Core 1 */
+        configMAX_PRIORITIES - 2,
         nullptr,
         0 /* Core 0 */
     );
     configASSERT(ret == pdPASS);
 }
 
+void uart_master_set_seek_callback(um_on_seek_cb_t on_seek)
+{
+    s_on_seek = on_seek;
+}
+
 /* ── CMD_SONG_LIST ─────────────────────────────────────────────────────────── */
 
 void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t count)
 {
-    /*
-     * Wire format per entry: [id_lo:u8][id_hi:u8][name:char...]['\0']
-     * Terminator             : [0x00][0x00]
-     *
-     * Each packet payload is at most UM_MAX_PAYLOAD bytes.
-     * We flush a packet when adding the next entry would overflow.
-     */
     uint8_t buf[UM_MAX_PAYLOAD];
     uint8_t buf_pos = 0;
 
     for (uint8_t i = 0; i < count; i++) {
-        uint16_t song_id   = (uint16_t)(i + 1);  /* 1-based */
-        const char *name   = names[i];
-        uint8_t    name_len = (uint8_t)strnlen(name, UM_MAX_SONG_NAME - 1);
-        uint8_t    entry_sz = 2u + name_len + 1u; /* id(2) + name + '\0' */
+        uint16_t    song_id  = (uint16_t)(i + 1);   /* 1-based */
+        const char *name     = names[i];
+        uint8_t     name_len = (uint8_t)strnlen(name, UM_MAX_SONG_NAME - 1);
+        uint8_t     entry_sz = 2u + name_len + 1u;  /* id(2) + name + '\0' */
 
-        /* Flush current buffer if this entry would overflow */
         if (buf_pos + entry_sz > UM_MAX_PAYLOAD) {
             send_packet(CMD_SONG_LIST, buf, buf_pos);
             buf_pos = 0;
@@ -187,18 +179,12 @@ void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t co
 /* ── CMD_SET_STATE ─────────────────────────────────────────────────────────── */
 
 void uart_master_send_state(const char *song_name,
-                            uint8_t is_playing,
-                            uint8_t volume,
-                            uint8_t tempo,
-                            uint8_t position_pct,
-                            uint16_t duration_s)
+                            uint8_t     is_playing,
+                            uint8_t     volume,
+                            uint8_t     tempo,
+                            uint8_t     position_pct,
+                            uint16_t    duration_s)
 {
-    /*
-     * Payload: [is_playing:u8][volume:u8][tempo:u8]
-     *          [position_pct:u8][duration_s_lo:u8][duration_s_hi:u8]
-     *          [song_name:char...]
-     * No null terminator for name in the packet; LEN encodes total length.
-     */
     uint8_t buf[UM_MAX_PAYLOAD];
     buf[0] = is_playing;
     buf[1] = volume;
@@ -261,11 +247,6 @@ bool uart_master_sync(uint32_t timeout_ms)
     return got_ack;
 }
 
-void uart_master_set_seek_callback(um_on_seek_cb_t on_seek)
-{
-    s_on_seek = on_seek;
-}
-
 /* ══════════════════════════════════════════════════════════════════════════════
  * Receive task & parser (Core 0)
  * ══════════════════════════════════════════════════════════════════════════════ */
@@ -284,7 +265,7 @@ static void rx_task(void *arg)
     ESP_LOGI(TAG, "RX task running on core %d", xPortGetCoreID());
 
     while (true) {
-        if (uart_read_bytes(UM_UART_NUM, &byte, 1, pdMS_TO_TICKS(50)) != 1) {
+        if (uart_read_bytes(UART_PORT, &byte, 1, pdMS_TO_TICKS(50)) != 1) {
             continue;
         }
 
@@ -353,9 +334,6 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     switch (cmd) {
 
     case CMD_PLAY_SONG:
-        /*
-         * Payload: [song_id_lo:u8][song_id_hi:u8]
-         */
         if (len < 2) {
             ESP_LOGW(TAG, "CMD_PLAY_SONG: payload too short");
             break;
@@ -388,9 +366,6 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         break;
 
     case CMD_SEEK:
-        /*
-         * Payload: 1 byte – target position 0–100 %.
-         */
         if (len < 1) {
             ESP_LOGW(TAG, "CMD_SEEK: missing payload");
             break;
@@ -398,23 +373,18 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         {
             uint8_t pct = payload[0];
             if (pct > 100) pct = 100;
-            ESP_LOGI(TAG, "CMD_SEEK: pct=%u", pct);
+            ESP_LOGI(TAG, "CMD_SEEK: %u%%", pct);
             if (s_on_seek) s_on_seek(pct);
         }
         break;
 
     case CMD_ACK:
-        /*
-         * Payload (optional, 5 bytes): touch_active, touch_x_lo, touch_x_hi,
-         *                              touch_y_lo, touch_y_hi.
-         * We only need to signal the sync semaphore here.
-         */
         ESP_LOGD(TAG, "CMD_ACK received");
         xSemaphoreGive(s_ack_sem);
         break;
 
     default:
-        ESP_LOGW(TAG, "Unknown cmd 0x%02X (len=%u) – ignored", cmd, len);
+        ESP_LOGW(TAG, "Unknown CMD 0x%02X (len=%u)", cmd, len);
         break;
     }
 }

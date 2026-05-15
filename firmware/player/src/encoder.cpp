@@ -8,10 +8,11 @@
  * without any software glitch filtering.
  *
  * Button press detection uses a GPIO ISR with a simple timestamp debounce.
+ * Assumes gpio_install_isr_service() has already been called by the caller
+ * (app_main) before encoder_init() is invoked.
  */
 
 #include "encoder.h"
-#include "compat.h"
 
 #include "driver/pulse_cnt.h"
 #include "driver/gpio.h"
@@ -25,9 +26,9 @@
 static const char *TAG = "encoder";
 
 /* ── PCNT handle ─────────────────────────────────────────────────────────── */
-static pcnt_unit_handle_t  s_pcnt_unit = nullptr;
-static pcnt_channel_handle_t s_chan_a  = nullptr;
-static pcnt_channel_handle_t s_chan_b  = nullptr;
+static pcnt_unit_handle_t    s_pcnt_unit = nullptr;
+static pcnt_channel_handle_t s_chan_a    = nullptr;
+static pcnt_channel_handle_t s_chan_b    = nullptr;
 
 /* ── Accumulated step counter (updated in ISR / watched task) ──────────── */
 static volatile atomic_int s_steps = ATOMIC_VAR_INIT(0);
@@ -39,8 +40,8 @@ static int s_last_count = 0;
 static int s_count_remainder = 0;
 
 /* ── Button state ────────────────────────────────────────────────────────── */
-static volatile bool     s_btn_event    = false;
-static volatile uint32_t s_btn_last_ms  = 0;
+static volatile bool     s_btn_event   = false;
+static volatile uint32_t s_btn_last_ms = 0;
 
 /* ── Button GPIO ISR ─────────────────────────────────────────────────────── */
 
@@ -60,7 +61,6 @@ static bool pcnt_on_reach(pcnt_unit_handle_t unit,
                            void *user_ctx)
 {
     (void)unit; (void)edata; (void)user_ctx;
-    /* Nothing: we use pcnt_unit_get_count() polling in encoder_read_steps() */
     return false; /* no higher-priority task woken */
 }
 
@@ -127,7 +127,7 @@ void encoder_init(void)
     ESP_ERROR_CHECK(pcnt_unit_clear_count(s_pcnt_unit));
     ESP_ERROR_CHECK(pcnt_unit_start(s_pcnt_unit));
 
-    /* ── Button GPIO ─────────────────────────────────────────────────────── */
+    /* ── Button GPIO (ISR service already installed by app_main) ─────────── */
     gpio_config_t btn_cfg = {
         .pin_bit_mask = (1ULL << ENC_PIN_BTN),
         .mode         = GPIO_MODE_INPUT,
@@ -136,7 +136,6 @@ void encoder_init(void)
         .intr_type    = GPIO_INTR_NEGEDGE,   /* Trigger on falling edge (press) */
     };
     ESP_ERROR_CHECK(gpio_config(&btn_cfg));
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
     ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)ENC_PIN_BTN, btn_isr_handler, nullptr));
 
     ESP_LOGI(TAG, "Encoder ready: A=%d B=%d BTN=%d", ENC_PIN_A, ENC_PIN_B, ENC_PIN_BTN);
@@ -152,11 +151,11 @@ int16_t encoder_read_steps(void)
      * between polling calls.  Divide by ENC_COUNTS_PER_STEP (default 4 for
      * X4 quadrature; set to 2 or 1 in encoder.h if your encoder is too sluggish).
      */
-    int raw_delta      = current - s_last_count;
-    int accumulated    = raw_delta + s_count_remainder;
-    s_last_count       = current;
-    int16_t steps      = (int16_t)(accumulated / ENC_COUNTS_PER_STEP);
-    s_count_remainder  = accumulated % ENC_COUNTS_PER_STEP;
+    int raw_delta     = current - s_last_count;
+    int accumulated   = raw_delta + s_count_remainder;
+    s_last_count      = current;
+    int16_t steps     = (int16_t)(accumulated / ENC_COUNTS_PER_STEP);
+    s_count_remainder = accumulated % ENC_COUNTS_PER_STEP;
 
     if (steps != 0) {
         ESP_LOGD(TAG, "PCNT raw=%d  acc=%d  steps=%d  rem=%d",

@@ -9,7 +9,6 @@
  */
 
 #include "potis.h"
-#include "compat.h"
 
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
@@ -30,12 +29,12 @@ static adc_channel_t s_tmp_ch = ADC_CHANNEL_1;
 /* Circular moving-average buffers */
 static uint16_t s_vol_buf[POT_AVG_SAMPLES];
 static uint16_t s_tmp_buf[POT_AVG_SAMPLES];
-static uint8_t  s_buf_idx = 0;
+static uint8_t  s_buf_idx  = 0;
 static bool     s_buf_full = false;
 
 /* Last reported values – used to detect changes */
-static uint8_t  s_last_volume = 0xFF;
-static uint8_t  s_last_tempo  = 0xFF;
+static uint8_t s_last_volume = 0xFF;
+static uint8_t s_last_tempo  = 0xFF;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -95,7 +94,7 @@ bool potis_read(uint8_t *out_volume, uint8_t *out_tempo)
 
     s_vol_buf[s_buf_idx] = (uint16_t)raw_vol;
     s_tmp_buf[s_buf_idx] = (uint16_t)raw_tmp;
-    s_buf_idx = (s_buf_idx + 1) % POT_AVG_SAMPLES;
+    s_buf_idx = (uint8_t)((s_buf_idx + 1) % POT_AVG_SAMPLES);
     if (s_buf_idx == 0) s_buf_full = true;
 
     uint8_t n = s_buf_full ? POT_AVG_SAMPLES : (s_buf_idx == 0 ? 1 : s_buf_idx);

@@ -4,13 +4,14 @@
  *
  * Reads two analog potentiometers:
  *   Pot 1 (POT_PIN_VOLUME)  → Master volume  (0–100)
- *   Pot 2 (POT_PIN_TEMPO)   → Playback speed (0–100, maps 0.2×–4.0× externally)
+ *   Pot 2 (POT_PIN_TEMPO)   → Playback speed (0–100, maps 0.5×–2.0× externally)
  *
  * Filtering: simple N-sample moving average reduces ADC noise.
  */
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "pins.h"
 
