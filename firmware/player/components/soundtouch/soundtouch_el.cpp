@@ -212,7 +212,7 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
      * ST_CHUNK_FRAMES large enough (8192) that even the maximum auto-tuned
      * input advance at 2.0x tempo (6528 frames) fits in a single call. */
     ctx->st->setSetting(SETTING_USE_AA_FILTER,    1);
-    ctx->st->setSetting(SETTING_AA_FILTER_LENGTH, 64);  /* 64-tap AA filter */
+    ctx->st->setSetting(SETTING_AA_FILTER_LENGTH, 32);  /* 32-tap AA filter */
     ctx->st->setSetting(SETTING_USE_QUICKSEEK,    1);   /* QuickSeek ON: ~4x faster cross-corr */
     ctx->st->setSetting(SETTING_SEQUENCE_MS,      0);   /* auto-tune             */
     ctx->st->setSetting(SETTING_SEEKWINDOW_MS,    0);   /* auto-tune             */
