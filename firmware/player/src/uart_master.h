@@ -50,6 +50,7 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_RESUME          0x0A  /* Display → Host: resume playback           */
 #define CMD_DISPLAY_READY   0x0B  /* Display → Host: display reset, request resync */
 #define CMD_SEEK            0x0C  /* Display → Host: seek to position (1-byte 0-100%) */
+#define CMD_ST_BYPASS       0x0D  /* Display → Host: enable/disable SoundTouch bypass */
 #define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -75,6 +76,12 @@ typedef void (*um_on_display_ready_cb_t)(void);
  */
 typedef void (*um_on_seek_cb_t)(uint8_t position_pct);
 
+/**
+ * @brief Called when the display sends CMD_ST_BYPASS.
+ * @param bypass  true = bypass SoundTouch (lossless passthrough), false = normal.
+ */
+typedef void (*um_on_st_bypass_cb_t)(bool bypass);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -91,6 +98,12 @@ void uart_master_init(um_on_play_song_cb_t     on_play_song,
  *        Safe to call at any time; replaces the current callback.
  */
 void uart_master_set_seek_callback(um_on_seek_cb_t on_seek);
+
+/**
+ * @brief Register a SoundTouch-bypass callback after init.
+ *        Safe to call at any time; replaces the current callback.
+ */
+void uart_master_set_st_bypass_callback(um_on_st_bypass_cb_t on_st_bypass);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

@@ -66,6 +66,26 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg);
  */
 esp_err_t soundtouch_el_set_tempo(audio_element_handle_t self, float tempo);
 
+/**
+ * @brief  Enable or disable the SoundTouch bypass (passthrough) mode.
+ *
+ * When bypass is true the element copies PCM samples from its input ring
+ * buffer directly to its output ring buffer without involving SoundTouch at
+ * all.  This guarantees bit-perfect, zero-artifact audio regardless of the
+ * current tempo setting.
+ *
+ * When bypass transitions from true back to false, SoundTouch's internal
+ * state is cleared so no stale data leaks into the resumed output.
+ *
+ * Thread-safe: may be called from any task.  Takes effect at the start of
+ * the next processing chunk (typically < 12 ms latency).
+ *
+ * @param  self    Element handle returned by soundtouch_el_init().
+ * @param  bypass  true = passthrough (no processing), false = normal mode.
+ * @return ESP_OK or ESP_ERR_INVALID_ARG.
+ */
+esp_err_t soundtouch_el_set_bypass(audio_element_handle_t self, bool bypass);
+
 #ifdef __cplusplus
 }
 #endif

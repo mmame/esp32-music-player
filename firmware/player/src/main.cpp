@@ -82,6 +82,7 @@ static bool     g_is_playing   = false;
 static bool     g_is_paused    = false;
 static uint8_t  g_volume       = 70;
 static float    g_speed        = 1.0f;
+static volatile bool g_bypass_active = false;  /* true = SoundTouch bypassed, audio at 1.0x */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -97,6 +98,8 @@ static volatile bool    s_cmd_pause         = false;
 static volatile bool    s_cmd_resume        = false;
 static volatile int8_t  s_cmd_seek_pct      = -1;
 static volatile bool    s_cmd_display_ready = false;
+static volatile bool    s_cmd_st_bypass_pending = false;
+static volatile bool    s_cmd_st_bypass_value   = false;
 
 static sdmmc_card_t *s_sdcard = nullptr;
 
@@ -237,7 +240,8 @@ static float get_current_pos_s_locked(void)
 {
     if (!g_is_playing || g_is_paused) return g_audio_pos_s;
     int64_t now = esp_timer_get_time();
-    return g_audio_pos_s + (float)(now - g_wall_ref_us) * 1e-6f * g_speed;
+    float eff_speed = g_bypass_active ? 1.0f : g_speed;
+    return g_audio_pos_s + (float)(now - g_wall_ref_us) * 1e-6f * eff_speed;
 }
 
 #ifdef HAVE_ADF
@@ -261,7 +265,8 @@ static void apply_speed_locked(float speed)
 
     if (g_is_playing && !g_is_paused) {
         int64_t now   = esp_timer_get_time();
-        g_audio_pos_s += (float)(now - g_wall_ref_us) * 1e-6f * g_speed;
+        float eff_speed = g_bypass_active ? 1.0f : g_speed;
+        g_audio_pos_s += (float)(now - g_wall_ref_us) * 1e-6f * eff_speed;
         g_wall_ref_us  = now;
     }
     g_speed = speed;
@@ -598,6 +603,16 @@ static void audio_task(void *arg)
             uart_master_send_song_list(g_song_names, g_song_count);
         }
 
+#ifdef HAVE_ADF
+        if (s_cmd_st_bypass_pending) {
+            bool bypass = s_cmd_st_bypass_value;
+            s_cmd_st_bypass_pending = false;
+            g_bypass_active = bypass;
+            soundtouch_el_set_bypass(g_sonic_el, bypass);
+            ESP_LOGI(TAG, "SoundTouch bypass: %s", bypass ? "ON (passthrough)" : "OFF (time-stretch)");
+        }
+#endif
+
         /* Listen for pipeline events (50 ms) */
         audio_event_iface_msg_t msg = {};
         if (audio_event_iface_listen(g_evt, &msg, pdMS_TO_TICKS(50)) == ESP_OK) {
@@ -638,6 +653,12 @@ static void on_stop_song(void)     { s_cmd_stop    = true; }
 static void on_pause(void)         { s_cmd_pause   = true; }
 static void on_resume(void)        { s_cmd_resume  = true; }
 static void on_display_ready(void) { s_cmd_display_ready = true; }
+
+static void on_st_bypass(bool bypass)
+{
+    s_cmd_st_bypass_value   = bypass;
+    s_cmd_st_bypass_pending = true;
+}
 
 static void on_seek(uint8_t pct)
 {
@@ -742,15 +763,21 @@ static void io_task(void *arg)
 
             if (sbytes > 0 && bps_total > 0) {
                 float dur_raw = (float)sbytes / (float)bps_total;
+                float eff_speed = g_bypass_active ? 1.0f : speed;
                 if (pos_s > dur_raw) pos_s = dur_raw;
                 pct = (uint8_t)((pos_s / dur_raw) * 100.0f + 0.5f);
                 if (pct > 100) pct = 100;
-                float adj = (speed > 0.01f) ? (dur_raw / speed) : 0.0f;
+                float adj = (eff_speed > 0.01f) ? (dur_raw / eff_speed) : 0.0f;
                 dur_s = (uint16_t)(adj + 0.5f);
             }
 
-            uint8_t tempo_byte = (uint8_t)(
-                ((speed - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
+            uint8_t tempo_byte;
+            if (g_bypass_active) {
+                tempo_byte = (uint8_t)(((1.0f - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
+            } else {
+                tempo_byte = (uint8_t)(
+                    ((speed - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
+            }
             if (tempo_byte > 100) tempo_byte = 100;
 
             const char *name = (song >= 0 && (uint8_t)song < g_song_count)
@@ -798,6 +825,7 @@ extern "C" void app_main(void)
 
     uart_master_init(on_play_song, on_stop_song, on_pause, on_resume, on_display_ready);
     uart_master_set_seek_callback(on_seek);
+    uart_master_set_st_bypass_callback(on_st_bypass);
 
     uart_master_send_song_list(g_song_names, g_song_count);
     uart_master_sync(500);

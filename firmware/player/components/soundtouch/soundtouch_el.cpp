@@ -40,6 +40,8 @@ struct StCtx {
     int            channels;
     volatile float target_tempo;   /* written by any task, read by element task */
     float          applied_tempo;  /* last value actually sent to SoundTouch    */
+    volatile bool  bypass;         /* true = passthrough, no SoundTouch         */
+    bool           prev_bypass;    /* previous bypass state for transition detect */
 
     /* int16 buffers - interface to ADF ring buffers and SoundTouch        */
     int16_t *pcm_in;   /* ST_CHUNK_FRAMES x channels                       */
@@ -86,6 +88,30 @@ static audio_element_err_t _process(audio_element_handle_t self,
                                     char * /*in_buf*/, int /*in_size*/)
 {
     StCtx *ctx = ctx_of(self);
+
+    /* Detect bypass state transitions. */
+    bool cur_bypass = ctx->bypass;
+    if (cur_bypass != ctx->prev_bypass) {
+        if (!cur_bypass) {
+            /* Leaving bypass: clear SoundTouch to avoid stale lookahead data. */
+            ctx->st->clear();
+        }
+        ctx->prev_bypass = cur_bypass;
+    }
+
+    /* When bypass is active, copy PCM straight through – zero SoundTouch involvement. */
+    if (cur_bypass) {
+        int rb_bytes = ST_CHUNK_FRAMES * ctx->channels * (int)sizeof(int16_t);
+        int bytes_in = audio_element_input(self,
+                                           reinterpret_cast<char *>(ctx->pcm_in),
+                                           rb_bytes);
+        if (bytes_in > 0) {
+            audio_element_output(self,
+                                 reinterpret_cast<char *>(ctx->pcm_in),
+                                 bytes_in);
+        }
+        return static_cast<audio_element_err_t>(bytes_in);
+    }
 
     /* Apply any pending tempo change before processing this chunk. */
     float tgt = ctx->target_tempo;
@@ -141,6 +167,15 @@ esp_err_t soundtouch_el_set_tempo(audio_element_handle_t self, float tempo)
     return ESP_OK;
 }
 
+esp_err_t soundtouch_el_set_bypass(audio_element_handle_t self, bool bypass)
+{
+    StCtx *ctx = ctx_of(self);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    /* volatile write - effectively atomic on 32-bit aligned Xtensa. */
+    ctx->bypass = bypass;
+    return ESP_OK;
+}
+
 audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
 {
     StCtx *ctx = static_cast<StCtx *>(audio_calloc(1, sizeof(StCtx)));
@@ -150,6 +185,8 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
     ctx->channels      = cfg->channels;
     ctx->applied_tempo = cfg->tempo;
     ctx->target_tempo  = cfg->tempo;
+    ctx->bypass        = false;
+    ctx->prev_bypass   = false;
 
     /* int16 PCM buffers (may live in PSRAM via audio_calloc). */
     ctx->pcm_in  = static_cast<int16_t *>(

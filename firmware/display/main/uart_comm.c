@@ -84,6 +84,22 @@ static void send_ack(void);
  * Public API
  * ========================================================================= */
 
+void uart_comm_send_st_bypass(bool bypass)
+{
+    /* Packet: [MAGIC 8B][CMD 1B][LEN=1 1B][PAYLOAD 1B][CHECKSUM 1B] = 12 bytes */
+    uint8_t val      = bypass ? 0x01u : 0x00u;
+    uint8_t checksum = CMD_ST_BYPASS ^ 0x01u ^ val;
+
+    uint8_t pkt[12];
+    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
+    pkt[8]  = CMD_ST_BYPASS;
+    pkt[9]  = 0x01;
+    pkt[10] = val;
+    pkt[11] = checksum;
+    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    ESP_LOGI(TAG, "CMD_ST_BYPASS sent: %s", bypass ? "ON" : "OFF");
+}
+
 void uart_comm_init(void)
 {
     /* Create state mutex before the task can use it */

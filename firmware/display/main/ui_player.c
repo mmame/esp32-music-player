@@ -45,6 +45,7 @@ static const char *TAG = "ui_player";
 #define PAUSE_Y          260    /* PAUSE/RESUME button top edge             */
 #define PAUSE_W          300    /* PAUSE/RESUME button width                */
 #define PAUSE_H          80     /* PAUSE/RESUME button height               */
+#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass checkbox in right panel */
 #define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
 
 /* Right panel – two indicator columns */
@@ -80,6 +81,10 @@ static lv_obj_t *s_val_lbl[2]     = {NULL, NULL};
 static lv_obj_t *s_pause_btn      = NULL;
 static lv_obj_t *s_pause_lbl      = NULL;
 static bool      s_is_paused      = false;
+
+/* Bypass SoundTouch checkbox */
+static lv_obj_t *s_bypass_check   = NULL;
+static bool      s_bypass_active  = false;
 
 /* Indeterminate progress animation */
 static bool      s_prog_anim_active = false;
@@ -239,6 +244,27 @@ static void on_progress_clicked(lv_event_t *e)
     lv_bar_set_value(s_progress_bar, pct, LV_ANIM_OFF);
 
     send_seek(pct);
+}
+
+/* =========================================================================
+ * PAUSE/RESUME button callback – runs in LVGL task
+ * ========================================================================= */
+static void on_bypass_toggled(lv_event_t *e)
+{
+    (void)e;
+    s_bypass_active = !s_bypass_active;
+    uart_comm_send_st_bypass(s_bypass_active);
+
+    /* Grey out / restore the TMP bar indicator and value label.
+     * The bar value (fill level) is left untouched so the current
+     * potentiometer position remains visible. */
+    lv_color_t col = s_bypass_active
+        ? lv_color_hex(0x445566)    /* muted – bypassed */
+        : lv_color_hex(COLOR_ACCENT); /* normal cyan */
+    if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
+    if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
+
+    ESP_LOGI(TAG, "SoundTouch bypass toggled: %s", s_bypass_active ? "ON" : "OFF");
 }
 
 /* =========================================================================
@@ -414,6 +440,29 @@ void ui_player_create(void)
 
     create_indicator_col(right, 0, "VOL");
     create_indicator_col(right, 1, "TMP");
+
+    /* Bypass SoundTouch checkbox – centred under TMP bar (col 1) --------- */
+    /* COL_W=100, indicator 30×30, text "1.0x" at montserrat_20 (~78px total)
+     * → left edge at col_x + (COL_W - 78)/2 ≈ COL_W + 11, use COL_W + 8   */
+    s_bypass_check = lv_checkbox_create(right);
+    lv_checkbox_set_text(s_bypass_check, "1.0x");
+    lv_obj_set_pos(s_bypass_check, COL_W + 8, BYPASS_CHECK_Y_R);
+    lv_obj_set_style_text_font(s_bypass_check, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_bypass_check, lv_color_hex(COLOR_TEXT), 0);
+    /* Indicator (tick box) – 30×30 for easy touch */
+    lv_obj_set_style_width(s_bypass_check,  30, LV_PART_INDICATOR);
+    lv_obj_set_style_height(s_bypass_check, 30, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bypass_check, lv_color_hex(COLOR_BAR_TRACK), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bypass_check, lv_color_hex(COLOR_ACCENT),
+                               LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_border_color(s_bypass_check, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(s_bypass_check, 2, LV_PART_INDICATOR);
+    /* Extra touch padding so the hit area is generously large */
+    lv_obj_set_style_pad_top(s_bypass_check,    10, 0);
+    lv_obj_set_style_pad_bottom(s_bypass_check, 10, 0);
+    lv_obj_set_style_pad_left(s_bypass_check,    8, 0);
+    lv_obj_set_style_pad_right(s_bypass_check,   8, 0);
+    lv_obj_add_event_cb(s_bypass_check, on_bypass_toggled, LV_EVENT_VALUE_CHANGED, NULL);
 
     ESP_LOGI(TAG, "Player view created");
 }
