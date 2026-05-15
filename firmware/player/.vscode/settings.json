@@ -10,5 +10,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\default.DESKTOP-FC9SLHI\\Documents\\PlatformIO\\Projects\\musicplayer\\build"
-  ]
+  ],
+  "dotnet.preferCSharpExtension": true
 }
