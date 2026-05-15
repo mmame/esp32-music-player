@@ -1,0 +1,12 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/hardware/I2S_XLR_Adapter_backup
+/firmware/player/.vs
+/firmware/player/build
+/firmware/player/managed_components
+/firmware/player/out/build/x64-Debug
+/firmware/player/.clangd
+/firmware/player/build_output.txt
+/hardware/debug.log
