@@ -25,12 +25,12 @@ static const char *TAG = "SOUNDTOUCH";
  * SoundTouch auto-tunes its sequence length (~82 ms = 3617 frames at 44100 Hz).
  * At 2.0x tempo the input advance per batch = 2.0 x (3617-353) = 6528 frames.
  * ST_CHUNK_FRAMES must exceed this so every putSamples() call yields output
- * immediately, preventing i2s ring-buffer starvation (stutter). 8192 > 6528. */
-static constexpr int ST_CHUNK_FRAMES = 8192;
+ * immediately, preventing i2s ring-buffer starvation (stutter). 16384 > 6528. */
+static constexpr int ST_CHUNK_FRAMES = 16384;
 
 /* Frames requested per receiveSamples() call inside drain().
  * Kept smaller than ST_CHUNK_FRAMES to limit stack/buffer pressure. */
-static constexpr int ST_DRAIN_FRAMES = 2048;
+static constexpr int ST_DRAIN_FRAMES = 4096;
 
 /* -- Internal context ------------------------------------------------------ */
 
@@ -209,7 +209,7 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
 
     /* Quality settings – let SoundTouch auto-tune sequence/seek/overlap for
      * the best possible quality.  Stutter prevention is achieved by setting
-     * ST_CHUNK_FRAMES large enough (8192) that even the maximum auto-tuned
+     * ST_CHUNK_FRAMES large enough (16384) that even the maximum auto-tuned
      * input advance at 2.0x tempo (6528 frames) fits in a single call. */
     ctx->st->setSetting(SETTING_USE_AA_FILTER,    1);
     ctx->st->setSetting(SETTING_AA_FILTER_LENGTH, 32);  /* 32-tap AA filter */

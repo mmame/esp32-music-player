@@ -51,6 +51,7 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_DISPLAY_READY   0x0B  /* Display → Host: display reset, request resync */
 #define CMD_SEEK            0x0C  /* Display → Host: seek to position (1-byte 0-100%) */
 #define CMD_ST_BYPASS       0x0D  /* Display → Host: enable/disable SoundTouch bypass */
+#define CMD_TEMPO_LOCK      0x0E  /* Display → Host: lock/unlock tempo at a fixed value */
 #define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -82,6 +83,13 @@ typedef void (*um_on_seek_cb_t)(uint8_t position_pct);
  */
 typedef void (*um_on_st_bypass_cb_t)(bool bypass);
 
+/**
+ * @brief Called when the display sends CMD_TEMPO_LOCK.
+ * @param lock          true = lock tempo at @p locked_tempo, false = unlock.
+ * @param locked_tempo  0–100 poti-scale value to lock at (ignored when lock == false).
+ */
+typedef void (*um_on_tempo_lock_cb_t)(bool lock, uint8_t locked_tempo);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -104,6 +112,12 @@ void uart_master_set_seek_callback(um_on_seek_cb_t on_seek);
  *        Safe to call at any time; replaces the current callback.
  */
 void uart_master_set_st_bypass_callback(um_on_st_bypass_cb_t on_st_bypass);
+
+/**
+ * @brief Register a tempo-lock callback after init.
+ *        Safe to call at any time; replaces the current callback.
+ */
+void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

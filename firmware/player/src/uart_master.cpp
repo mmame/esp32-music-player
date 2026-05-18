@@ -32,6 +32,7 @@ static um_on_resume_cb_t         s_on_resume        = nullptr;
 static um_on_display_ready_cb_t  s_on_display_ready = nullptr;
 static um_on_seek_cb_t           s_on_seek          = nullptr;
 static um_on_st_bypass_cb_t      s_on_st_bypass     = nullptr;
+static um_on_tempo_lock_cb_t     s_on_tempo_lock    = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem  = nullptr;
@@ -143,6 +144,11 @@ void uart_master_set_seek_callback(um_on_seek_cb_t on_seek)
 void uart_master_set_st_bypass_callback(um_on_st_bypass_cb_t on_st_bypass)
 {
     s_on_st_bypass = on_st_bypass;
+}
+
+void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock)
+{
+    s_on_tempo_lock = on_tempo_lock;
 }
 
 /* ── CMD_SONG_LIST ─────────────────────────────────────────────────────────── */
@@ -393,6 +399,20 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             bool bypass = (payload[0] != 0);
             ESP_LOGI(TAG, "CMD_ST_BYPASS: %s", bypass ? "ON" : "OFF");
             if (s_on_st_bypass) s_on_st_bypass(bypass);
+        }
+        break;
+
+    case CMD_TEMPO_LOCK:
+        if (len < 2) {
+            ESP_LOGW(TAG, "CMD_TEMPO_LOCK: payload too short (%u)", len);
+            break;
+        }
+        {
+            bool    lock         = (payload[0] != 0);
+            uint8_t locked_tempo = payload[1];
+            ESP_LOGI(TAG, "CMD_TEMPO_LOCK: %s tempo=%u",
+                     lock ? "LOCK" : "UNLOCK", (unsigned)locked_tempo);
+            if (s_on_tempo_lock) s_on_tempo_lock(lock, locked_tempo);
         }
         break;
 

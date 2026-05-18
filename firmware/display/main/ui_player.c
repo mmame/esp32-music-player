@@ -64,6 +64,7 @@ static const char *TAG = "ui_player";
 #define COLOR_TEXT       0xE0E0FF   /* near-white text                      */
 #define COLOR_BAR_TRACK  0x0A2744   /* dark bar background                  */
 #define COLOR_DIVIDER    0x2A2A5E
+#define COLOR_LOCKED     0xF39C12   /* amber – tempo locked                 */
 
 /* =========================================================================
  * Widget handles
@@ -85,6 +86,13 @@ static bool      s_is_paused      = false;
 /* Bypass SoundTouch checkbox */
 static lv_obj_t *s_bypass_check   = NULL;
 static bool      s_bypass_active  = false;
+
+/* Tempo lock checkbox */
+static lv_obj_t *s_lock_check         = NULL;
+static bool      s_tempo_locked       = false;
+static uint8_t   s_locked_tempo       = 50;    /* last known / locked poti-scale value */
+static uint8_t   s_locked_spd_min_x10 = 4;    /* cached range for label computation   */
+static uint8_t   s_locked_spd_max_x10 = 20;
 
 /* Indeterminate progress animation */
 static bool      s_prog_anim_active = false;
@@ -256,15 +264,46 @@ static void on_bypass_toggled(lv_event_t *e)
     uart_comm_send_st_bypass(s_bypass_active);
 
     /* Grey out / restore the TMP bar indicator and value label.
-     * The bar value (fill level) is left untouched so the current
-     * potentiometer position remains visible. */
-    lv_color_t col = s_bypass_active
-        ? lv_color_hex(0x445566)    /* muted – bypassed */
-        : lv_color_hex(COLOR_ACCENT); /* normal cyan */
+     * Bypass overrules lock: when bypassed → grey; when un-bypassed and
+     * locked → amber; otherwise → normal cyan. */
+    lv_color_t col;
+    if (s_bypass_active) {
+        col = lv_color_hex(0x445566);       /* muted – bypassed             */
+    } else if (s_tempo_locked) {
+        col = lv_color_hex(COLOR_LOCKED);   /* amber – locked               */
+    } else {
+        col = lv_color_hex(COLOR_ACCENT);   /* normal cyan                  */
+    }
     if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
     if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
 
     ESP_LOGI(TAG, "SoundTouch bypass toggled: %s", s_bypass_active ? "ON" : "OFF");
+}
+
+/* =========================================================================
+ * TEMPO LOCK checkbox callback – runs in LVGL task
+ * ========================================================================= */
+static void on_lock_toggled(lv_event_t *e)
+{
+    (void)e;
+    s_tempo_locked = !s_tempo_locked;
+
+    /* s_locked_tempo already tracks the most recent poti value (updated in
+     * async_cb_update_potis while unlocked), so it captures the current
+     * running tempo at the moment the user enables lock. */
+    uart_comm_send_tempo_lock(s_tempo_locked, s_locked_tempo);
+
+    /* Update TMP bar colour: bypass overrules lock. */
+    if (!s_bypass_active) {
+        lv_color_t col = s_tempo_locked
+            ? lv_color_hex(COLOR_LOCKED)   /* amber – locked  */
+            : lv_color_hex(COLOR_ACCENT);  /* cyan  – normal  */
+        if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
+        if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
+    }
+
+    ESP_LOGI(TAG, "Tempo lock toggled: %s (locked_tempo=%u)",
+             s_tempo_locked ? "LOCK" : "UNLOCK", (unsigned)s_locked_tempo);
 }
 
 /* =========================================================================
@@ -464,6 +503,25 @@ void ui_player_create(void)
     lv_obj_set_style_pad_right(s_bypass_check,   8, 0);
     lv_obj_add_event_cb(s_bypass_check, on_bypass_toggled, LV_EVENT_VALUE_CHANGED, NULL);
 
+    /* Tempo Lock checkbox – under VOL bar (col 0), same row as bypass ------ */
+    s_lock_check = lv_checkbox_create(right);
+    lv_checkbox_set_text(s_lock_check, "Lock");
+    lv_obj_set_pos(s_lock_check, 8, BYPASS_CHECK_Y_R);
+    lv_obj_set_style_text_font(s_lock_check, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lock_check, lv_color_hex(COLOR_TEXT), 0);
+    lv_obj_set_style_width(s_lock_check,  30, LV_PART_INDICATOR);
+    lv_obj_set_style_height(s_lock_check, 30, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_lock_check, lv_color_hex(COLOR_BAR_TRACK), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_lock_check, lv_color_hex(COLOR_LOCKED),
+                               LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_border_color(s_lock_check, lv_color_hex(COLOR_LOCKED), LV_PART_INDICATOR);
+    lv_obj_set_style_border_width(s_lock_check, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_pad_top(s_lock_check,    10, 0);
+    lv_obj_set_style_pad_bottom(s_lock_check, 10, 0);
+    lv_obj_set_style_pad_left(s_lock_check,    8, 0);
+    lv_obj_set_style_pad_right(s_lock_check,   8, 0);
+    lv_obj_add_event_cb(s_lock_check, on_lock_toggled, LV_EVENT_VALUE_CHANGED, NULL);
+
     ESP_LOGI(TAG, "Player view created");
 }
 
@@ -539,10 +597,24 @@ static void async_cb_update_potis(void *user_data)
         lv_label_set_text(s_val_lbl[0], buf);
     }
     if (s_bar[1]) {
-        lv_bar_set_value(s_bar[1], p->tempo, LV_ANIM_ON);
-        /* Derive actual speed multiplier (fixed-point ×100 for two decimal places) */
+        /* Always cache the latest speed range for the multiplier label. */
+        s_locked_spd_min_x10 = p->speed_min_x10;
+        s_locked_spd_max_x10 = p->speed_max_x10;
+
+        /* Freeze the displayed tempo when locked AND NOT bypassed.
+         * While not frozen, keep s_locked_tempo in sync so it holds the
+         * current value the moment the user enables lock.
+         * Bypass (1.0x) overrules both the tempo bar and the lock. */
+        bool freeze = s_tempo_locked && !s_bypass_active;
+        if (!freeze) {
+            s_locked_tempo = p->tempo;
+        }
+        uint8_t display_tempo = s_locked_tempo; /* frozen or just refreshed */
+
+        lv_bar_set_value(s_bar[1], display_tempo, LV_ANIM_ON);
+        /* Derive actual speed multiplier from the display value */
         uint32_t speed_x100 = (uint32_t)p->speed_min_x10 * 10
-                            + ((uint32_t)(p->speed_max_x10 - p->speed_min_x10) * 10 * p->tempo + 50) / 100;
+                            + ((uint32_t)(p->speed_max_x10 - p->speed_min_x10) * 10 * display_tempo + 50) / 100;
         snprintf(buf, sizeof(buf), "%u.%02u", (unsigned)(speed_x100 / 100), (unsigned)(speed_x100 % 100));
         lv_label_set_text(s_val_lbl[1], buf);
     }

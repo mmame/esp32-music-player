@@ -100,6 +100,24 @@ void uart_comm_send_st_bypass(bool bypass)
     ESP_LOGI(TAG, "CMD_ST_BYPASS sent: %s", bypass ? "ON" : "OFF");
 }
 
+void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo)
+{
+    /* Packet: [MAGIC 8B][CMD 1B][LEN=2 1B][lock_en 1B][tempo 1B][CHECKSUM 1B] = 13 bytes */
+    uint8_t enable   = lock ? 0x01u : 0x00u;
+    uint8_t checksum = CMD_TEMPO_LOCK ^ 0x02u ^ enable ^ locked_tempo;
+
+    uint8_t pkt[13];
+    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
+    pkt[8]  = CMD_TEMPO_LOCK;
+    pkt[9]  = 0x02;
+    pkt[10] = enable;
+    pkt[11] = locked_tempo;
+    pkt[12] = checksum;
+    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    ESP_LOGI(TAG, "CMD_TEMPO_LOCK sent: %s tempo=%u",
+             lock ? "LOCK" : "UNLOCK", (unsigned)locked_tempo);
+}
+
 void uart_comm_init(void)
 {
     /* Create state mutex before the task can use it */

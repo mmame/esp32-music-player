@@ -51,6 +51,7 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_DISPLAY_READY 0x0B  /* Display → Host: display reset, request resync */
 #define CMD_SEEK        0x0C    /* Display -> Host: seek to position (1-byte pct) */
 #define CMD_ST_BYPASS   0x0D    /* Display -> Host: enable/disable SoundTouch bypass */
+#define CMD_TEMPO_LOCK  0x0E    /* Display -> Host: lock/unlock tempo at a fixed value */
 #define CMD_ACK         0xFF    /* Display -> Host: sync acknowledgement           */
 
 /* ---------- Global system state ---------- */
@@ -81,6 +82,16 @@ void uart_comm_init(void);
  *                false = normal time-stretch mode.
  */
 void uart_comm_send_st_bypass(bool bypass);
+
+/**
+ * @brief Send CMD_TEMPO_LOCK to the player.
+ *
+ * @param lock          true  = lock tempo at @p locked_tempo (ignore poti),
+ *                      false = unlock (resume poti-controlled tempo).
+ * @param locked_tempo  0–100 poti-scale value to lock at.  Ignored when
+ *                      @p lock is false but should still be a valid value.
+ */
+void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo);
 
 /**
  * @brief Update the touch co-ordinates used in ACK responses.

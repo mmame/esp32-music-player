@@ -83,6 +83,8 @@ static bool     g_is_paused    = false;
 static uint8_t  g_volume       = 70;
 static float    g_speed        = 1.0f;
 static volatile bool g_bypass_active = false;  /* true = SoundTouch bypassed, audio at 1.0x */
+static volatile bool g_tempo_locked  = false;  /* true = poti changes are ignored for speed  */
+static volatile uint8_t g_locked_tempo_raw = 50; /* poti-scale 0–100 value when locked         */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -100,6 +102,10 @@ static volatile int8_t  s_cmd_seek_pct      = -1;
 static volatile bool    s_cmd_display_ready = false;
 static volatile bool    s_cmd_st_bypass_pending = false;
 static volatile bool    s_cmd_st_bypass_value   = false;
+static volatile bool    s_cmd_tempo_lock_pending = false;
+static volatile bool    s_cmd_tempo_lock_value   = false;
+static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
+static volatile bool    s_force_poti_resync      = false; /* set by audio_task on unlock */
 
 static sdmmc_card_t *s_sdcard = nullptr;
 
@@ -496,8 +502,8 @@ static void create_pipeline(void)
     configASSERT(g_fatfs_el);
 
     wav_decoder_cfg_t wav_cfg = DEFAULT_WAV_DECODER_CONFIG();
-    /* SoundTouch reads ST_CHUNK_FRAMES*2ch*2B = 32 KB per call via rb_read.
-     * 128 KB = 4 full chunks of pre-fill headroom so the read completes
+    /* SoundTouch reads ST_CHUNK_FRAMES*2ch*2B = 64 KB per call via rb_read.
+     * 128 KB = 2 full chunks of pre-fill headroom so the read completes
      * instantly even if the WAV decoder lags briefly. */
     wav_cfg.out_rb_size = 128 * 1024;
     g_wav_el = wav_decoder_init(&wav_cfg);
@@ -507,7 +513,7 @@ static void create_pipeline(void)
     st_cfg.samplerate  = 44100;
     st_cfg.channels    = 2;
     st_cfg.tempo       = g_speed;
-    st_cfg.out_rb_size = 256 * 1024; /* 256 KB PSRAM – absorbs bursty TDHS output (~1.5 s) */
+    st_cfg.out_rb_size = 512 * 1024; /* 256 KB PSRAM – absorbs bursty TDHS output (~1.5 s) */
     st_cfg.task_stack  =  16 * 1024; /*  16 KB – TDHS uses significant stack              */
     st_cfg.task_core   =          1; /* core 1: TDHS off core 0 so WAV decoder runs freely */
     g_sonic_el = soundtouch_el_init(&st_cfg);
@@ -611,6 +617,28 @@ static void audio_task(void *arg)
             soundtouch_el_set_bypass(g_sonic_el, bypass);
             ESP_LOGI(TAG, "SoundTouch bypass: %s", bypass ? "ON (passthrough)" : "OFF (time-stretch)");
         }
+
+        if (s_cmd_tempo_lock_pending) {
+            bool    lock = s_cmd_tempo_lock_value;
+            uint8_t lt   = s_cmd_locked_tempo_raw;
+            s_cmd_tempo_lock_pending = false;
+            g_tempo_locked     = lock;
+            g_locked_tempo_raw = lt;
+            if (lock) {
+                /* Immediately apply the locked speed so the change takes effect
+                 * at once rather than waiting for the next io_task cooldown. */
+                float locked_speed = SPEED_MIN + ((float)lt / 100.0f) * (SPEED_MAX - SPEED_MIN);
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                apply_speed_locked(locked_speed);
+                xSemaphoreGive(s_state_mutex);
+            } else {
+                /* Signal io_task to immediately re-read the live poti value and
+                 * forward it to the display without waiting for the knob to move. */
+                s_force_poti_resync = true;
+            }
+            ESP_LOGI(TAG, "Tempo lock: %s (tempo_raw=%u)",
+                     lock ? "LOCK" : "UNLOCK", (unsigned)lt);
+        }
 #endif
 
         /* Listen for pipeline events (50 ms) */
@@ -660,6 +688,13 @@ static void on_st_bypass(bool bypass)
     s_cmd_st_bypass_pending = true;
 }
 
+static void on_tempo_lock(bool lock, uint8_t locked_tempo)
+{
+    s_cmd_locked_tempo_raw   = locked_tempo;
+    s_cmd_tempo_lock_value   = lock;
+    s_cmd_tempo_lock_pending = true;
+}
+
 static void on_seek(uint8_t pct)
 {
     if (pct > 100) pct = 100;
@@ -703,10 +738,15 @@ static void io_task(void *arg)
 
         /* Potentiometers */
         uint8_t new_vol = vol, new_tempo = tempo_raw;
-        if (potis_read(&new_vol, &new_tempo)) {
-            vol       = new_vol;
-            tempo_raw = new_tempo;
-            speed_target = SPEED_MIN + ((float)tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN);
+        bool poti_changed = potis_read(&new_vol, &new_tempo);
+        bool poti_force   = s_force_poti_resync;
+        if (poti_force) s_force_poti_resync = false;
+        if (poti_changed || poti_force) {
+            vol = new_vol;
+            if (!g_tempo_locked) {
+                tempo_raw    = new_tempo;
+                speed_target = SPEED_MIN + ((float)tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN);
+            }
 #ifdef HAVE_ADF
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             apply_volume_locked(vol);
@@ -724,6 +764,14 @@ static void io_task(void *arg)
         {
             const TickType_t SPEED_COOLDOWN_MS = 50;
             TickType_t now_tick = xTaskGetTickCount();
+            /* When tempo is locked, override speed_target (and tempo_raw used
+             * for poti_update) with the locked value so poti changes are
+             * completely ignored.  Bypass (1.0x) overrules both via
+             * soundtouch_el_set_bypass() which was called separately. */
+            if (g_tempo_locked) {
+                tempo_raw    = g_locked_tempo_raw;
+                speed_target = SPEED_MIN + ((float)tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN);
+            }
             /*if (speed_target != speed_applied &&
                 (now_tick - last_speed_tick) >= pdMS_TO_TICKS(SPEED_COOLDOWN_MS)) {*/
                 speed_applied   = speed_target;
@@ -826,6 +874,7 @@ extern "C" void app_main(void)
     uart_master_init(on_play_song, on_stop_song, on_pause, on_resume, on_display_ready);
     uart_master_set_seek_callback(on_seek);
     uart_master_set_st_bypass_callback(on_st_bypass);
+    uart_master_set_tempo_lock_callback(on_tempo_lock);
 
     uart_master_send_song_list(g_song_names, g_song_count);
     uart_master_sync(500);
