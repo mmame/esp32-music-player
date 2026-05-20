@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Music Player &#8212; File Manager</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f1a;color:#e0e0e0;min-height:100vh;padding:16px}
+header{margin-bottom:20px}
+header h1{color:#a78bfa;font-size:1.5rem;margin-bottom:2px}
+header p{color:#555;font-size:13px}
+h2{font-size:.75rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px}
+section{background:#16213e;border:1px solid #1e2a52;border-radius:12px;padding:18px;margin-bottom:16px}
+/* Drop zone */
+#drop-zone{border:2px dashed #2d3561;border-radius:8px;padding:28px 16px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s;user-select:none}
+#drop-zone:hover,#drop-zone.over{border-color:#7c3aed;background:#1a1a3e}
+#drop-zone .icon{font-size:2.2rem;margin-bottom:8px}
+#drop-zone .hint{color:#777;font-size:13px;margin-top:6px}
+.btn{display:inline-block;padding:7px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s}
+.btn-primary{background:#7c3aed;color:#fff}.btn-primary:hover{background:#6d28d9}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-danger{background:#991b1b;color:#fff}.btn-danger:hover{background:#7f1d1d}
+.btn-ghost{background:#1e2a52;color:#a0a0c0}.btn-ghost:hover{background:#252f5e}
+/* Upload queue */
+#queue{margin-top:12px;display:none}
+.qi{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1e2a52;font-size:12px;gap:8px}
+.qi:last-child{border-bottom:none}
+.qi-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#bbb}
+.qi-size{color:#555;white-space:nowrap}
+.st-q{color:#555}.st-up{color:#818cf8}.st-ok{color:#22c55e}.st-err{color:#ef4444}
+/* Progress */
+#progress{display:none;margin-top:14px}
+.p-label{font-size:12px;color:#888;margin-bottom:5px;display:flex;justify-content:space-between}
+.p-track{background:#1e2a52;border-radius:10px;height:10px;overflow:hidden;margin-bottom:8px}
+.p-fill{height:100%;border-radius:10px;transition:width .25s ease}
+.p-file{background:linear-gradient(90deg,#7c3aed,#a78bfa)}
+.p-total{background:linear-gradient(90deg,#047857,#10b981)}
+/* File table */
+#tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:400px}
+th{font-size:11px;color:#555;text-transform:uppercase;letter-spacing:.06em;padding:6px 8px;border-bottom:1px solid #1e2a52;white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid #131328;font-size:13px;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:#1a1f3a}
+.td-name{max-width:240px}
+.nm-wrap{display:flex;align-items:center;gap:6px}
+.nm-text{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;color:#d0d0e8;border-bottom:1px dashed transparent;transition:border-color .15s}
+.nm-text:hover{border-bottom-color:#7c3aed}
+.nm-input{flex:1;background:#0a0a14;border:1px solid #7c3aed;border-radius:4px;color:#e0e0e0;padding:3px 7px;font-size:13px;min-width:0;display:none}
+.td-size{color:#555;font-size:12px;white-space:nowrap}
+.td-acts{white-space:nowrap}
+.acts{display:flex;gap:5px;align-items:center}
+/* Empty/error */
+.empty{text-align:center;color:#444;padding:24px;font-size:13px}
+.err-msg{color:#ef4444;font-size:13px;text-align:center;padding:12px;display:none}
+/* Toast */
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(60px);background:#1e2a52;color:#e0e0e0;padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .3s,transform .3s;pointer-events:none;z-index:99;border:1px solid #2d3561}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<header>
+  <h1>&#127925; Music Player</h1>
+  <p>File Manager &mdash; 192.168.4.1</p>
+</header>
+
+<section>
+  <h2>Upload WAV Files</h2>
+  <div id="drop-zone" role="button" tabindex="0">
+    <div class="icon">&#128193;</div>
+    <strong>Click to choose files</strong> or drag &amp; drop here
+    <div class="hint">Multiple .wav files supported</div>
+  </div>
+  <input type="file" id="file-input" multiple accept=".wav,.WAV" style="display:none">
+  <div id="queue"></div>
+  <div id="progress">
+    <div class="p-label"><span id="p-file-label">Uploading&hellip;</span><span id="p-file-pct">0%</span></div>
+    <div class="p-track"><div class="p-fill p-file" id="p-file-bar" style="width:0%"></div></div>
+    <div class="p-label"><span id="p-total-label">Overall</span><span id="p-total-pct">0%</span></div>
+    <div class="p-track"><div class="p-fill p-total" id="p-total-bar" style="width:0%"></div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Files on SD Card <span id="file-count" style="color:#444;font-weight:normal"></span></h2>
+  <div id="tbl-wrap" style="display:none">
+    <table>
+      <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+  <div class="empty" id="empty">No WAV files on SD card.</div>
+  <div class="err-msg" id="load-err">Failed to load file list. Check SD card.</div>
+</section>
+
+<div id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ── Helpers ── */
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function fmtSize(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
+function safeId(n){return n.replace(/[^A-Za-z0-9]/g,'_');}
+
+var toastTimer=null;
+function toast(msg,err){
+  var t=document.getElementById('toast');
+  t.textContent=msg;
+  t.style.background=err?'#3b0f0f':'#1e2a52';
+  t.classList.add('show');
+  if(toastTimer)clearTimeout(toastTimer);
+  toastTimer=setTimeout(function(){t.classList.remove('show');},3000);
+}
+
+/* ── Upload ── */
+var queue=[];
+var busy=false;
+
+var dropZone=document.getElementById('drop-zone');
+var fileInput=document.getElementById('file-input');
+var queueEl=document.getElementById('queue');
+var progressEl=document.getElementById('progress');
+var pFileLabel=document.getElementById('p-file-label');
+var pFilePct=document.getElementById('p-file-pct');
+var pFileBar=document.getElementById('p-file-bar');
+var pTotalLabel=document.getElementById('p-total-label');
+var pTotalPct=document.getElementById('p-total-pct');
+var pTotalBar=document.getElementById('p-total-bar');
+
+// Prevent browser from opening dropped files globally
+document.addEventListener('dragover',function(e){e.preventDefault();});
+document.addEventListener('drop',function(e){e.preventDefault();});
+
+dropZone.addEventListener('dragover',function(e){e.preventDefault();dropZone.classList.add('over');});
+dropZone.addEventListener('dragleave',function(){dropZone.classList.remove('over');});
+dropZone.addEventListener('drop',function(e){
+  e.preventDefault();dropZone.classList.remove('over');
+  var files=Array.from(e.dataTransfer.files).filter(function(f){return /\.wav$/i.test(f.name);});
+  if(!files.length){toast('Only .wav files are accepted.',true);return;}
+  enqueue(files);
+});
+dropZone.addEventListener('click',function(){fileInput.click();});
+dropZone.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){fileInput.click();}});
+fileInput.addEventListener('change',function(){
+  enqueue(Array.from(fileInput.files));
+  fileInput.value='';
+});
+
+function enqueue(files){
+  files.forEach(function(f){
+    var item={file:f,status:'queued',el:null};
+    queue.push(item);
+    addQueueRow(item);
+  });
+  if(!busy)processQueue();
+}
+
+function addQueueRow(item){
+  queueEl.style.display='block';
+  var d=document.createElement('div');
+  d.className='qi';
+  d.id='qi-'+safeId(item.file.name);
+  d.innerHTML='<span class="qi-name">'+esc(item.file.name)+'</span>'
+    +'<span class="qi-size">'+fmtSize(item.file.size)+'</span>'
+    +'<span class="st-q" id="qs-'+safeId(item.file.name)+'">Queued</span>';
+  queueEl.appendChild(d);
+  item.el=d;
+}
+
+function setStatus(item,cls,txt){
+  var s=document.getElementById('qs-'+safeId(item.file.name));
+  if(s){s.className=cls;s.textContent=txt;}
+}
+
+function processQueue(){
+  if(!queue.length){busy=false;return;}
+  busy=true;
+  var total=queue.length;
+  var done=0;
+  progressEl.style.display='block';
+
+  function next(){
+    if(!queue.length){
+      pFileLabel.textContent='All uploads complete.';
+      pFilePct.textContent='';
+      pFileBar.style.width='100%';
+      busy=false;
+      setTimeout(loadFiles,600);
+      return;
+    }
+    var item=queue.shift();
+    var idx=done+1;
+    var remaining=queue.length;
+    setStatus(item,'st-up','Uploading\u2026');
+    pFileLabel.textContent='Uploading: '+item.file.name+' ('+idx+'/'+(idx+remaining)+')';
+    pFileBar.style.width='0%';
+    pFilePct.textContent='0%';
+
+    uploadOne(item.file, function(pct){
+      pFileBar.style.width=pct+'%';
+      pFilePct.textContent=pct+'%';
+    }).then(function(){
+      setStatus(item,'st-ok','\u2713 Done');
+      done++;
+      var tpct=Math.round(done/(done+queue.length+1-1)*100);
+      // recalculate overall
+      var allDone=done;
+      var allTotal=allDone+queue.length;
+      var tpct2=allTotal>0?Math.round(allDone/allTotal*100):100;
+      pTotalLabel.textContent='Overall: '+allDone+' / '+(allDone+queue.length);
+      pTotalBar.style.width=tpct2+'%';
+      pTotalPct.textContent=tpct2+'%';
+      next();
+    }).catch(function(err){
+      setStatus(item,'st-err','\u2717 Failed');
+      toast('Upload failed: '+item.file.name,true);
+      done++;
+      next();
+    });
+  }
+  next();
+}
+
+function uploadOne(file, onProgress){
+  return new Promise(function(resolve,reject){
+    var xhr=new XMLHttpRequest();
+    xhr.open('POST','/upload?name='+encodeURIComponent(file.name));
+    xhr.setRequestHeader('Content-Type','application/octet-stream');
+    xhr.upload.addEventListener('progress',function(e){
+      if(e.lengthComputable)onProgress(Math.round(e.loaded/e.total*100));
+    });
+    xhr.addEventListener('load',function(){
+      if(xhr.status===200)resolve();
+      else reject(new Error(xhr.responseText||'HTTP '+xhr.status));
+    });
+    xhr.addEventListener('error',function(){reject(new Error('Network error'));});
+    xhr.addEventListener('abort',function(){reject(new Error('Aborted'));});
+    xhr.send(file);
+  });
+}
+
+/* ── File list ── */
+var tbody=document.getElementById('tbody');
+var tblWrap=document.getElementById('tbl-wrap');
+var emptyEl=document.getElementById('empty');
+var loadErrEl=document.getElementById('load-err');
+var fileCount=document.getElementById('file-count');
+
+function loadFiles(){
+  fetch('/api/files').then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(files){
+    loadErrEl.style.display='none';
+    renderFiles(files);
+  }).catch(function(){
+    loadErrEl.style.display='block';
+    tblWrap.style.display='none';
+    emptyEl.style.display='none';
+  });
+}
+
+function renderFiles(files){
+  tbody.innerHTML='';
+  if(!files||!files.length){
+    tblWrap.style.display='none';
+    emptyEl.style.display='block';
+    fileCount.textContent='';
+    return;
+  }
+  tblWrap.style.display='block';
+  emptyEl.style.display='none';
+  fileCount.textContent='('+files.length+' file'+(files.length!==1?'s':'')+')';
+  files.sort(function(a,b){return a.name.localeCompare(b.name);});
+  files.forEach(function(f){
+    var sid=safeId(f.name);
+    var tr=document.createElement('tr');
+    tr.innerHTML='<td class="td-name">'
+      +'<div class="nm-wrap">'
+      +'<span class="nm-text" id="nt-'+sid+'" title="Click to rename">'+esc(f.name)+'</span>'
+      +'<input class="nm-input" id="ni-'+sid+'" value="'+esc(f.name)+'" data-orig="'+esc(f.name)+'">'
+      +'</div></td>'
+      +'<td class="td-size">'+fmtSize(f.size)+'</td>'
+      +'<td class="td-acts"><div class="acts">'
+      +'<a class="btn btn-sm btn-ghost" href="/download?name='+encodeURIComponent(f.name)+'" download="'+esc(f.name)+'">&#8595; DL</a>'
+      +'<button class="btn btn-sm btn-ghost" id="rb-'+sid+'" onclick="startRename(\''+sid+'\')">&#9998; Rename</button>'
+      +'<button class="btn btn-sm btn-danger" onclick="deleteFile(\''+esc(f.name)+'\')">&#128465;</button>'
+      +'</div></td>';
+    tbody.appendChild(tr);
+
+    var nt=document.getElementById('nt-'+sid);
+    var ni=document.getElementById('ni-'+sid);
+    nt.addEventListener('click',function(){startRename(sid);});
+    ni.addEventListener('keydown',function(e){
+      if(e.key==='Enter'){e.preventDefault();confirmRename(sid);}
+      else if(e.key==='Escape'){cancelRename(sid);}
+    });
+    ni.addEventListener('blur',function(){
+      // Small delay so the Rename button click doesn't conflict
+      setTimeout(function(){confirmRename(sid);},150);
+    });
+  });
+}
+
+function startRename(sid){
+  var nt=document.getElementById('nt-'+sid);
+  var ni=document.getElementById('ni-'+sid);
+  var rb=document.getElementById('rb-'+sid);
+  if(!nt||!ni)return;
+  nt.style.display='none';
+  ni.style.display='block';
+  ni.focus();
+  ni.select();
+  if(rb){rb.textContent='\u2713 Save';rb.onclick=function(){confirmRename(sid);};}
+}
+
+function cancelRename(sid){
+  var nt=document.getElementById('nt-'+sid);
+  var ni=document.getElementById('ni-'+sid);
+  var rb=document.getElementById('rb-'+sid);
+  if(!ni||ni.style.display==='none')return;
+  ni.value=ni.dataset.orig;
+  nt.style.display='';
+  ni.style.display='none';
+  if(rb){rb.textContent='\u2712 Rename';rb.onclick=function(){startRename(sid);};}
+}
+
+function confirmRename(sid){
+  var nt=document.getElementById('nt-'+sid);
+  var ni=document.getElementById('ni-'+sid);
+  if(!ni||ni.style.display==='none')return;
+  var oldName=ni.dataset.orig;
+  var newName=ni.value.trim();
+  if(!newName||newName===oldName){cancelRename(sid);return;}
+  if(!/\.wav$/i.test(newName))newName+='.wav';
+  // Optimistically hide input
+  nt.style.display='';
+  ni.style.display='none';
+  fetch('/rename',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({old:oldName,new:newName})
+  }).then(function(r){
+    if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
+    toast('Renamed to '+newName);
+    loadFiles();
+  }).catch(function(e){
+    toast('Rename failed: '+e.message,true);
+    loadFiles();
+  });
+}
+
+function deleteFile(name){
+  if(!confirm('Delete "'+name+'"?\nThis cannot be undone.'))return;
+  fetch('/delete?name='+encodeURIComponent(name),{method:'DELETE'})
+  .then(function(r){
+    if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
+    toast('Deleted '+name);
+    loadFiles();
+  }).catch(function(e){
+    toast('Delete failed: '+e.message,true);
+  });
+}
+
+// Expose rename/delete to onclick attributes
+window.startRename=startRename;
+window.deleteFile=deleteFile;
+
+loadFiles();
+})();
+</script>
+</body>
+</html>

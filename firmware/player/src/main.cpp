@@ -40,6 +40,7 @@
 #include "encoder.h"
 #include "potis.h"
 #include "uart_master.h"
+#include "web_server.h"
 
 /* ESP-ADF headers (only when ADF_PATH is set in CMakeLists) */
 #ifdef HAVE_ADF
@@ -106,6 +107,8 @@ static volatile bool    s_cmd_tempo_lock_pending = false;
 static volatile bool    s_cmd_tempo_lock_value   = false;
 static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
 static volatile bool    s_force_poti_resync      = false; /* set by audio_task on unlock */
+static volatile bool    s_cmd_wifi_enable        = false; /* set by on_wifi_ctrl(true)  */
+static volatile bool    s_cmd_wifi_disable       = false; /* set by on_wifi_ctrl(false) or on_play_song */
 
 static sdmmc_card_t *s_sdcard = nullptr;
 
@@ -235,6 +238,16 @@ static void scan_playlist(void)
     }
     closedir(dir);
     ESP_LOGI(TAG, "Playlist: %u WAV file(s)", g_song_count);
+}
+
+/**
+ * Public rescan entry-point called by the web server after a file operation.
+ * Rescans the SD card and pushes the updated song list to the display.
+ */
+static void player_rescan(void)
+{
+    scan_playlist();
+    uart_master_send_song_list(g_song_names, g_song_count);
 }
 
 /* ======================================================================
@@ -536,10 +549,10 @@ static void create_pipeline(void)
     /* Larger buffers reduce underrun risk.  buffer_len must be a multiple of 12
      * (I2S_BUFFER_ALINED_BYTES_SIZE).  DMA buffers live in internal RAM;
      * out_rb_size goes to PSRAM via audio_mem_calloc. */
-    i2s_cfg.buffer_len            = 7200;          /* 3600 × 2  (default 3600)  */
-    i2s_cfg.out_rb_size           = 64 * 1024;     /* 64 KB     (default 8 KB)  */
-    i2s_cfg.chan_cfg.dma_desc_num  = 6;             /* descriptors (default 3)   */
-    i2s_cfg.chan_cfg.dma_frame_num = 512;           /* frames/desc (default 312) */
+    i2s_cfg.buffer_len            = 14400;          /* 3600 × 4  (default 3600)  */
+    i2s_cfg.out_rb_size           = 128 * 1024;     /* 128 KB     (default 8 KB)  */
+    i2s_cfg.chan_cfg.dma_desc_num  = 8;             /* descriptors (default 3)   */
+    i2s_cfg.chan_cfg.dma_frame_num = 1024;          /* frames/desc (default 312) */
     g_i2s_el = i2s_stream_init(&i2s_cfg);
     configASSERT(g_i2s_el);
 
@@ -673,7 +686,8 @@ static void audio_task(void *arg)
 static void on_play_song(uint16_t song_id)
 {
     if (song_id > 0 && song_id <= g_song_count) {
-        s_cmd_play_id = (int16_t)(song_id - 1);
+        s_cmd_play_id    = (int16_t)(song_id - 1);
+        s_cmd_wifi_disable = true; /* auto-disable WiFi when playback starts */
     }
 }
 
@@ -693,6 +707,17 @@ static void on_tempo_lock(bool lock, uint8_t locked_tempo)
     s_cmd_locked_tempo_raw   = locked_tempo;
     s_cmd_tempo_lock_value   = lock;
     s_cmd_tempo_lock_pending = true;
+}
+
+static void on_wifi_ctrl(bool enable)
+{
+    if (enable) {
+        s_cmd_wifi_enable  = true;
+        s_cmd_wifi_disable = false;
+    } else {
+        s_cmd_wifi_disable = true;
+        s_cmd_wifi_enable  = false;
+    }
 }
 
 static void on_seek(uint8_t pct)
@@ -788,6 +813,15 @@ static void io_task(void *arg)
         if (steps != 0) uart_master_send_encoder_move((int8_t)steps);
         if (encoder_btn_pressed()) uart_master_send_encoder_btn();
 
+        /* WiFi enable / disable commands */
+        if (s_cmd_wifi_disable) {
+            s_cmd_wifi_disable = false;
+            web_server_disable();
+        } else if (s_cmd_wifi_enable) {
+            s_cmd_wifi_enable = false;
+            web_server_enable();
+        }
+
         /* State update every 100 ms */
         TickType_t now = xTaskGetTickCount();
         if ((now - last_state_tick) >= pdMS_TO_TICKS(100)) {
@@ -864,6 +898,8 @@ extern "C" void app_main(void)
     mount_sd();
     scan_playlist();
 
+    web_server_init(player_rescan);
+
 #ifdef HAVE_ADF
     create_pipeline();
 #endif
@@ -875,6 +911,7 @@ extern "C" void app_main(void)
     uart_master_set_seek_callback(on_seek);
     uart_master_set_st_bypass_callback(on_st_bypass);
     uart_master_set_tempo_lock_callback(on_tempo_lock);
+    uart_master_set_wifi_ctrl_callback(on_wifi_ctrl);
 
     uart_master_send_song_list(g_song_names, g_song_count);
     uart_master_sync(500);

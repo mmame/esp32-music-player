@@ -118,6 +118,22 @@ void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo)
              lock ? "LOCK" : "UNLOCK", (unsigned)locked_tempo);
 }
 
+void uart_comm_send_wifi_ctrl(bool enable)
+{
+    /* Packet: [MAGIC 8B][CMD 1B][LEN=1 1B][enable 1B][CHECKSUM 1B] = 12 bytes */
+    uint8_t val      = enable ? 0x01u : 0x00u;
+    uint8_t checksum = CMD_WIFI_CTRL ^ 0x01u ^ val;
+
+    uint8_t pkt[12];
+    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
+    pkt[8]  = CMD_WIFI_CTRL;
+    pkt[9]  = 0x01;
+    pkt[10] = val;
+    pkt[11] = checksum;
+    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    ESP_LOGI(TAG, "CMD_WIFI_CTRL sent: %s", enable ? "ENABLE" : "DISABLE");
+}
+
 void uart_comm_init(void)
 {
     /* Create state mutex before the task can use it */

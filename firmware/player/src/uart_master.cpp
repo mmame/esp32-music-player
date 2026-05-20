@@ -33,6 +33,7 @@ static um_on_display_ready_cb_t  s_on_display_ready = nullptr;
 static um_on_seek_cb_t           s_on_seek          = nullptr;
 static um_on_st_bypass_cb_t      s_on_st_bypass     = nullptr;
 static um_on_tempo_lock_cb_t     s_on_tempo_lock    = nullptr;
+static um_on_wifi_ctrl_cb_t      s_on_wifi_ctrl     = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem  = nullptr;
@@ -149,6 +150,11 @@ void uart_master_set_st_bypass_callback(um_on_st_bypass_cb_t on_st_bypass)
 void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock)
 {
     s_on_tempo_lock = on_tempo_lock;
+}
+
+void uart_master_set_wifi_ctrl_callback(um_on_wifi_ctrl_cb_t on_wifi_ctrl)
+{
+    s_on_wifi_ctrl = on_wifi_ctrl;
 }
 
 /* ── CMD_SONG_LIST ─────────────────────────────────────────────────────────── */
@@ -413,6 +419,18 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             ESP_LOGI(TAG, "CMD_TEMPO_LOCK: %s tempo=%u",
                      lock ? "LOCK" : "UNLOCK", (unsigned)locked_tempo);
             if (s_on_tempo_lock) s_on_tempo_lock(lock, locked_tempo);
+        }
+        break;
+
+    case CMD_WIFI_CTRL:
+        if (len < 1) {
+            ESP_LOGW(TAG, "CMD_WIFI_CTRL: missing payload");
+            break;
+        }
+        {
+            bool enable = (payload[0] != 0);
+            ESP_LOGI(TAG, "CMD_WIFI_CTRL: %s", enable ? "ENABLE" : "DISABLE");
+            if (s_on_wifi_ctrl) s_on_wifi_ctrl(enable);
         }
         break;
 

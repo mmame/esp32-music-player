@@ -5,11 +5,15 @@
 
 # ── Core ESP-IDF requirements (always available) ──────────────────────────
 set(MAIN_REQUIRES
-    nvs_flash   # NVS (required at boot)
-    driver      # GPIO, SPI, UART, I2S, PCNT, SDMMC – umbrella component
-    fatfs       # FAT filesystem + esp_vfs_fat_sdspi_mount
-    esp_adc     # ADC oneshot driver (potentiometers)
-    esp_timer   # esp_timer_get_time() for wall-clock tracking
+    nvs_flash       # NVS (required at boot)
+    driver          # GPIO, SPI, UART, I2S, PCNT, SDMMC – umbrella component
+    fatfs           # FAT filesystem + esp_vfs_fat_sdspi_mount
+    esp_adc         # ADC oneshot driver (potentiometers)
+    esp_timer       # esp_timer_get_time() for wall-clock tracking
+    esp_wifi        # WiFi soft-AP
+    esp_netif       # TCP/IP network interface
+    esp_event       # Default event loop (required by WiFi)
+    esp_http_server # Embedded HTTP server
 )
 
 # ── ESP-ADF requirements (only when ADF_PATH is set) ─────────────────────
@@ -33,10 +37,13 @@ idf_component_register(
         "encoder.cpp"
         "potis.cpp"
         "uart_master.cpp"
+        "web_server.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
         ${MAIN_REQUIRES}
+    EMBED_FILES
+        "index.html"
 )
 
 # Expose HAVE_ADF compile-time flag so main.cpp can conditionally compile

@@ -52,6 +52,7 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_SEEK            0x0C  /* Display → Host: seek to position (1-byte 0-100%) */
 #define CMD_ST_BYPASS       0x0D  /* Display → Host: enable/disable SoundTouch bypass */
 #define CMD_TEMPO_LOCK      0x0E  /* Display → Host: lock/unlock tempo at a fixed value */
+#define CMD_WIFI_CTRL       0x0F  /* Display → Host: enable (1) / disable (0) WiFi AP  */
 #define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -90,6 +91,12 @@ typedef void (*um_on_st_bypass_cb_t)(bool bypass);
  */
 typedef void (*um_on_tempo_lock_cb_t)(bool lock, uint8_t locked_tempo);
 
+/**
+ * @brief Called when the display sends CMD_WIFI_CTRL.
+ * @param enable  true = start WiFi AP + HTTP server, false = stop them.
+ */
+typedef void (*um_on_wifi_ctrl_cb_t)(bool enable);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -118,6 +125,12 @@ void uart_master_set_st_bypass_callback(um_on_st_bypass_cb_t on_st_bypass);
  *        Safe to call at any time; replaces the current callback.
  */
 void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock);
+
+/**
+ * @brief Register a WiFi-control callback after init.
+ *        Safe to call at any time; replaces the current callback.
+ */
+void uart_master_set_wifi_ctrl_callback(um_on_wifi_ctrl_cb_t on_wifi_ctrl);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

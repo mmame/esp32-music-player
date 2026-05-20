@@ -20,3 +20,41 @@ CONFIG_FATFS_MAX_LFN=255
 # IDLE1 never runs by design; disable its WDT subscription to silence the
 # "IDLE1 did not reset watchdog" error that would otherwise fire every 5 s.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ── Flash size ───────────────────────────────────────────────────────────────
+# Match the actual chip: ESP32-S3-WROOM-1 N16R8 has 16 MB SPI flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# ── Partition table ─────────────────────────────────────────────────────────
+# Use custom table with 2 MB factory partition (default single-app is 1 MB,
+# which is too small once WiFi + HTTP server are linked in).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── CPU / power ────────────────────────────────────────────────────────────
+# Run CPU at 240 MHz and keep WiFi RF always active (no power-saving).
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+# WiFi STA power-save off (we only use AP mode; this keeps RF at full duty-cycle)
+# CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE is not set
+
+# ── LwIP TCP ──────────────────────────────────────────────────────────────
+# Larger TCP window: ~22 × MSS (1440 B) in flight vs 4 by default.
+# This is the dominant factor for upload throughput over WiFi AP.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# ── WiFi soft-AP ─────────────────────────────────────────────────────────────
+# SoftAP support is enabled by default; ensure NVS is large enough for WiFi
+# calibration data (default partition table already provides this).
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+
+# ── HTTP server ───────────────────────────────────────────────────────────────
+# Increase header buffer so browsers that send large Cookie/User-Agent headers
+# are accepted without HTTPD_400_BAD_REQUEST.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512

@@ -52,6 +52,7 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_SEEK        0x0C    /* Display -> Host: seek to position (1-byte pct) */
 #define CMD_ST_BYPASS   0x0D    /* Display -> Host: enable/disable SoundTouch bypass */
 #define CMD_TEMPO_LOCK  0x0E    /* Display -> Host: lock/unlock tempo at a fixed value */
+#define CMD_WIFI_CTRL   0x0F    /* Display -> Host: enable (1) / disable (0) WiFi AP  */
 #define CMD_ACK         0xFF    /* Display -> Host: sync acknowledgement           */
 
 /* ---------- Global system state ---------- */
@@ -92,6 +93,14 @@ void uart_comm_send_st_bypass(bool bypass);
  *                      @p lock is false but should still be a valid value.
  */
 void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo);
+
+/**
+ * @brief Send CMD_WIFI_CTRL to the player.
+ *
+ * @param enable  true  = start WiFi AP + HTTP server on the player,
+ *                false = stop them.
+ */
+void uart_comm_send_wifi_ctrl(bool enable);
 
 /**
  * @brief Update the touch co-ordinates used in ACK responses.

@@ -42,10 +42,20 @@ static lv_obj_t   *s_list        = NULL;
 static lv_group_t *s_group       = NULL;
 static lv_indev_t *s_enc_indev   = NULL; /* virtual encoder indev */
 
+/* WiFi toggle button */
+static lv_obj_t *s_wifi_btn   = NULL;   /* clickable container */
+static lv_obj_t *s_wifi_icon  = NULL;   /* label: LV_SYMBOL_WIFI */
+static lv_obj_t *s_wifi_slash = NULL;   /* "\" overlay when disabled */
+static bool      s_wifi_enabled = false; /* starts disabled */
+
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
+static void on_wifi_btn_clicked(lv_event_t *e);
+static void update_wifi_btn_style(void);
 static void send_play_song(uint16_t song_id);
 static void focus_item(int16_t idx);
+static void create_wifi_info_popup(void);
+static void on_wifi_info_ok(lv_event_t *e);
 
 /* ---------- async payload structs ---------------------------------------- */
 
@@ -57,6 +67,112 @@ typedef struct {
 typedef struct {
     int8_t steps;
 } async_encoder_move_t;
+
+/* =========================================================================
+ * WiFi button helpers
+ * ========================================================================= */
+
+static void update_wifi_btn_style(void)
+{
+    if (s_wifi_enabled) {
+        /* WiFi on: blue button, white icon, slash hidden */
+        lv_obj_set_style_bg_color(s_wifi_btn, lv_color_hex(0x1E88E5), 0);
+        lv_obj_set_style_bg_opa(s_wifi_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(s_wifi_icon, lv_color_white(), 0);
+        lv_obj_add_flag(s_wifi_slash, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        /* WiFi off: dark grey button, greyed icon, slash visible */
+        lv_obj_set_style_bg_color(s_wifi_btn, lv_color_hex(0x2A2A3E), 0);
+        lv_obj_set_style_bg_opa(s_wifi_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(s_wifi_icon, lv_color_hex(0x505060), 0);
+        lv_obj_clear_flag(s_wifi_slash, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_wifi_btn_clicked(lv_event_t *e)
+{
+    (void)e;
+    s_wifi_enabled = !s_wifi_enabled;
+    update_wifi_btn_style();
+    uart_comm_send_wifi_ctrl(s_wifi_enabled);
+    ESP_LOGI(TAG, "WiFi icon toggled: %s", s_wifi_enabled ? "ENABLE" : "DISABLE");
+    if (s_wifi_enabled) {
+        create_wifi_info_popup();
+    }
+}
+
+/* =========================================================================
+ * WiFi info popup
+ * ========================================================================= */
+
+static void on_wifi_info_ok(lv_event_t *e)
+{
+    lv_obj_t *overlay = (lv_obj_t *)lv_event_get_user_data(e);
+    lv_obj_delete(overlay);
+}
+
+static void create_wifi_info_popup(void)
+{
+    /* Full-screen semi-transparent backdrop – blocks input to the list below */
+    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_pad_all(overlay, 0, 0);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Dialog box */
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, 520, 330);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 14, 0);
+    lv_obj_set_style_pad_all(box, 22, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Title */
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, LV_SYMBOL_WIFI "  WiFi Enabled");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x1E88E5), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+    /* Instructions */
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg,
+        "1. Connect to WiFi network:\n"
+        "        \"MusicPlayer\"\n"
+        "\n"
+        "2. Open in your browser:\n"
+        "        192.168.4.1");
+    lv_obj_set_style_text_font(msg, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(msg, lv_color_hex(0xE0E0FF), 0);
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(msg, 476);
+    lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 50);
+
+    /* OK button */
+    lv_obj_t *btn = lv_obj_create(box);
+    lv_obj_set_size(btn, 150, 54);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(btn, on_wifi_info_ok, LV_EVENT_CLICKED, overlay);
+
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, "OK");
+    lv_obj_set_style_text_font(btn_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(btn_lbl, lv_color_white(), 0);
+    lv_obj_center(btn_lbl);
+}
 
 /* =========================================================================
  * Lifecycle
@@ -76,6 +192,30 @@ void ui_songlist_create(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xE0E0FF), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
+
+    /* WiFi toggle button – top-right of the header strip */
+    s_wifi_btn = lv_obj_create(s_screen);
+    lv_obj_set_size(s_wifi_btn, 46, 44);
+    lv_obj_align(s_wifi_btn, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_set_style_border_width(s_wifi_btn, 0, 0);
+    lv_obj_set_style_radius(s_wifi_btn, 8, 0);
+    lv_obj_set_style_pad_all(s_wifi_btn, 0, 0);
+    lv_obj_clear_flag(s_wifi_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_wifi_btn, on_wifi_btn_clicked, LV_EVENT_CLICKED, NULL);
+
+    /* WiFi icon label inside the button */
+    s_wifi_icon = lv_label_create(s_wifi_btn);
+    lv_label_set_text(s_wifi_icon, LV_SYMBOL_WIFI);
+    lv_obj_center(s_wifi_icon);
+
+    /* Diagonal slash overlay – shown only when WiFi is disabled */
+    s_wifi_slash = lv_label_create(s_wifi_btn);
+    lv_label_set_text(s_wifi_slash, "/");
+    lv_obj_set_style_text_color(s_wifi_slash, lv_color_hex(0xE94560), 0);
+    lv_obj_center(s_wifi_slash);
+
+    /* Apply initial (disabled) style */
+    update_wifi_btn_style();
 
     /* List – fills remaining vertical space below the title */
     s_list = lv_list_create(s_screen);
@@ -191,6 +331,14 @@ static void on_list_item_clicked(lv_event_t *e)
 
 static void send_play_song(uint16_t song_id)
 {
+    /* Auto-disable WiFi when a song is selected */
+    if (s_wifi_enabled) {
+        s_wifi_enabled = false;
+        update_wifi_btn_style();
+        uart_comm_send_wifi_ctrl(false);
+        ESP_LOGI(TAG, "WiFi auto-disabled on song selection");
+    }
+
     uint8_t payload[2];
     payload[0] = (uint8_t)(song_id & 0xFF);
     payload[1] = (uint8_t)(song_id >> 8);
