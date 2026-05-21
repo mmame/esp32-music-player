@@ -2,13 +2,15 @@
  * @file encoder.h
  * @brief Rotary encoder driver using the ESP32 PCNT hardware peripheral.
  *
- * Provides debounce-free reading via hardware pulse counting.
- * Accumulated step counts are read atomically and then cleared.
+ * Provides debounce-free rotation reading via hardware pulse counting.
+ * Button detection uses ADC polling on a resistor-ladder (see BTN_ADC_PIN /
+ * BTN_THRESHOLDS in pins.h) so up to BTN_COUNT independent buttons are
+ * supported on a single GPIO.
  *
  * Wire:
  *   ENC_PIN_A   – encoder channel A (any GPIO with input support)
  *   ENC_PIN_B   – encoder channel B
- *   ENC_PIN_BTN – encoder push-button (active-low with internal pull-up)
+ *   BTN_ADC_PIN – resistor-ladder ADC input (no internal pull-up)
  */
 #pragma once
 
@@ -21,8 +23,8 @@
 extern "C" {
 #endif
 
-/* Minimum milliseconds between button press events (software debounce) */
-#define ENC_BTN_DEBOUNCE_MS  50
+/* Consecutive identical ADC readings required before a button is confirmed */
+#define BTN_DEBOUNCE_SAMPLES  3
 
 /*
  * Raw PCNT edges per reported step.
@@ -36,29 +38,30 @@ extern "C" {
 /* ── API ──────────────────────────────────────────────────────────────────── */
 
 /**
- * @brief Initialise PCNT unit and button GPIO.
- *        Must be called once before encoder_read_steps() or encoder_btn_pressed().
+ * @brief Initialise PCNT unit and ADC button channel.
+ *        potis_init() MUST be called first (shares the ADC1 handle).
  *        Assumes gpio_install_isr_service() has already been called.
  */
 void encoder_init(void);
 
 /**
- * @brief Return the accumulated step count since the last call and reset it.
+ * @brief Return the accumulated rotation step count since the last call.
  *
- * Positive = clockwise rotation, negative = counter-clockwise.
- * Each detent on a typical 20-PPR encoder produces one count.
- *
- * Thread-safe: uses an atomic compare-and-swap loop internally.
+ * Positive = clockwise, negative = counter-clockwise.
+ * Thread-safe (atomic compare-and-swap loop).
  */
 int16_t encoder_read_steps(void);
 
 /**
- * @brief Return true once per button press event (debounced).
+ * @brief Sample the ADC-ladder buttons (call from io_task every ~10 ms).
  *
- * Calling this function consumes the event; subsequent calls return false
- * until the next press.  Safe to call from any task.
+ * Returns the index of a newly confirmed button press (0 = closest to GND,
+ * BTN_COUNT-1 = highest voltage rung), or -1 if no new event.
+ *
+ * One event is generated per press; holding the button does NOT repeat.
+ * The event is re-armed after the button is released.
  */
-bool encoder_btn_pressed(void);
+int8_t encoder_btn_read(void);
 
 #ifdef __cplusplus
 }

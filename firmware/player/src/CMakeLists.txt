@@ -35,6 +35,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "encoder.cpp"
+        "encoder2.cpp"
         "potis.cpp"
         "uart_master.cpp"
         "web_server.cpp"

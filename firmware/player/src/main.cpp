@@ -38,6 +38,7 @@
 /* Application modules (pure ESP-IDF, always compiled) */
 #include "pins.h"
 #include "encoder.h"
+#include "encoder2.h"
 #include "potis.h"
 #include "uart_master.h"
 #include "web_server.h"
@@ -67,8 +68,8 @@ static const char *TAG = "musicplayer";
 #define MOUNT_POINT    "/sdcard"
 #define WAV_HDR_BYTES  44u
 
-#define SPEED_MIN  0.5f
-#define SPEED_MAX  2.0f
+#define SPEED_MIN  0.7f
+#define SPEED_MAX  1.4f
 
 /* ======================================================================
  * Global state
@@ -304,7 +305,10 @@ static void pipeline_stop_and_reset(void)
     audio_pipeline_reset_elements(g_pipeline);
 }
 
-static void play_song_idx(uint16_t idx)
+/* start_pipeline=false: load song metadata and enter paused-at-0 state
+ * without running the pipeline.  do_resume() will start it when ready.
+ * This avoids a start→immediate-stop race that confuses the WAV decoder. */
+static void play_song_idx(uint16_t idx, bool start_pipeline = true)
 {
     if (idx >= g_song_count) {
         ESP_LOGW(TAG, "play_song_idx: index %u out of range", idx);
@@ -336,8 +340,8 @@ static void play_song_idx(uint16_t idx)
     g_bps          = bps;
     g_audio_pos_s  = 0.0f;
     g_wall_ref_us  = esp_timer_get_time();
-    g_is_playing   = true;
-    g_is_paused    = false;
+    g_is_playing   = start_pipeline;   /* false → stay paused at pos 0 */
+    g_is_paused    = !start_pipeline;
     xSemaphoreGive(s_state_mutex);
 
     audio_element_set_uri(g_fatfs_el, path);
@@ -353,7 +357,9 @@ static void play_song_idx(uint16_t idx)
         audio_element_setinfo(g_wav_el, &wi);
     }
 
-    audio_pipeline_run(g_pipeline);
+    if (start_pipeline) {
+        audio_pipeline_run(g_pipeline);
+    }
 
     ESP_LOGI(TAG, "Playing [%u]: %s  (%u B, %uHz, %uch, %ubps)",
              idx, g_song_names[idx], data_bytes, sr, ch, bps);
@@ -595,7 +601,10 @@ static void audio_task(void *arg)
             int16_t play_id = s_cmd_play_id;
             if (play_id >= 0) {
                 s_cmd_play_id = -1;
-                play_song_idx((uint16_t)play_id);
+                /* Always load the song in paused state at position 0.
+                 * The crank rising edge in io_task sends s_cmd_resume,
+                 * which calls do_resume() and starts the pipeline. */
+                play_song_idx((uint16_t)play_id, false);
             }
         }
 
@@ -732,28 +741,26 @@ static void on_seek(uint8_t pct)
 
 static void io_task(void *arg)
 {
-    uint8_t vol = g_volume, tempo_raw = 50;
-    potis_read(&vol, &tempo_raw);
+    /* Read initial volume; tempo poti no longer drives playback speed. */
+    uint8_t vol = g_volume;
+    {
+        uint8_t _t = 50;
+        potis_read(&vol, &_t);
+    }
 
-    uart_master_send_poti_update(vol, tempo_raw, 0,
+    uart_master_send_poti_update(vol, 0, 0,
                                  (uint8_t)(SPEED_MIN * 10.0f),
                                  (uint8_t)(SPEED_MAX * 10.0f));
 
 #ifdef HAVE_ADF
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     apply_volume_locked(vol);
-    float init_speed = SPEED_MIN + ((float)tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN);
-    apply_speed_locked(init_speed);
+    apply_speed_locked(SPEED_MIN); /* encoder2 will raise speed once spinning */
     xSemaphoreGive(s_state_mutex);
-#else
-    float init_speed = SPEED_MIN;
 #endif
-    /* Speed cooldown state: target is always updated from the pot immediately,
-     * but sonic is only notified after SPEED_COOLDOWN_MS has elapsed since the
-     * last call – giving the algorithm time to digest each change cleanly. */
-    float speed_target  = init_speed;
-    float speed_applied = init_speed;
-    TickType_t last_speed_tick = xTaskGetTickCount();
+    /* Speed target is driven by the organ encoder (encoder2). */
+    float speed_target  = SPEED_MIN;
+    float speed_applied = SPEED_MIN;
 
     TickType_t last_state_tick = xTaskGetTickCount();
     ESP_LOGI(TAG, "IO task running on core %d", xPortGetCoreID());
@@ -761,57 +768,109 @@ static void io_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(10));
 
-        /* Potentiometers */
-        uint8_t new_vol = vol, new_tempo = tempo_raw;
-        bool poti_changed = potis_read(&new_vol, &new_tempo);
-        bool poti_force   = s_force_poti_resync;
-        if (poti_force) s_force_poti_resync = false;
-        if (poti_changed || poti_force) {
-            vol = new_vol;
-            if (!g_tempo_locked) {
-                tempo_raw    = new_tempo;
-                speed_target = SPEED_MIN + ((float)tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN);
-            }
-#ifdef HAVE_ADF
-            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-            apply_volume_locked(vol);
-            xSemaphoreGive(s_state_mutex);
-#endif
-            uart_master_send_poti_update(vol, tempo_raw, 0,
-                                         (uint8_t)(SPEED_MIN * 10.0f),
-                                         (uint8_t)(SPEED_MAX * 10.0f));
-        }
-
-#ifdef HAVE_ADF
-        /* Speed cooldown: apply the latest target to sonic only after
-         * SPEED_COOLDOWN_MS has elapsed since the previous call.
-         * Tune this value: larger = fewer clicks, slower knob response. */
+        /* Volume potentiometer (tempo poti removed from speed control) */
         {
-            const TickType_t SPEED_COOLDOWN_MS = 50;
-            TickType_t now_tick = xTaskGetTickCount();
-            /* When tempo is locked, override speed_target (and tempo_raw used
-             * for poti_update) with the locked value so poti changes are
-             * completely ignored.  Bypass (1.0x) overrules both via
-             * soundtouch_el_set_bypass() which was called separately. */
-            if (g_tempo_locked) {
-                tempo_raw    = g_locked_tempo_raw;
-                speed_target = SPEED_MIN + ((float)tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN);
-            }
-            /*if (speed_target != speed_applied &&
-                (now_tick - last_speed_tick) >= pdMS_TO_TICKS(SPEED_COOLDOWN_MS)) {*/
-                speed_applied   = speed_target;
-                last_speed_tick = now_tick;
+            uint8_t new_vol = vol, _t = 0;
+            if (potis_read(&new_vol, &_t)) {
+                vol = new_vol;
+#ifdef HAVE_ADF
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                apply_speed_locked(speed_applied);
+                apply_volume_locked(vol);
                 xSemaphoreGive(s_state_mutex);
-            //}
+#endif
+                uart_master_send_poti_update(vol, 0, 0,
+                                             (uint8_t)(SPEED_MIN * 10.0f),
+                                             (uint8_t)(SPEED_MAX * 10.0f));
+            }
+        }
+
+        /* ── Organ encoder 2: speed + auto-pause/resume ─────────────────── */
+        {
+            static bool    s_enc2_was_moving = false;
+            static bool    s_enc2_pause_sent = false;
+            static uint8_t s_last_tempo_sent = 255; /* 255 = force first send */
+
+            float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
+            bool  enc2_move = encoder2_is_moving();
+
+            if (enc2_move) {
+                s_enc2_pause_sent = false; /* re-arm for next stop */
+                /* Rising edge: encoder started spinning while song is paused */
+                if (!s_enc2_was_moving && g_is_paused && g_current_song >= 0) {
+                    s_cmd_resume = true;
+                }
+                /* Update speed target while song is active and speed not locked */
+                if ((g_is_playing || g_is_paused) && !g_tempo_locked) {
+                    speed_target = enc2_spd; /* RPS ≈ speed multiplier */
+                    if (speed_target < SPEED_MIN) speed_target = SPEED_MIN;
+                    if (speed_target > SPEED_MAX) speed_target = SPEED_MAX;
+                }
+            } else {
+                /* Encoder stopped (or never started): pause if song is playing */
+                if (g_is_playing && !s_enc2_pause_sent) {
+                    s_cmd_pause = true;
+                    s_enc2_pause_sent = true;
+                }
+            }
+            s_enc2_was_moving = enc2_move;
+
+            /* Push speed to display whenever it changes by ≥1 unit (0–100).
+             * send_state() covers playback; send_poti_update() ensures the
+             * display's speed bar stays current at all times. */
+            float disp_speed = g_tempo_locked
+                ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
+                : speed_target;
+            uint8_t tb = (uint8_t)(((disp_speed - SPEED_MIN) /
+                          (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
+            if (tb > 100) tb = 100;
+            if (tb != s_last_tempo_sent) {
+                s_last_tempo_sent = tb;
+                uart_master_send_poti_update(vol, tb, 0,
+                                             (uint8_t)(SPEED_MIN * 10.0f),
+                                             (uint8_t)(SPEED_MAX * 10.0f));
+            }
+        }
+
+#ifdef HAVE_ADF
+        /* Apply updated speed target to SoundTouch every tick.
+         * When speed is locked the locked value always wins over encoder2. */
+        {
+            speed_applied = g_tempo_locked
+                ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
+                : speed_target;
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            apply_speed_locked(speed_applied);
+            xSemaphoreGive(s_state_mutex);
         }
 #endif
 
-        /* Encoder */
+        /* Encoder steps + buttons */
         int16_t steps = encoder_read_steps();
         if (steps != 0) uart_master_send_encoder_move((int8_t)steps);
-        if (encoder_btn_pressed()) uart_master_send_encoder_btn();
+
+        int8_t btn = encoder_btn_read();
+        if (btn == 0) {
+            if (g_is_playing || g_is_paused) {
+                /* Stop playback and return to song list */
+                s_cmd_stop = true;
+                uart_master_send_song_list(g_song_names, g_song_count);
+            } else {
+                /* No song active – forward button to display for navigation */
+                uart_master_send_encoder_btn();
+            }
+        }
+        /* btn 1–9: additional buttons, actions to be assigned */
+
+        /* DEBUG: print raw ADC value on BTN_ADC_PIN every 3 s */
+        {
+            static uint16_t dbg_ctr = 0;
+            if (++dbg_ctr >= 300) {
+                dbg_ctr = 0;
+                int raw = 0;
+                adc_oneshot_read(potis_get_adc_handle(), ADC_CHANNEL_2, &raw);
+                ESP_LOGI("BTN_ADC", "raw=%d", raw);
+            }
+        }
 
         /* WiFi enable / disable commands */
         if (s_cmd_wifi_disable) {
@@ -892,6 +951,21 @@ extern "C" void app_main(void)
         ESP_ERROR_CHECK(isr_ret);
     }
 
+    /* Drive MY_I2S_SCK (GPIO 11) permanently LOW so the external DAC
+     * uses its own internal master clock instead of receiving one from
+     * the ESP32.  Must be done before the I2S driver claims the pin. */
+    {
+        gpio_config_t sck_cfg = {};
+        sck_cfg.pin_bit_mask = (1ULL << MY_I2S_SCK);
+        sck_cfg.mode         = GPIO_MODE_OUTPUT;
+        sck_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+        sck_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        sck_cfg.intr_type    = GPIO_INTR_DISABLE;
+        ESP_ERROR_CHECK(gpio_config(&sck_cfg));
+        gpio_set_level((gpio_num_t)MY_I2S_SCK, 0);
+        ESP_LOGI(TAG, "MY_I2S_SCK (GPIO %d) driven LOW – DAC uses internal clock", MY_I2S_SCK);
+    }
+
     s_state_mutex = xSemaphoreCreateMutex();
     configASSERT(s_state_mutex);
 
@@ -904,8 +978,9 @@ extern "C" void app_main(void)
     create_pipeline();
 #endif
 
+    potis_init();    /* must come before encoder_init() – shares ADC1 handle */
     encoder_init();
-    potis_init();
+    encoder2_init();
 
     uart_master_init(on_play_song, on_stop_song, on_pause, on_resume, on_display_ready);
     uart_master_set_seek_callback(on_seek);

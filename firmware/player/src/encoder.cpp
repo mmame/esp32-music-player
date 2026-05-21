@@ -13,11 +13,12 @@
  */
 
 #include "encoder.h"
+#include "potis.h"
 
 #include "driver/pulse_cnt.h"
 #include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -40,18 +41,25 @@ static int s_last_count = 0;
 static int s_count_remainder = 0;
 
 /* ── Button state ────────────────────────────────────────────────────────── */
-static volatile bool     s_btn_event   = false;
-static volatile uint32_t s_btn_last_ms = 0;
 
-/* ── Button GPIO ISR ─────────────────────────────────────────────────────── */
+static adc_oneshot_unit_handle_t s_btn_adc = nullptr;
+static adc_channel_t             s_btn_ch  = ADC_CHANNEL_2;
 
-static void IRAM_ATTR btn_isr_handler(void *arg)
+/* Debounce state */
+static int8_t  s_btn_last_id    = -1;  /* raw decoded button from last sample */
+static uint8_t s_btn_stable_cnt =  0;  /* # of consecutive identical readings */
+static int8_t  s_btn_confirmed  = -1;  /* fully-debounced current button       */
+static int8_t  s_btn_reported   = -1;  /* last button for which event was fired */
+
+static const uint16_t s_btn_thresholds[BTN_COUNT] = BTN_THRESHOLDS;
+
+/* Decode a 12-bit ADC raw value to a button index (0–BTN_COUNT-1) or -1. */
+static int8_t adc_to_btn(int raw)
 {
-    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    if ((now - s_btn_last_ms) >= ENC_BTN_DEBOUNCE_MS) {
-        s_btn_last_ms = now;
-        s_btn_event   = true;
+    for (int i = 0; i < BTN_COUNT; i++) {
+        if (raw < (int)s_btn_thresholds[i]) return (int8_t)i;
     }
+    return -1; /* above all thresholds – idle */
 }
 
 /* ── PCNT overflow callback (keeps s_steps accurate beyond ±32767) ───────── */
@@ -127,18 +135,23 @@ void encoder_init(void)
     ESP_ERROR_CHECK(pcnt_unit_clear_count(s_pcnt_unit));
     ESP_ERROR_CHECK(pcnt_unit_start(s_pcnt_unit));
 
-    /* ── Button GPIO (ISR service already installed by app_main) ─────────── */
-    gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << ENC_PIN_BTN),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_NEGEDGE,   /* Trigger on falling edge (press) */
-    };
-    ESP_ERROR_CHECK(gpio_config(&btn_cfg));
-    ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)ENC_PIN_BTN, btn_isr_handler, nullptr));
+    /* ── Button ADC (shares ADC1 handle owned by potis) ──────────────────── */
+    s_btn_adc = potis_get_adc_handle();
 
-    ESP_LOGI(TAG, "Encoder ready: A=%d B=%d BTN=%d", ENC_PIN_A, ENC_PIN_B, ENC_PIN_BTN);
+    adc_unit_t btn_unit;
+    ESP_ERROR_CHECK(adc_oneshot_io_to_channel(BTN_ADC_PIN, &btn_unit, &s_btn_ch));
+    if (btn_unit != ADC_UNIT_1) {
+        ESP_LOGE(TAG, "BTN_ADC_PIN (GPIO%d) is not on ADC1 – check pins.h", BTN_ADC_PIN);
+    }
+
+    adc_oneshot_chan_cfg_t btn_chan_cfg = {
+        .atten    = ADC_ATTEN_DB_12,   /* 0–3.3 V */
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(s_btn_adc, s_btn_ch, &btn_chan_cfg));
+
+    ESP_LOGI(TAG, "Encoder ready: A=%d B=%d BTN_ADC=GPIO%d (ADC1_CH%d, %d rungs)",
+             ENC_PIN_A, ENC_PIN_B, BTN_ADC_PIN, (int)s_btn_ch, BTN_COUNT);
 }
 
 int16_t encoder_read_steps(void)
@@ -164,11 +177,34 @@ int16_t encoder_read_steps(void)
     return steps;
 }
 
-bool encoder_btn_pressed(void)
+int8_t encoder_btn_read(void)
 {
-    if (s_btn_event) {
-        s_btn_event = false;
-        return true;
+    if (!s_btn_adc) return -1;
+
+    int raw = 0;
+    adc_oneshot_read(s_btn_adc, s_btn_ch, &raw);
+    int8_t id = adc_to_btn(raw);
+
+    /* Debounce: require BTN_DEBOUNCE_SAMPLES consecutive identical readings */
+    if (id == s_btn_last_id) {
+        if (s_btn_stable_cnt < BTN_DEBOUNCE_SAMPLES) s_btn_stable_cnt++;
+    } else {
+        s_btn_last_id    = id;
+        s_btn_stable_cnt = 1;
     }
-    return false;
+
+    if (s_btn_stable_cnt >= BTN_DEBOUNCE_SAMPLES) {
+        s_btn_confirmed = id;
+    }
+
+    /* Fire event on new press, arm again on release */
+    if (s_btn_confirmed != -1 && s_btn_confirmed != s_btn_reported) {
+        s_btn_reported = s_btn_confirmed;
+        ESP_LOGD(TAG, "Button %d pressed (raw=%d)", (int)s_btn_confirmed, raw);
+        return s_btn_confirmed;
+    }
+    if (s_btn_confirmed == -1) {
+        s_btn_reported = -1; /* re-arm for next press */
+    }
+    return -1;
 }

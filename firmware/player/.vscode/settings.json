@@ -1,7 +1,7 @@
 {
   "git.ignoreLimitWarning": true,
   "idf.currentSetup": "C:\\Users\\default.DESKTOP-FC9SLHI\\esp\\v6.0\\esp-idf",
-  "idf.portWin": "COM9",
+  "idf.portWin": "COM10",
   "idf.flashType": "UART",
   "idf.idfTarget": "esp32s3",
   "idf.customExtraVars": {},

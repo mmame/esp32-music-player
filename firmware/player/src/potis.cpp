@@ -1,11 +1,17 @@
 /**
  * @file potis.cpp
- * @brief Potentiometer reader using the ESP32-S3 ADC oneshot driver (IDF 5.x).
+ * @brief Rheostat reader using the ESP32-S3 ADC oneshot driver (IDF 5.x).
  *
- * Uses the IDF high-level "ADC Oneshot" driver (esp_adc/adc_oneshot.h) which
- * replaces the deprecated adc1_get_raw() API in ESP-IDF 5.x.
- * Attenuation is set to ADC_ATTEN_DB_12 (0–3.3 V input range on all 3.3 V
- * ESP32-S3 boards).
+ * Circuit per channel:
+ *   3.3 V ── [Rheostat 0–POT_R_MAX Ω] ──┬── [POT_R_SERIES] ── GND
+ *                                        └── ADC pin
+ *
+ * The voltage divider produces a non-linear ADC reading for a linear knob
+ * position θ.  raw_to_pct() applies the exact inverse transfer function so
+ * the caller receives a linear 0–100 value regardless of circuit loading.
+ *
+ * Uses the IDF high-level "ADC Oneshot" driver (esp_adc/adc_oneshot.h).
+ * Attenuation: ADC_ATTEN_DB_12 → 0–3.3 V input range.
  */
 
 #include "potis.h"
@@ -36,14 +42,57 @@ static bool     s_buf_full = false;
 static uint8_t s_last_volume = 0xFF;
 static uint8_t s_last_tempo  = 0xFF;
 
+/* ── Rheostat circuit constants ──────────────────────────────────────────── */
+
+/* Current-limiting series resistor between 3.3 V rail and ADC pin [Ω] */
+static constexpr float POT_R_SERIES = 1500.0f;
+/* Rheostat full-scale resistance [Ω] */
+static constexpr float POT_R_MAX    = 10000.0f;
+/* 12-bit ADC full scale */
+static constexpr float POT_ADC_FS   = 4095.0f;
+
+/* End-stop calibration: theoretical % the formula produces at the physical
+ * mechanical stops.  Real rheostats don't reach exactly 0 Ω / R_MAX, so the
+ * raw formula may output ~2 % at one end and ~98 % at the other.
+ * These constants stretch that practical range back to a true 0–100 scale.
+ * If your bar stops short of 0 or 100, adjust the values to match what the
+ * bar actually reads when the knob is pressed against each stop. */
+static constexpr float POT_STOP_LO  =  5.0f;   /* formula output at min-R stop  */
+static constexpr float POT_STOP_HI  = 95.0f;   /* formula output at max-R stop  */
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+/**
+ * Convert a mean 12-bit ADC value to a linear 0–100 knob position.
+ *
+ * Transfer function of the voltage divider:
+ *   raw = ADC_FS × R_rheo / (R_series + R_rheo)
+ *
+ * Circuit: 3.3V → [R_rheo] → ADC → [R_series] → GND
+ * Inverse (knob position θ = R_rheo / R_max):
+ *   θ = (R_series / R_max) × (ADC_FS − raw) / raw
+ *   pct = θ × 100
+ */
+static uint8_t raw_to_pct(uint32_t avg_raw)
+{
+    if (avg_raw == 0) return 0;                        /* open circuit / full-scale R */
+    float numer = POT_ADC_FS - (float)avg_raw;
+    if (numer <= 0.0f) return 100;                     /* rheostat at 0 Ω  → 100%   */
+    float pct    = 100.0f * (POT_R_SERIES / POT_R_MAX) * numer / (float)avg_raw;
+    float result = 100.0f - pct;                       /* invert: high R → low %     */
+    /* Stretch [POT_STOP_LO … POT_STOP_HI] → [0 … 100] so physical end-stops
+     * reach exactly 0 % and 100 % despite real rheostat imperfections. */
+    result = (result - POT_STOP_LO) * (100.0f / (POT_STOP_HI - POT_STOP_LO));
+    if (result <= 0.0f)   return 0;
+    if (result >= 100.0f) return 100;
+    return (uint8_t)(result + 0.5f);
+}
 
 static uint8_t buf_average(const uint16_t *buf, uint8_t n)
 {
     uint32_t sum = 0;
     for (uint8_t i = 0; i < n; i++) sum += buf[i];
-    /* Normalise from 12-bit ADC (0–4095) to 0–100 */
-    return (uint8_t)((sum / n) * 100u / 4095u);
+    return raw_to_pct(sum / n);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -117,4 +166,9 @@ bool potis_read(uint8_t *out_volume, uint8_t *out_tempo)
         s_last_tempo  = tmp;
     }
     return changed;
+}
+
+adc_oneshot_unit_handle_t potis_get_adc_handle(void)
+{
+    return s_adc_handle;
 }

@@ -15,6 +15,8 @@
 
 #include "pins.h"
 
+#include "esp_adc/adc_oneshot.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -43,6 +45,14 @@ void potis_init(void);
  *         since the last call where a change was reported.
  */
 bool potis_read(uint8_t *volume, uint8_t *tempo);
+
+/**
+ * @brief Return the ADC1 oneshot handle.
+ *        Other modules (e.g. encoder button ADC) may add channels to the
+ *        same ADC unit by calling adc_oneshot_config_channel() on this handle.
+ *        Call only after potis_init().
+ */
+adc_oneshot_unit_handle_t potis_get_adc_handle(void);
 
 #ifdef __cplusplus
 }
