@@ -66,13 +66,13 @@ tbody tr:hover td{background:#1a1f3a}
 </header>
 
 <section>
-  <h2>Upload WAV Files</h2>
+  <h2>Upload Audio Files</h2>
   <div id="drop-zone" role="button" tabindex="0">
     <div class="icon">&#128193;</div>
     <strong>Click to choose files</strong> or drag &amp; drop here
-    <div class="hint">Multiple .wav files supported</div>
+    <div class="hint">WAV, MP3, FLAC, OGG, AAC &mdash; any format your browser supports</div>
   </div>
-  <input type="file" id="file-input" multiple accept=".wav,.WAV" style="display:none">
+  <input type="file" id="file-input" multiple accept="audio/*,.wav,.mp3,.flac,.ogg,.aac,.m4a,.aiff" style="display:none">
   <div id="queue"></div>
   <div id="progress">
     <div class="p-label"><span id="p-file-label">Uploading&hellip;</span><span id="p-file-pct">0%</span></div>
@@ -138,8 +138,8 @@ dropZone.addEventListener('dragover',function(e){e.preventDefault();dropZone.cla
 dropZone.addEventListener('dragleave',function(){dropZone.classList.remove('over');});
 dropZone.addEventListener('drop',function(e){
   e.preventDefault();dropZone.classList.remove('over');
-  var files=Array.from(e.dataTransfer.files).filter(function(f){return /\.wav$/i.test(f.name);});
-  if(!files.length){toast('Only .wav files are accepted.',true);return;}
+  var files=Array.from(e.dataTransfer.files);
+  if(!files.length){toast('No audio files found in drop.',true);return;}
   enqueue(files);
 });
 dropZone.addEventListener('click',function(){fileInput.click();});
@@ -149,9 +149,14 @@ fileInput.addEventListener('change',function(){
   fileInput.value='';
 });
 
+/* Strip any extension and force .wav as the target filename on the SD card. */
+function toWavName(originalName){
+  return originalName.replace(/\.[^.]+$/,'')+'.wav';
+}
+
 function enqueue(files){
   files.forEach(function(f){
-    var item={file:f,status:'queued',el:null};
+    var item={file:f,uploadName:toWavName(f.name),status:'queued',el:null};
     queue.push(item);
     addQueueRow(item);
   });
@@ -163,7 +168,10 @@ function addQueueRow(item){
   var d=document.createElement('div');
   d.className='qi';
   d.id='qi-'+safeId(item.file.name);
-  d.innerHTML='<span class="qi-name">'+esc(item.file.name)+'</span>'
+  var label=item.uploadName===item.file.name
+    ?esc(item.file.name)
+    :esc(item.file.name)+'<span style="color:#6d6d8a"> → '+esc(item.uploadName)+'</span>';
+  d.innerHTML='<span class="qi-name">'+label+'</span>'
     +'<span class="qi-size">'+fmtSize(item.file.size)+'</span>'
     +'<span class="st-q" id="qs-'+safeId(item.file.name)+'">Queued</span>';
   queueEl.appendChild(d);
@@ -194,19 +202,21 @@ function processQueue(){
     var item=queue.shift();
     var idx=done+1;
     var remaining=queue.length;
-    setStatus(item,'st-up','Uploading\u2026');
-    pFileLabel.textContent='Uploading: '+item.file.name+' ('+idx+'/'+(idx+remaining)+')';
+    setStatus(item,'st-up','Converting…');
+    pFileLabel.textContent='Converting: '+item.file.name;
     pFileBar.style.width='0%';
     pFilePct.textContent='0%';
 
-    uploadOne(item.file, function(pct){
+    convertToWav(item.file).then(function(wavBlob){
+      setStatus(item,'st-up','Uploading…');
+      pFileLabel.textContent='Uploading: '+item.uploadName+' ('+idx+'/'+(idx+remaining)+')';
+      return uploadOne(wavBlob, item.uploadName, function(pct){
       pFileBar.style.width=pct+'%';
       pFilePct.textContent=pct+'%';
+    });
     }).then(function(){
-      setStatus(item,'st-ok','\u2713 Done');
+      setStatus(item,'st-ok','✓ Done');
       done++;
-      var tpct=Math.round(done/(done+queue.length+1-1)*100);
-      // recalculate overall
       var allDone=done;
       var allTotal=allDone+queue.length;
       var tpct2=allTotal>0?Math.round(allDone/allTotal*100):100;
@@ -215,8 +225,8 @@ function processQueue(){
       pTotalPct.textContent=tpct2+'%';
       next();
     }).catch(function(err){
-      setStatus(item,'st-err','\u2717 Failed');
-      toast('Upload failed: '+item.file.name,true);
+      setStatus(item,'st-err','✗ Failed');
+      toast((err&&err.message?err.message:'Failed')+': '+item.file.name,true);
       done++;
       next();
     });
@@ -224,10 +234,11 @@ function processQueue(){
   next();
 }
 
-function uploadOne(file, onProgress){
+function uploadOne(blob, name, onProgress){
+  var url='/upload?name='+encodeURIComponent(name);
   return new Promise(function(resolve,reject){
     var xhr=new XMLHttpRequest();
-    xhr.open('POST','/upload?name='+encodeURIComponent(file.name));
+    xhr.open('POST',url);
     xhr.setRequestHeader('Content-Type','application/octet-stream');
     xhr.upload.addEventListener('progress',function(e){
       if(e.lengthComputable)onProgress(Math.round(e.loaded/e.total*100));
@@ -238,7 +249,63 @@ function uploadOne(file, onProgress){
     });
     xhr.addEventListener('error',function(){reject(new Error('Network error'));});
     xhr.addEventListener('abort',function(){reject(new Error('Aborted'));});
-    xhr.send(file);
+    xhr.send(blob);
+  });
+}
+
+/**
+ * Decode any browser-supported audio format and re-encode to a
+ * 16-bit / 48 kHz / 2-channel (dual-mono) WAV Blob.
+ *
+ * Steps:
+ *   1. AudioContext.decodeAudioData  – handles WAV, MP3, FLAC, OGG, AAC …
+ *   2. OfflineAudioContext(1ch, N, 48000) – resamples + mixes down to mono
+ *   3. Convert Float32 → Int16, duplicate to interleaved stereo (L = R)
+ *   4. Prepend standard 44-byte WAV / PCM header
+ */
+function convertToWav(file){
+  var SR=48000;
+  return file.arrayBuffer().then(function(arrayBuf){
+    var tmpCtx=new (window.AudioContext||window.webkitAudioContext)();
+    return tmpCtx.decodeAudioData(arrayBuf).then(function(srcBuf){
+      tmpCtx.close();
+      var nFrames=Math.max(1,Math.ceil(srcBuf.duration*SR));
+      var offCtx=new OfflineAudioContext(1,nFrames,SR);
+      var src=offCtx.createBufferSource();
+      src.buffer=srcBuf;
+      src.connect(offCtx.destination);
+      src.start(0);
+      return offCtx.startRendering();
+    },function(e){
+      tmpCtx.close();
+      throw new Error('Decode failed – unsupported format?');
+    });
+  }).then(function(mono){
+    var n=mono.length;
+    var monoData=mono.getChannelData(0);
+    /* True mono PCM – 1 channel, 16-bit signed */
+    var pcm=new Int16Array(n);
+    for(var i=0;i<n;i++){
+      var s=Math.round(monoData[i]*32767);
+      if(s>32767)s=32767;else if(s<-32768)s=-32768;
+      pcm[i]=s;
+    }
+    /* 44-byte WAV header – 1ch / 48000 Hz / 16-bit */
+    var dataBytes=pcm.byteLength;
+    var buf=new ArrayBuffer(44+dataBytes);
+    var v=new DataView(buf);
+    var w=function(o,s){for(var i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+    w(0,'RIFF');  v.setUint32(4,36+dataBytes,true);  w(8,'WAVE');
+    w(12,'fmt '); v.setUint32(16,16,true);
+    v.setUint16(20,1,true);           /* PCM             */
+    v.setUint16(22,1,true);           /* 1 channel       */
+    v.setUint32(24,SR,true);          /* 48000 Hz        */
+    v.setUint32(28,SR*2,true);        /* ByteRate        */
+    v.setUint16(32,2,true);           /* BlockAlign      */
+    v.setUint16(34,16,true);          /* BitsPerSample   */
+    w(36,'data'); v.setUint32(40,dataBytes,true);
+    new Uint8Array(buf,44).set(new Uint8Array(pcm.buffer));
+    return new Blob([buf],{type:'audio/wav'});
   });
 }
 

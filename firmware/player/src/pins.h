@@ -14,7 +14,7 @@
 #define PIN_SPI_MISO    47
 
 /* ── I2S external DAC ────────────────────────────────────────────────────── */
-#define MY_I2S_SCK      11  /* Master clock (SCK) – pull to GND to use I2S Chip internal clock */
+#define MY_I2S_SCK      11  /* Master clock (MCLK) output to DAC                              */
 #define MY_I2S_WS       12  /* Word select / LRCK                             */
 #define MY_I2S_BCK      13  /* Bit clock                                      */
 #define MY_I2S_DATA     14  /* Serial data / DIN                              */

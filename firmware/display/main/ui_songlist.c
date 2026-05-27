@@ -8,13 +8,12 @@
  *   lv_async_call() to post work items to the LVGL task (Core 1).
  * - The LVGL task executes the work items inside lv_timer_handler(),
  *   so no extra locking is needed there.
- * - cmd_play_song() runs in the LVGL task but only calls uart_write_bytes()
- *   which is ISR-safe and reentrant, so no extra mutex is required.
+ * - All Display->Host commands are queued via uart_comm_send_*() and flushed
+ *   in the next CMD_ACK response; no direct uart_write_bytes() calls are made.
  */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/uart.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
@@ -32,7 +31,15 @@ typedef struct {
     char     name[MAX_SONG_NAME_LEN];
 } song_entry_t;
 
-static song_entry_t s_songs[SONGLIST_MAX_SONGS];
+/* Per-song settings cache – populated on first gear-tap via CMD_SONG_SETTINGS */
+typedef struct {
+    bool    valid;            /* true once player has responded                */
+    uint8_t flags;            /* bit 0 = loop, bit 1 = fixed_speed_en         */
+    uint8_t fixed_speed_x100; /* speed × 100 (e.g. 100 = 1.0×)                 */
+} song_settings_cache_t;
+
+static song_entry_t         s_songs[SONGLIST_MAX_SONGS];
+static song_settings_cache_t s_settings[SONGLIST_MAX_SONGS];
 static uint8_t      s_song_count = 0;
 static int16_t      s_focused_idx = 0;  /* currently focused list-button index */
 
@@ -48,14 +55,24 @@ static lv_obj_t *s_wifi_icon  = NULL;   /* label: LV_SYMBOL_WIFI */
 static lv_obj_t *s_wifi_slash = NULL;   /* "\" overlay when disabled */
 static bool      s_wifi_enabled = false; /* starts disabled */
 
+/* Settings dialog – at most one open at a time */
+static lv_obj_t  *s_settings_overlay   = NULL; /* backdrop (NULL when not open) */
+static uint16_t   s_settings_song_id   = 0;    /* song_id whose dialog is open  */
+static lv_obj_t  *s_cb_loop            = NULL; /* checkbox objects inside dialog */
+static lv_obj_t  *s_cb_fixed_speed     = NULL;
+
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
+static void on_gear_clicked(lv_event_t *e);
 static void on_wifi_btn_clicked(lv_event_t *e);
 static void update_wifi_btn_style(void);
 static void send_play_song(uint16_t song_id);
 static void focus_item(int16_t idx);
 static void create_wifi_info_popup(void);
 static void on_wifi_info_ok(lv_event_t *e);
+static void create_settings_dialog(uint16_t song_id);
+static void on_settings_ok(lv_event_t *e);
+static void on_settings_cancel(lv_event_t *e);
 
 /* ---------- async payload structs ---------------------------------------- */
 
@@ -63,6 +80,12 @@ typedef struct {
     uint8_t *data; /* heap-allocated; freed by the async callback */
     uint16_t len;
 } async_songlist_payload_t;
+
+typedef struct {
+    uint16_t song_id;
+    uint8_t  flags;
+    uint8_t  fixed_speed_x100;
+} async_song_settings_t;
 
 typedef struct {
     int8_t steps;
@@ -285,6 +308,19 @@ static void rebuild_list(void)
         /* Touch / click event */
         lv_obj_add_event_cb(btn, on_list_item_clicked, LV_EVENT_CLICKED, NULL);
 
+        /* ── Gear icon button (right-aligned inside the row) ───────────── */
+        lv_obj_t *gear = lv_label_create(btn);
+        lv_label_set_text(gear, LV_SYMBOL_SETTINGS);
+        lv_obj_set_style_text_font(gear, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(gear, lv_color_hex(0x90A0B0), 0);
+        lv_obj_set_style_text_color(gear, lv_color_white(), LV_STATE_PRESSED);
+        lv_obj_align(gear, LV_ALIGN_RIGHT_MID, -6, 0);
+        /* Make it independently clickable so it doesn't trigger play */
+        lv_obj_add_flag(gear, LV_OBJ_FLAG_CLICKABLE);
+        /* Store song-ID so the callback knows which song to configure */
+        lv_obj_set_user_data(gear, (void *)(uintptr_t)s_songs[i].id);
+        lv_obj_add_event_cb(gear, on_gear_clicked, LV_EVENT_CLICKED, NULL);
+
         /* Add to encoder group so it receives focus */
         lv_group_add_obj(s_group, btn);
     }
@@ -317,17 +353,200 @@ static void focus_item(int16_t idx)
 static void on_list_item_clicked(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
+    /* Ignore clicks that originated from the gear icon child */
+    lv_obj_t *origin = lv_event_get_current_target(e);
+    if (origin != btn) return;
     uint16_t song_id = (uint16_t)(uintptr_t)lv_obj_get_user_data(btn);
     ESP_LOGI(TAG, "Item clicked: song_id=%u", song_id);
     send_play_song(song_id);
 }
 
+static void on_gear_clicked(lv_event_t *e)
+{
+    /* Stop the click from bubbling up to the list-row button */
+    lv_event_stop_bubbling(e);
+
+    lv_obj_t *gear   = lv_event_get_target(e);
+    uint16_t  song_id = (uint16_t)(uintptr_t)lv_obj_get_user_data(gear);
+    ESP_LOGI(TAG, "Gear clicked: song_id=%u", song_id);
+    create_settings_dialog(song_id);
+}
+
 /* =========================================================================
- * CMD_PLAY_SONG sender
- *
- * Payload layout (3 bytes):
- *   [song_id_lo : u8][song_id_hi : u8]
+ * Settings dialog
  * ========================================================================= */
+
+static void on_settings_cancel(lv_event_t *e)
+{
+    (void)e;
+    if (s_settings_overlay) {
+        lv_obj_delete(s_settings_overlay);
+        s_settings_overlay = NULL;
+        s_settings_song_id = 0;
+        s_cb_loop          = NULL;
+        s_cb_fixed_speed   = NULL;
+    }
+}
+
+static void on_settings_ok(lv_event_t *e)
+{
+    (void)e;
+    if (!s_settings_overlay) return;
+
+    uint16_t song_id = s_settings_song_id;
+
+    /* Collect checkbox states */
+    bool loop_en    = (lv_obj_get_state(s_cb_loop)        & LV_STATE_CHECKED) != 0;
+    bool speed_en   = (lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0;
+
+    uint8_t flags = 0;
+    if (loop_en)  flags |= 0x01u;
+    if (speed_en) flags |= 0x02u;
+    uint8_t fixed_speed_x100 = 100u; /* always 1.0× for now */
+
+    /* Update local cache */
+    uint8_t cache_idx = (uint8_t)(song_id - 1);
+    if (cache_idx < SONGLIST_MAX_SONGS) {
+        s_settings[cache_idx].flags            = flags;
+        s_settings[cache_idx].fixed_speed_x100 = fixed_speed_x100;
+        s_settings[cache_idx].valid            = true;
+    }
+
+    /* Send to player */
+    uart_comm_send_set_song_settings(song_id, flags, fixed_speed_x100);
+    ESP_LOGI(TAG, "Settings saved: song_id=%u flags=0x%02X", song_id, flags);
+
+    /* Close dialog */
+    lv_obj_delete(s_settings_overlay);
+    s_settings_overlay = NULL;
+    s_settings_song_id = 0;
+    s_cb_loop          = NULL;
+    s_cb_fixed_speed   = NULL;
+}
+
+static void create_settings_dialog(uint16_t song_id)
+{
+    /* Only one dialog at a time */
+    if (s_settings_overlay) {
+        lv_obj_delete(s_settings_overlay);
+        s_settings_overlay = NULL;
+    }
+
+    /* Find song name */
+    const char *song_name = "";
+    for (uint8_t i = 0; i < s_song_count; i++) {
+        if (s_songs[i].id == song_id) { song_name = s_songs[i].name; break; }
+    }
+
+    /* Request fresh settings from player (response updates the cache) */
+    uart_comm_send_song_settings_req(song_id);
+
+    /* Determine current values from cache (defaults until response arrives) */
+    uint8_t cache_idx = (uint8_t)(song_id - 1);
+    bool    cached_loop  = false;
+    bool    cached_speed = false;
+    if (cache_idx < SONGLIST_MAX_SONGS && s_settings[cache_idx].valid) {
+        cached_loop  = (s_settings[cache_idx].flags & 0x01u) != 0;
+        cached_speed = (s_settings[cache_idx].flags & 0x02u) != 0;
+    }
+
+    s_settings_song_id = song_id;
+
+    /* ── Backdrop ─────────────────────────────────────────────────── */
+    s_settings_overlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(s_settings_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_settings_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_settings_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_settings_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_settings_overlay, 0, 0);
+    lv_obj_clear_flag(s_settings_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    /* Tap on backdrop = cancel */
+    lv_obj_add_event_cb(s_settings_overlay, on_settings_cancel, LV_EVENT_CLICKED, NULL);
+
+    /* ── Dialog box ───────────────────────────────────────────────── */
+    lv_obj_t *box = lv_obj_create(s_settings_overlay);
+    lv_obj_set_size(box, 500, 320);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 14, 0);
+    lv_obj_set_style_pad_all(box, 24, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    /* Swallow clicks so they don\'t reach the backdrop */
+    lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
+
+    /* ── Title ────────────────────────────────────────────────────── */
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text_fmt(title, LV_SYMBOL_SETTINGS "  %s", song_name);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x1E88E5), 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(title, 452);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+    /* ── Divider ──────────────────────────────────────────────────── */
+    lv_obj_t *line = lv_obj_create(box);
+    lv_obj_set_size(line, 452, 2);
+    lv_obj_set_style_bg_color(line, lv_color_hex(0x2A3A5A), 0);
+    lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(line, 0, 0);
+    lv_obj_set_style_radius(line, 0, 0);
+    lv_obj_align(line, LV_ALIGN_TOP_MID, 0, 42);
+
+    /* ── Checkbox: Loop ───────────────────────────────────────────── */
+    s_cb_loop = lv_checkbox_create(box);
+    lv_checkbox_set_text(s_cb_loop, "Loop  (restart automatically when song ends)");
+    if (cached_loop) lv_obj_add_state(s_cb_loop, LV_STATE_CHECKED);
+    lv_obj_set_style_text_font(s_cb_loop, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_cb_loop, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_align(s_cb_loop, LV_ALIGN_TOP_LEFT, 0, 60);
+
+    /* ── Checkbox: Fixed speed ────────────────────────────────────── */
+    s_cb_fixed_speed = lv_checkbox_create(box);
+    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed (1.0×, ignore crank)");
+    if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+    lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 116);
+
+    /* ── Buttons row ──────────────────────────────────────────────── */
+    /* Cancel */
+    lv_obj_t *btn_cancel = lv_obj_create(box);
+    lv_obj_set_size(btn_cancel, 180, 56);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_hex(0x2A2A3E), 0);
+    lv_obj_set_style_bg_opa(btn_cancel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(btn_cancel, lv_color_hex(0x505060), 0);
+    lv_obj_set_style_border_width(btn_cancel, 1, 0);
+    lv_obj_set_style_radius(btn_cancel, 8, 0);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_hex(0x1A1A2E), LV_STATE_PRESSED);
+    lv_obj_clear_flag(btn_cancel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(btn_cancel, on_settings_cancel, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "Cancel");
+    lv_obj_set_style_text_font(lbl_cancel, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_cancel, lv_color_hex(0xA0A0C0), 0);
+    lv_obj_center(lbl_cancel);
+
+    /* OK */
+    lv_obj_t *btn_ok = lv_obj_create(box);
+    lv_obj_set_size(btn_ok, 180, 56);
+    lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(btn_ok, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_bg_opa(btn_ok, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(btn_ok, 0, 0);
+    lv_obj_set_style_radius(btn_ok, 8, 0);
+    lv_obj_set_style_bg_color(btn_ok, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
+    lv_obj_clear_flag(btn_ok, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(btn_ok, on_settings_ok, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, "OK");
+    lv_obj_set_style_text_font(lbl_ok, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_ok, lv_color_white(), 0);
+    lv_obj_center(lbl_ok);
+}
 
 static void send_play_song(uint16_t song_id)
 {
@@ -339,25 +558,7 @@ static void send_play_song(uint16_t song_id)
         ESP_LOGI(TAG, "WiFi auto-disabled on song selection");
     }
 
-    uint8_t payload[2];
-    payload[0] = (uint8_t)(song_id & 0xFF);
-    payload[1] = (uint8_t)(song_id >> 8);
-
-    uint8_t checksum = CMD_PLAY_SONG ^ (uint8_t)sizeof(payload);
-    for (int i = 0; i < (int)sizeof(payload); i++) {
-        checksum ^= payload[i];
-    }
-
-    /* [MAGIC 8B][CMD 1B][LEN 1B][PAYLOAD 2B][CHECKSUM 1B] = 13 bytes */
-    uint8_t pkt[13];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_PLAY_SONG;
-    pkt[9]  = (uint8_t)sizeof(payload);
-    memcpy(&pkt[10], payload, sizeof(payload));
-    pkt[12] = checksum;
-
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_PLAY_SONG sent: song_id=%u", song_id);
+    uart_comm_send_play_song(song_id);
 }
 
 /* =========================================================================
@@ -397,6 +598,10 @@ static void async_cb_update_list(void *user_data)
     }
 
     ESP_LOGI(TAG, "Song list updated: %u songs", s_song_count);
+    /* Invalidate the settings cache whenever the song list changes */
+    for (int i = 0; i < SONGLIST_MAX_SONGS; i++) {
+        s_settings[i].valid = false;
+    }
     rebuild_list();
 
     free(p->data);
@@ -497,5 +702,54 @@ void ui_songlist_show_async(void)
 {
     lv_lock();
     lv_async_call(async_cb_show_songlist, NULL);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * Song-settings async delivery (UART task → LVGL task)
+ * ========================================================================= */
+
+static void async_cb_song_settings(void *user_data)
+{
+    async_song_settings_t *p = (async_song_settings_t *)user_data;
+
+    /* Update the cache */
+    uint8_t idx = (uint8_t)(p->song_id - 1);
+    if (p->song_id > 0 && idx < SONGLIST_MAX_SONGS) {
+        s_settings[idx].flags            = p->flags;
+        s_settings[idx].fixed_speed_x100 = p->fixed_speed_x100;
+        s_settings[idx].valid            = true;
+    }
+
+    /* If the dialog for this song is currently open, refresh the checkboxes */
+    if (s_settings_overlay && s_settings_song_id == p->song_id) {
+        if (s_cb_loop) {
+            if (p->flags & 0x01u) lv_obj_add_state(s_cb_loop, LV_STATE_CHECKED);
+            else                  lv_obj_clear_state(s_cb_loop, LV_STATE_CHECKED);
+        }
+        if (s_cb_fixed_speed) {
+            if (p->flags & 0x02u) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+            else                  lv_obj_clear_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+        }
+    }
+
+    free(p);
+}
+
+void ui_songlist_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fixed_speed_x100)
+{
+    if (!s_screen) return;
+
+    async_song_settings_t *p = malloc(sizeof(async_song_settings_t));
+    if (!p) {
+        ESP_LOGE(TAG, "OOM in song_settings_async");
+        return;
+    }
+    p->song_id          = song_id;
+    p->flags            = flags;
+    p->fixed_speed_x100 = fixed_speed_x100;
+
+    lv_lock();
+    lv_async_call(async_cb_song_settings, p);
     lv_unlock();
 }

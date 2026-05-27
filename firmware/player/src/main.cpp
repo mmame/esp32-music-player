@@ -9,7 +9,7 @@
  *   Core 1 (audio_task, high priority) - pipeline management, event loop, command dispatch
  *   Core 0 (io_task, med priority)     - UART callbacks, encoder, potentiometers, status TX
  *
- * SD card: SPI mode, mounted at /sdcard via esp_vfs_fat_sdspi_mount().
+ * SD card: 1-bit SDMMC, mounted at /sdcard via esp_vfs_fat_sdmmc_mount().
  * UART:    921600 baud on UART1, framed protocol (see uart_master.h).
  *
  * When HAVE_ADF is NOT defined (CMake build without ADF_PATH set), a minimal
@@ -30,7 +30,6 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
@@ -42,6 +41,8 @@
 #include "potis.h"
 #include "uart_master.h"
 #include "web_server.h"
+#include "song_settings.h"
+#include "cJSON.h"
 
 /* ESP-ADF headers (only when ADF_PATH is set in CMakeLists) */
 #ifdef HAVE_ADF
@@ -87,6 +88,11 @@ static float    g_speed        = 1.0f;
 static volatile bool g_bypass_active = false;  /* true = SoundTouch bypassed, audio at 1.0x */
 static volatile bool g_tempo_locked  = false;  /* true = poti changes are ignored for speed  */
 static volatile uint8_t g_locked_tempo_raw = 50; /* poti-scale 0–100 value when locked         */
+
+/* Per-song settings loaded from an optional JSON sidecar (e.g. foo.json for foo.wav) */
+static volatile bool  g_song_loop           = false; /* true: restart on end instead of stop */
+static volatile bool  g_song_fixed_speed_en = false; /* true: ignore crank, use fixed speed  */
+static volatile float g_song_fixed_speed    = 1.0f;  /* speed multiplier when above is true  */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -170,37 +176,42 @@ static bool read_wav_info(const char *path,
 
 static void mount_sd(void)
 {
+    /* DAT3 (GPIO 21) is held HIGH by the 10 kΩ board pull-up, keeping the
+     * card in native SD mode from power-on.  No explicit GPIO drive needed.
+     *
+     * Map the original SPI lines to the SDMMC peripheral:
+     *   PIN_SPI_SCK  (GPIO 48) -> CLK
+     *   PIN_SPI_MOSI (GPIO 38) -> CMD  (bidirectional command/response)
+     *   PIN_SPI_MISO (GPIO 47) -> D0   (bidirectional data)             */
+    sdmmc_slot_config_t slot_cfg = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_cfg.clk   = (gpio_num_t)PIN_SPI_SCK;
+    slot_cfg.cmd   = (gpio_num_t)PIN_SPI_MOSI;
+    slot_cfg.d0    = (gpio_num_t)PIN_SPI_MISO;
+    slot_cfg.width = 1; /* 1-bit mode: only CLK + CMD + D0 used */
+    /* External 10 kΩ pull-ups are present on the board – no internal pull-ups needed. */
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    /* 1-bit mode at 40 MHz high-speed.  External 10 kΩ pull-ups ensure
+     * clean signal edges at this frequency.                              */
+    /* Keep DEINIT_ARG so the per-slot deinit path is used on mount failure. */
+    host.flags        = SDMMC_HOST_FLAG_1BIT | SDMMC_HOST_FLAG_DEINIT_ARG;
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED; /* 40 MHz */
+
     esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
         .format_if_mount_failed = false,
         .max_files              = 5,
         .allocation_unit_size   = 16 * 1024,
     };
 
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num     = PIN_SPI_MOSI,
-        .miso_io_num     = PIN_SPI_MISO,
-        .sclk_io_num     = PIN_SPI_SCK,
-        .quadwp_io_num   = -1,
-        .quadhd_io_num   = -1,
-        .max_transfer_sz = 4096,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
-
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-
-    sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_cfg.gpio_cs = (gpio_num_t)PIN_SD_CS;
-    slot_cfg.host_id = SPI2_HOST;
-
     while (true) {
-        esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_cfg,
-                                                 &mount_cfg, &s_sdcard);
+        esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_cfg,
+                                                &mount_cfg, &s_sdcard);
         if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "SD card mounted at " MOUNT_POINT);
+            ESP_LOGI(TAG, "SD card mounted at " MOUNT_POINT " (1-bit SDMMC)");
             sdmmc_card_print_info(stdout, s_sdcard);
             return;
         }
-        ESP_LOGE(TAG, "SD mount failed (%s) – retrying in 1 s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "SDMMC mount failed (%s) – retrying in 1 s", esp_err_to_name(ret));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -318,6 +329,13 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     char path[8 + UM_MAX_SONG_NAME + 5];
     snprintf(path, sizeof(path), "%s/%s.wav", MOUNT_POINT, g_song_names[idx]);
 
+    /* Load optional per-song JSON settings before touching the pipeline. */
+    song_settings_t settings;
+    song_settings_load(path, &settings);
+    g_song_loop           = settings.loop;
+    g_song_fixed_speed_en = (settings.fixed_speed > 0.0f);
+    g_song_fixed_speed    = (settings.fixed_speed > 0.0f) ? settings.fixed_speed : 1.0f;
+
     uint32_t data_bytes = 0, sr = 44100;
     uint8_t  ch = 2, bps = 2;
     if (!read_wav_info(path, &data_bytes, &sr, &ch, &bps)) {
@@ -375,6 +393,10 @@ static void do_stop(void)
     g_current_song = -1;
     g_audio_pos_s  = 0.0f;
     xSemaphoreGive(s_state_mutex);
+    /* Clear per-song settings so they don't affect the idle/next-song state. */
+    g_song_loop           = false;
+    g_song_fixed_speed_en = false;
+    g_song_fixed_speed    = 1.0f;
     ESP_LOGI(TAG, "Stopped");
 }
 
@@ -539,7 +561,7 @@ static void create_pipeline(void)
     configASSERT(g_sonic_el);
 
     alc_volume_setup_cfg_t alc_cfg = DEFAULT_ALC_VOLUME_SETUP_CONFIG();
-    alc_cfg.channel     = 2;
+    alc_cfg.channel     = 1;   /* all uploaded files are 1ch mono */
     alc_cfg.volume      = 0;
     alc_cfg.out_rb_size = 64 * 1024; /* 64 KB PSRAM (default 8 KB) */
     g_alc_el = alc_volume_setup_init(&alc_cfg);
@@ -551,7 +573,14 @@ static void create_pipeline(void)
     i2s_cfg.std_cfg.gpio_cfg.ws   = (gpio_num_t)MY_I2S_WS;
     i2s_cfg.std_cfg.gpio_cfg.dout = (gpio_num_t)MY_I2S_DATA;
     i2s_cfg.std_cfg.gpio_cfg.din  = (gpio_num_t)I2S_GPIO_UNUSED;
-    i2s_cfg.std_cfg.gpio_cfg.mclk = (gpio_num_t)I2S_GPIO_UNUSED;
+    i2s_cfg.std_cfg.gpio_cfg.mclk = (gpio_num_t)MY_I2S_SCK;
+    /* All uploaded files are normalised to 16-bit / 48 kHz / 1ch mono by the
+     * browser before upload.  I2S is configured for mono-on-both-slots so the
+     * DAC receives the same sample on both L and R wires ("2CH Mono" I2S). */
+    i2s_cfg.std_cfg.clk_cfg.sample_rate_hz  = 48000;
+    i2s_cfg.std_cfg.slot_cfg.data_bit_width  = I2S_DATA_BIT_WIDTH_16BIT;
+    i2s_cfg.std_cfg.slot_cfg.slot_mode       = I2S_SLOT_MODE_MONO;
+    i2s_cfg.std_cfg.slot_cfg.slot_mask       = I2S_STD_SLOT_BOTH;
     /* Larger buffers reduce underrun risk.  buffer_len must be a multiple of 12
      * (I2S_BUFFER_ALINED_BYTES_SIZE).  DMA buffers live in internal RAM;
      * out_rb_size goes to PSRAM via audio_mem_calloc. */
@@ -676,11 +705,25 @@ static void audio_task(void *arg)
                  * RUNNING.  Stop + reset it now so the next audio_pipeline_run()
                  * call succeeds instead of printing "Pipeline already started". */
                 pipeline_stop_and_reset();
-                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                g_is_playing  = false;
-                g_is_paused   = false;
-                g_audio_pos_s = 0.0f;
-                xSemaphoreGive(s_state_mutex);
+
+                if (g_song_loop && g_current_song >= 0) {
+                    /* Loop: reload song at position 0 then resume immediately. */
+                    uint16_t loop_idx = (uint16_t)g_current_song;
+                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                    g_is_playing  = false;
+                    g_is_paused   = false;
+                    g_audio_pos_s = 0.0f;
+                    xSemaphoreGive(s_state_mutex);
+                    ESP_LOGI(TAG, "Loop: restarting song %u", loop_idx);
+                    play_song_idx(loop_idx, false); /* load at pos 0, pipeline not started */
+                    do_resume();                    /* start immediately                   */
+                } else {
+                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                    g_is_playing  = false;
+                    g_is_paused   = false;
+                    g_audio_pos_s = 0.0f;
+                    xSemaphoreGive(s_state_mutex);
+                }
             }
         }
     }
@@ -736,6 +779,95 @@ static void on_seek(uint8_t pct)
 }
 
 /* ======================================================================
+ * Song-settings UART callbacks (Core 0, uart_master rx_task)
+ * ====================================================================== */
+
+/**
+ * Called when the display requests the current settings for a song.
+ * Reads the JSON sidecar (if it exists) and sends a CMD_SONG_SETTINGS reply.
+ * Runs on the UART rx_task (Core 0); SD card access is safe from there.
+ */
+static void on_song_settings_req(uint16_t song_id)
+{
+    if (song_id == 0 || song_id > g_song_count) {
+        ESP_LOGW("main", "song_settings_req: id %u out of range", song_id);
+        return;
+    }
+
+    char path[8 + UM_MAX_SONG_NAME + 5];
+    snprintf(path, sizeof(path), "%s/%s.wav", MOUNT_POINT, g_song_names[song_id - 1]);
+
+    song_settings_t s;
+    song_settings_load(path, &s);
+
+    uint8_t flags = 0;
+    if (s.loop)            flags |= 0x01u;
+    if (s.fixed_speed > 0.0f) flags |= 0x02u;
+    uint8_t spd_x100 = (s.fixed_speed > 0.0f)
+                       ? (uint8_t)(s.fixed_speed * 100.0f + 0.5f) : 100u;
+
+    uart_master_send_song_settings(song_id, flags, spd_x100);
+}
+
+/**
+ * Called when the display sends new settings for a song.
+ * Writes (or deletes) the JSON sidecar on the SD card.
+ * Runs on the UART rx_task (Core 0).
+ */
+static void on_set_song_settings(uint16_t song_id,
+                                 uint8_t  flags,
+                                 uint8_t  fixed_speed_x100)
+{
+    if (song_id == 0 || song_id > g_song_count) {
+        ESP_LOGW("main", "set_song_settings: id %u out of range", song_id);
+        return;
+    }
+
+    /* Build paths */
+    char wav_path[8 + UM_MAX_SONG_NAME + 5];
+    snprintf(wav_path, sizeof(wav_path), "%s/%s.wav", MOUNT_POINT, g_song_names[song_id - 1]);
+
+    size_t wav_len = strlen(wav_path);
+    char   json_path[8 + UM_MAX_SONG_NAME + 7];
+    memcpy(json_path, wav_path, wav_len - 4);
+    memcpy(json_path + wav_len - 4, ".json", 6);
+
+    /* If all settings are default: remove the sidecar file */
+    if (flags == 0) {
+        remove(json_path); /* ignore error if file did not exist */
+        ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
+        return;
+    }
+
+    bool  loop      = (flags & 0x01u) != 0;
+    bool  fixed_en  = (flags & 0x02u) != 0;
+    float spd       = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) { ESP_LOGE("main", "OOM creating JSON for song %u", song_id); return; }
+
+    cJSON_AddBoolToObject(root, "loop", loop);
+    if (fixed_en) {
+        cJSON_AddNumberToObject(root, "fixed_speed", (double)spd);
+    }
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!json_str) { ESP_LOGE("main", "OOM printing JSON for song %u", song_id); return; }
+
+    FILE *f = fopen(json_path, "w");
+    if (f) {
+        fputs(json_str, f);
+        fclose(f);
+        ESP_LOGI("main", "Saved settings for song %u: %s", song_id, json_str);
+    } else {
+        ESP_LOGE("main", "Cannot write %s", json_path);
+    }
+    cJSON_free(json_str);
+}
+
+/* ======================================================================
  * IO task (Core 0)
  * ====================================================================== */
 
@@ -767,6 +899,7 @@ static void io_task(void *arg)
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(10));
+        TickType_t now = xTaskGetTickCount();
 
         /* Volume potentiometer (tempo poti removed from speed control) */
         {
@@ -786,9 +919,10 @@ static void io_task(void *arg)
 
         /* ── Organ encoder 2: speed + auto-pause/resume ─────────────────── */
         {
-            static bool    s_enc2_was_moving = false;
-            static bool    s_enc2_pause_sent = false;
-            static uint8_t s_last_tempo_sent = 255; /* 255 = force first send */
+            static bool       s_enc2_was_moving  = false;
+            static bool       s_enc2_pause_sent  = false;
+            static uint8_t    s_last_tempo_sent  = 255; /* 255 = force first send */
+            static TickType_t s_last_tempo_tick  = 0;
 
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
@@ -817,14 +951,18 @@ static void io_task(void *arg)
             /* Push speed to display whenever it changes by ≥1 unit (0–100).
              * send_state() covers playback; send_poti_update() ensures the
              * display's speed bar stays current at all times. */
-            float disp_speed = g_tempo_locked
-                ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
-                : speed_target;
+            float disp_speed = g_song_fixed_speed_en
+                ? g_song_fixed_speed
+                : (g_tempo_locked
+                    ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
+                    : speed_target);
             uint8_t tb = (uint8_t)(((disp_speed - SPEED_MIN) /
                           (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
             if (tb > 100) tb = 100;
-            if (tb != s_last_tempo_sent) {
+            if (tb != s_last_tempo_sent &&
+                (now - s_last_tempo_tick) >= pdMS_TO_TICKS(100)) {
                 s_last_tempo_sent = tb;
+                s_last_tempo_tick = now;
                 uart_master_send_poti_update(vol, tb, 0,
                                              (uint8_t)(SPEED_MIN * 10.0f),
                                              (uint8_t)(SPEED_MAX * 10.0f));
@@ -835,9 +973,11 @@ static void io_task(void *arg)
         /* Apply updated speed target to SoundTouch every tick.
          * When speed is locked the locked value always wins over encoder2. */
         {
-            speed_applied = g_tempo_locked
-                ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
-                : speed_target;
+            speed_applied = g_song_fixed_speed_en
+                ? g_song_fixed_speed
+                : (g_tempo_locked
+                    ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
+                    : speed_target);
             xSemaphoreTake(s_state_mutex, portMAX_DELAY);
             apply_speed_locked(speed_applied);
             xSemaphoreGive(s_state_mutex);
@@ -882,7 +1022,7 @@ static void io_task(void *arg)
         }
 
         /* State update every 100 ms */
-        TickType_t now = xTaskGetTickCount();
+        now = xTaskGetTickCount();
         if ((now - last_state_tick) >= pdMS_TO_TICKS(100)) {
             last_state_tick = now;
 
@@ -951,21 +1091,6 @@ extern "C" void app_main(void)
         ESP_ERROR_CHECK(isr_ret);
     }
 
-    /* Drive MY_I2S_SCK (GPIO 11) permanently LOW so the external DAC
-     * uses its own internal master clock instead of receiving one from
-     * the ESP32.  Must be done before the I2S driver claims the pin. */
-    {
-        gpio_config_t sck_cfg = {};
-        sck_cfg.pin_bit_mask = (1ULL << MY_I2S_SCK);
-        sck_cfg.mode         = GPIO_MODE_OUTPUT;
-        sck_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
-        sck_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        sck_cfg.intr_type    = GPIO_INTR_DISABLE;
-        ESP_ERROR_CHECK(gpio_config(&sck_cfg));
-        gpio_set_level((gpio_num_t)MY_I2S_SCK, 0);
-        ESP_LOGI(TAG, "MY_I2S_SCK (GPIO %d) driven LOW – DAC uses internal clock", MY_I2S_SCK);
-    }
-
     s_state_mutex = xSemaphoreCreateMutex();
     configASSERT(s_state_mutex);
 
@@ -987,6 +1112,8 @@ extern "C" void app_main(void)
     uart_master_set_st_bypass_callback(on_st_bypass);
     uart_master_set_tempo_lock_callback(on_tempo_lock);
     uart_master_set_wifi_ctrl_callback(on_wifi_ctrl);
+    uart_master_set_song_settings_req_callback(on_song_settings_req);
+    uart_master_set_set_song_settings_callback(on_set_song_settings);
 
     uart_master_send_song_list(g_song_names, g_song_count);
     uart_master_sync(500);

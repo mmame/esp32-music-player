@@ -1,0 +1,4 @@
+## IDF Component Manager manifest for the main (src/) component.
+## Declares managed-component dependencies that are not provided by ESP-ADF.
+dependencies:
+  espressif/zlib: ">=1.3.1"

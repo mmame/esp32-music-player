@@ -10,9 +10,13 @@
  * CMD_SET_STATE (0x01) payload layout:
  *   [is_playing:u8][volume:u8][tempo:u8][song_name:char[0..MAX_SONG_NAME_LEN-1]]
  *
- * CMD_SYNC (0x02) has no payload (LEN = 0).  The display responds with:
- *   CMD_ACK (0xFF) payload layout:
- *   [touch_active:u8][touch_x:i16_le][touch_y:i16_le]  (5 bytes total)
+ * CMD_SYNC (0x02) has no payload (LEN = 0).  Both CMD_SYNC and CMD_SET_STATE
+ * elicit a CMD_ACK (0xFF) response from the display.  Extended ACK payload:
+ *   [touch_active:u8][touch_x:i16_le][touch_y:i16_le][cmd_count:u8]
+ *   Followed by cmd_count sub-commands, each: [cmd_id:u8][param_len:u8][params:...]
+ *
+ * The display NEVER sends unsolicited packets.  All Display->Host commands
+ * are queued via enqueue_pending_cmd() and flushed in the next ACK response.
  */
 
 #include "freertos/FreeRTOS.h"
@@ -65,6 +69,29 @@ static volatile bool    s_touch_active = false;
 static volatile int16_t s_touch_x      = 0;
 static volatile int16_t s_touch_y      = 0;
 
+/* ---------- Pending command queue ---------------------------------------- */
+
+/**
+ * All Display->Host commands are queued here instead of being sent
+ * immediately.  They are flushed in send_response(), which is called
+ * whenever CMD_SET_STATE or CMD_SYNC is received from the player.
+ *
+ * Access to the queue is protected by a spinlock so it can be safely
+ * written from the LVGL task (Core 1) and read from the UART task (Core 0).
+ */
+#define PENDING_QUEUE_SLOTS    8   /* max simultaneous queued commands  */
+#define PENDING_CMD_MAX_PARAMS 4   /* max param bytes per command        */
+
+typedef struct {
+    uint8_t cmd_id;
+    uint8_t param_len;
+    uint8_t params[PENDING_CMD_MAX_PARAMS];
+} pending_cmd_t;
+
+static pending_cmd_t s_pending_queue[PENDING_QUEUE_SLOTS];
+static uint8_t       s_pending_count = 0;
+static portMUX_TYPE  s_queue_mux     = portMUX_INITIALIZER_UNLOCKED;
+
 /* ---------- Parser state machine ----------------------------------------- */
 
 typedef enum {
@@ -78,60 +105,91 @@ typedef enum {
 /* ---------- Forward declarations ----------------------------------------- */
 static void uart_task(void *arg);
 static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len);
-static void send_ack(void);
+static void enqueue_pending_cmd(uint8_t cmd_id, const uint8_t *params, uint8_t param_len);
+static void send_response(void);
 
 /* =========================================================================
  * Public API
  * ========================================================================= */
 
+void uart_comm_send_play_song(uint16_t song_id)
+{
+    uint8_t params[2];
+    params[0] = (uint8_t)(song_id & 0xFF);
+    params[1] = (uint8_t)(song_id >> 8);
+    enqueue_pending_cmd(CMD_PLAY_SONG, params, 2);
+    ESP_LOGI(TAG, "CMD_PLAY_SONG queued: song_id=%u", song_id);
+}
+
+void uart_comm_send_stop(void)
+{
+    enqueue_pending_cmd(CMD_STOP_SONG, NULL, 0);
+    ESP_LOGI(TAG, "CMD_STOP_SONG queued");
+}
+
+void uart_comm_send_pause(void)
+{
+    enqueue_pending_cmd(CMD_PAUSE, NULL, 0);
+    ESP_LOGI(TAG, "CMD_PAUSE queued");
+}
+
+void uart_comm_send_resume(void)
+{
+    enqueue_pending_cmd(CMD_RESUME, NULL, 0);
+    ESP_LOGI(TAG, "CMD_RESUME queued");
+}
+
+void uart_comm_send_seek(uint8_t pct)
+{
+    enqueue_pending_cmd(CMD_SEEK, &pct, 1);
+    ESP_LOGI(TAG, "CMD_SEEK queued: pct=%u", pct);
+}
+
 void uart_comm_send_st_bypass(bool bypass)
 {
-    /* Packet: [MAGIC 8B][CMD 1B][LEN=1 1B][PAYLOAD 1B][CHECKSUM 1B] = 12 bytes */
-    uint8_t val      = bypass ? 0x01u : 0x00u;
-    uint8_t checksum = CMD_ST_BYPASS ^ 0x01u ^ val;
-
-    uint8_t pkt[12];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_ST_BYPASS;
-    pkt[9]  = 0x01;
-    pkt[10] = val;
-    pkt[11] = checksum;
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_ST_BYPASS sent: %s", bypass ? "ON" : "OFF");
+    uint8_t val = bypass ? 0x01u : 0x00u;
+    enqueue_pending_cmd(CMD_ST_BYPASS, &val, 1);
+    ESP_LOGI(TAG, "CMD_ST_BYPASS queued: %s", bypass ? "ON" : "OFF");
 }
 
 void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo)
 {
-    /* Packet: [MAGIC 8B][CMD 1B][LEN=2 1B][lock_en 1B][tempo 1B][CHECKSUM 1B] = 13 bytes */
-    uint8_t enable   = lock ? 0x01u : 0x00u;
-    uint8_t checksum = CMD_TEMPO_LOCK ^ 0x02u ^ enable ^ locked_tempo;
-
-    uint8_t pkt[13];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_TEMPO_LOCK;
-    pkt[9]  = 0x02;
-    pkt[10] = enable;
-    pkt[11] = locked_tempo;
-    pkt[12] = checksum;
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_TEMPO_LOCK sent: %s tempo=%u",
+    uint8_t params[2];
+    params[0] = lock ? 0x01u : 0x00u;
+    params[1] = locked_tempo;
+    enqueue_pending_cmd(CMD_TEMPO_LOCK, params, 2);
+    ESP_LOGI(TAG, "CMD_TEMPO_LOCK queued: %s tempo=%u",
              lock ? "LOCK" : "UNLOCK", (unsigned)locked_tempo);
 }
 
 void uart_comm_send_wifi_ctrl(bool enable)
 {
-    /* Packet: [MAGIC 8B][CMD 1B][LEN=1 1B][enable 1B][CHECKSUM 1B] = 12 bytes */
-    uint8_t val      = enable ? 0x01u : 0x00u;
-    uint8_t checksum = CMD_WIFI_CTRL ^ 0x01u ^ val;
+    uint8_t val = enable ? 0x01u : 0x00u;
+    enqueue_pending_cmd(CMD_WIFI_CTRL, &val, 1);
+    ESP_LOGI(TAG, "CMD_WIFI_CTRL queued: %s", enable ? "ENABLE" : "DISABLE");
+}
 
-    uint8_t pkt[12];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_WIFI_CTRL;
-    pkt[9]  = 0x01;
-    pkt[10] = val;
-    pkt[11] = checksum;
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_WIFI_CTRL sent: %s", enable ? "ENABLE" : "DISABLE");
+void uart_comm_send_song_settings_req(uint16_t song_id)
+{
+    uint8_t params[2];
+    params[0] = (uint8_t)(song_id & 0xFF);
+    params[1] = (uint8_t)(song_id >> 8);
+    enqueue_pending_cmd(CMD_SONG_SETTINGS_REQ, params, 2);
+    ESP_LOGI(TAG, "CMD_SONG_SETTINGS_REQ queued: song_id=%u", song_id);
+}
+
+void uart_comm_send_set_song_settings(uint16_t song_id,
+                                      uint8_t  flags,
+                                      uint8_t  fixed_speed_x100)
+{
+    uint8_t params[4];
+    params[0] = (uint8_t)(song_id & 0xFF);
+    params[1] = (uint8_t)(song_id >> 8);
+    params[2] = flags;
+    params[3] = fixed_speed_x100;
+    enqueue_pending_cmd(CMD_SET_SONG_SETTINGS, params, 4);
+    ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS queued: id=%u flags=0x%02X spd=%u",
+             song_id, flags, fixed_speed_x100);
 }
 
 void uart_comm_init(void)
@@ -169,15 +227,11 @@ void uart_comm_init(void)
         NULL, 0);
     configASSERT(ret == pdPASS);
 
-    /* Notify the host that the display has just (re)started and needs
-     * a fresh song list.  Packet: [MAGIC 8B][CMD 1B][LEN=0 1B][CHKSUM 1B] */
-    uint8_t ready_pkt[11];
-    memcpy(&ready_pkt[0], UART_MAGIC_BYTES, 8);
-    ready_pkt[8]  = CMD_DISPLAY_READY;
-    ready_pkt[9]  = 0x00;
-    ready_pkt[10] = CMD_DISPLAY_READY;   /* checksum = CMD ^ 0x00 */
-    uart_write_bytes(UART_COMM_PORT, ready_pkt, sizeof(ready_pkt));
-    ESP_LOGI(TAG, "CMD_DISPLAY_READY sent");
+    /* Queue CMD_DISPLAY_READY so the player knows the display has (re)started
+     * and should resend the song list.  It will be delivered in the first
+     * CMD_ACK response (to CMD_SYNC or CMD_SET_STATE). */
+    enqueue_pending_cmd(CMD_DISPLAY_READY, NULL, 0);
+    ESP_LOGI(TAG, "CMD_DISPLAY_READY queued");
 }
 
 void uart_comm_update_touch(bool active, int16_t x, int16_t y)
@@ -357,13 +411,16 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         if (new_is_playing) {
             ui_player_update_progress_async(position_pct, duration_s);
         }
+
+        /* Send poll response – flushes any queued Display->Host commands */
+        send_response();
         break;
     }
 
     /* ------------------------------------------------------------------ */
     case CMD_SYNC:
-        ESP_LOGD(TAG, "CMD_SYNC received – sending ACK");
-        send_ack();
+        ESP_LOGD(TAG, "CMD_SYNC received – sending response");
+        send_response();
         break;
 
     /* ------------------------------------------------------------------ */
@@ -460,6 +517,27 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         break;
 
     /* ------------------------------------------------------------------ */
+    case CMD_SONG_SETTINGS: {
+        /*
+         * Payload layout (4 bytes):
+         *   [0..1]  song_id          : uint16_t  (LE)
+         *   [2]     flags            : uint8_t   (bit 0 = loop, bit 1 = fixed_speed_en)
+         *   [3]     fixed_speed_x100 : uint8_t   (speed × 100, e.g. 100 = 1.0×)
+         */
+        if (len < 4) {
+            ESP_LOGW(TAG, "CMD_SONG_SETTINGS: payload too short (%u)", len);
+            break;
+        }
+        uint16_t song_id          = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+        uint8_t  flags            = payload[2];
+        uint8_t  fixed_speed_x100 = payload[3];
+        ESP_LOGI(TAG, "CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u",
+                 song_id, flags, fixed_speed_x100);
+        ui_songlist_song_settings_async(song_id, flags, fixed_speed_x100);
+        break;
+    }
+
+    /* ------------------------------------------------------------------ */
     default:
         ESP_LOGW(TAG, "Unknown command 0x%02X (len=%u) – ignored", cmd, len);
         break;
@@ -467,52 +545,119 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
 }
 
 /* =========================================================================
- * ACK sender
+ * Pending command queue helper
  * ========================================================================= */
 
-static void send_ack(void)
+/**
+ * Atomically push one command onto the pending queue.
+ * Safe to call from any task or interrupt context.
+ * If the queue is full the command is silently dropped.
+ */
+static void enqueue_pending_cmd(uint8_t cmd_id, const uint8_t *params, uint8_t param_len)
 {
-    /* Snapshot touch state under spinlock */
+    if (param_len > PENDING_CMD_MAX_PARAMS) param_len = PENDING_CMD_MAX_PARAMS;
+    bool dropped = false;
+    taskENTER_CRITICAL(&s_queue_mux);
+    if (s_pending_count < PENDING_QUEUE_SLOTS) {
+        pending_cmd_t *slot = &s_pending_queue[s_pending_count++];
+        slot->cmd_id    = cmd_id;
+        slot->param_len = param_len;
+        if (param_len > 0 && params != NULL) {
+            memcpy(slot->params, params, param_len);
+        }
+    } else {
+        dropped = true;
+    }
+    taskEXIT_CRITICAL(&s_queue_mux);
+    if (dropped) {
+        ESP_LOGW(TAG, "Pending queue full – cmd 0x%02X dropped", cmd_id);
+    }
+}
+
+/* =========================================================================
+ * Response sender (CMD_ACK with queued sub-commands)
+ * ========================================================================= */
+
+/**
+ * Build and transmit a CMD_ACK (0xFF) packet carrying the current touch state
+ * and any queued Display->Host commands.  Called from handle_packet() on
+ * CMD_SET_STATE and CMD_SYNC receipt; never called from any other context.
+ *
+ * Extended payload layout:
+ *   [0]     touch_active : uint8_t
+ *   [1..2]  touch_x      : int16_t  LE
+ *   [3..4]  touch_y      : int16_t  LE
+ *   [5]     cmd_count    : uint8_t
+ *   For each sub-command:
+ *     [n]   cmd_id       : uint8_t
+ *     [n+1] param_len    : uint8_t
+ *     [n+2..n+1+param_len] params
+ */
+static void send_response(void)
+{
+    /* Snapshot touch state */
     bool    touch_active;
     int16_t touch_x, touch_y;
-
     taskENTER_CRITICAL(&s_touch_mux);
     touch_active = s_touch_active;
     touch_x      = s_touch_x;
     touch_y      = s_touch_y;
     taskEXIT_CRITICAL(&s_touch_mux);
 
-    /*
-     * ACK payload (5 bytes):
-     *   [0]     touch_active : uint8_t
-     *   [1..2]  touch_x      : int16_t  little-endian
-     *   [3..4]  touch_y      : int16_t  little-endian
-     */
-    uint8_t ack_payload[5];
-    ack_payload[0] = touch_active ? 1u : 0u;
-    ack_payload[1] = (uint8_t)( touch_x        & 0xFF);
-    ack_payload[2] = (uint8_t)((touch_x >> 8)  & 0xFF);
-    ack_payload[3] = (uint8_t)( touch_y        & 0xFF);
-    ack_payload[4] = (uint8_t)((touch_y >> 8)  & 0xFF);
+    /* Atomically drain the pending command queue */
+    uint8_t       count;
+    pending_cmd_t cmds[PENDING_QUEUE_SLOTS];
+    taskENTER_CRITICAL(&s_queue_mux);
+    count           = s_pending_count;
+    memcpy(cmds, s_pending_queue, count * sizeof(pending_cmd_t));
+    s_pending_count = 0;
+    taskEXIT_CRITICAL(&s_queue_mux);
 
-    /* Compute checksum: CMD ^ LEN ^ payload[0] ^ ... ^ payload[4] */
-    uint8_t checksum = CMD_ACK ^ (uint8_t)sizeof(ack_payload);
-    for (int i = 0; i < (int)sizeof(ack_payload); i++) {
-        checksum ^= ack_payload[i];
+    /* Build payload */
+    uint8_t payload[MAX_PAYLOAD_LEN];
+    uint8_t pos = 0;
+
+    payload[pos++] = touch_active ? 1u : 0u;
+    payload[pos++] = (uint8_t)( touch_x       & 0xFF);
+    payload[pos++] = (uint8_t)((touch_x >> 8) & 0xFF);
+    payload[pos++] = (uint8_t)( touch_y       & 0xFF);
+    payload[pos++] = (uint8_t)((touch_y >> 8) & 0xFF);
+
+    uint8_t count_idx = pos;   /* will be patched if truncation occurs */
+    payload[pos++]    = count;
+
+    uint8_t sent = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t needed = 2u + cmds[i].param_len;
+        if (pos + needed > MAX_PAYLOAD_LEN) {
+            ESP_LOGW(TAG, "Response payload full – %u/%u sub-commands sent", sent, count);
+            payload[count_idx] = sent;
+            break;
+        }
+        payload[pos++] = cmds[i].cmd_id;
+        payload[pos++] = cmds[i].param_len;
+        if (cmds[i].param_len > 0) {
+            memcpy(&payload[pos], cmds[i].params, cmds[i].param_len);
+            pos += cmds[i].param_len;
+        }
+        sent++;
     }
+    payload[count_idx] = sent;
 
-    /* Assemble full packet:
-     *   [MAGIC 8B][CMD 1B][LEN 1B][PAYLOAD 5B][CHECKSUM 1B] = 16 bytes
-     */
-    uint8_t pkt[16];
+    /* Compute checksum: CMD ^ LEN ^ payload[0..pos-1] */
+    uint8_t checksum = CMD_ACK ^ pos;
+    for (uint8_t i = 0; i < pos; i++) checksum ^= payload[i];
+
+    /* Assemble and transmit */
+    uint8_t pkt[8 + 2 + MAX_PAYLOAD_LEN + 1];
     memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_ACK;
-    pkt[9]  = (uint8_t)sizeof(ack_payload);
-    memcpy(&pkt[10], ack_payload, sizeof(ack_payload));
-    pkt[15] = checksum;
+    pkt[8] = CMD_ACK;
+    pkt[9] = pos;
+    memcpy(&pkt[10], payload, pos);
+    pkt[10 + pos] = checksum;
 
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
+    uart_write_bytes(UART_COMM_PORT, pkt, (size_t)(11u + pos));
 
-    ESP_LOGD(TAG, "ACK sent: touch_active=%d  x=%d  y=%d",
-             touch_active, touch_x, touch_y);
+    ESP_LOGD(TAG, "Response sent: touch=%d x=%d y=%d cmds=%u",
+             touch_active, touch_x, touch_y, sent);
 }

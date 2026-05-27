@@ -6,6 +6,22 @@
  *   [MAGIC: 8 bytes "ROGEL202"][CMD: 1 byte][LEN: 1 byte][PAYLOAD: LEN bytes][CHECKSUM: 1 byte]
  *
  * Checksum = XOR of CMD ^ LEN ^ payload[0] ^ ... ^ payload[LEN-1]
+ *
+ * Poll-response protocol (Display → Host direction)
+ * -------------------------------------------------
+ * The display NEVER sends unsolicited packets to the player.  Instead, all
+ * Display→Host commands are queued internally and flushed in a CMD_ACK
+ * response each time CMD_SET_STATE or CMD_SYNC is received from the player.
+ *
+ * Extended CMD_ACK payload layout:
+ *   [0]     touch_active : uint8_t
+ *   [1..2]  touch_x      : int16_t  LE
+ *   [3..4]  touch_y      : int16_t  LE
+ *   [5]     cmd_count    : uint8_t  (number of queued sub-commands)
+ *   For each sub-command:
+ *     [n]   cmd_id       : uint8_t
+ *     [n+1] param_len    : uint8_t
+ *     [n+2..n+1+param_len] params
  */
 #pragma once
 
@@ -52,8 +68,11 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_SEEK        0x0C    /* Display -> Host: seek to position (1-byte pct) */
 #define CMD_ST_BYPASS   0x0D    /* Display -> Host: enable/disable SoundTouch bypass */
 #define CMD_TEMPO_LOCK  0x0E    /* Display -> Host: lock/unlock tempo at a fixed value */
-#define CMD_WIFI_CTRL   0x0F    /* Display -> Host: enable (1) / disable (0) WiFi AP  */
-#define CMD_ACK         0xFF    /* Display -> Host: sync acknowledgement           */
+#define CMD_WIFI_CTRL           0x0F  /* Display -> Host: enable (1) / disable (0) WiFi AP  */
+#define CMD_SONG_SETTINGS_REQ   0x10  /* Display -> Host: request settings for a song       */
+#define CMD_SONG_SETTINGS       0x11  /* Host -> Display: current settings for a song       */
+#define CMD_SET_SONG_SETTINGS   0x12  /* Display -> Host: write new settings for a song     */
+#define CMD_ACK                 0xFF  /* Display -> Host: sync acknowledgement              */
 
 /* ---------- Global system state ---------- */
 typedef struct {
@@ -101,6 +120,55 @@ void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo);
  *                false = stop them.
  */
 void uart_comm_send_wifi_ctrl(bool enable);
+
+/**
+ * @brief Send CMD_SONG_SETTINGS_REQ to the player to request the current
+ *        settings for a specific song.  The player will reply with
+ *        CMD_SONG_SETTINGS which is delivered via ui_songlist_song_settings_async().
+ *
+ * @param song_id  1-based song index.
+ */
+void uart_comm_send_song_settings_req(uint16_t song_id);
+
+/**
+ * @brief Send CMD_SET_SONG_SETTINGS to write new settings for a song to the
+ *        player's SD card.
+ *
+ * @param song_id          1-based song index.
+ * @param flags            Bit-field: bit 0 = loop, bit 1 = fixed_speed_en.
+ * @param fixed_speed_x100 Fixed speed × 100 (e.g. 100 = 1.0×).
+ *                         Only meaningful when bit 1 of @p flags is set.
+ */
+void uart_comm_send_set_song_settings(uint16_t song_id,
+                                      uint8_t  flags,
+                                      uint8_t  fixed_speed_x100);
+
+/**
+ * @brief Enqueue CMD_PLAY_SONG to be sent on the next poll response.
+ * @param song_id  1-based song index.
+ */
+void uart_comm_send_play_song(uint16_t song_id);
+
+/**
+ * @brief Enqueue CMD_STOP_SONG to be sent on the next poll response.
+ */
+void uart_comm_send_stop(void);
+
+/**
+ * @brief Enqueue CMD_PAUSE to be sent on the next poll response.
+ */
+void uart_comm_send_pause(void);
+
+/**
+ * @brief Enqueue CMD_RESUME to be sent on the next poll response.
+ */
+void uart_comm_send_resume(void);
+
+/**
+ * @brief Enqueue CMD_SEEK to be sent on the next poll response.
+ * @param pct  Seek target 0–100 %.
+ */
+void uart_comm_send_seek(uint8_t pct);
 
 /**
  * @brief Update the touch co-ordinates used in ACK responses.

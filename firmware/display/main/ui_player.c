@@ -14,7 +14,6 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/uart.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
@@ -114,57 +113,6 @@ static void stop_progress_anim(void)
     s_prog_anim_active = false;
 }
 
-/** Send CMD_STOP_SONG (no payload) over UART. ISR/task-safe. */
-static void send_stop_song(void)
-{
-    /* [MAGIC 8B][CMD 1B][LEN=0 1B][CHECKSUM 1B] = 11 bytes
-     * checksum = CMD_STOP_SONG ^ 0x00 = CMD_STOP_SONG */
-    uint8_t pkt[11];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_STOP_SONG;
-    pkt[9]  = 0x00;
-    pkt[10] = CMD_STOP_SONG;   /* checksum */
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_STOP_SONG sent");
-}
-
-/** Send CMD_PAUSE (no payload). */
-static void send_pause_song(void)
-{
-    uint8_t pkt[11];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_PAUSE;
-    pkt[9]  = 0x00;
-    pkt[10] = CMD_PAUSE;   /* checksum */
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_PAUSE sent");
-}
-
-/** Send CMD_RESUME (no payload). */
-static void send_resume_song(void)
-{
-    uint8_t pkt[11];
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_RESUME;
-    pkt[9]  = 0x00;
-    pkt[10] = CMD_RESUME;   /* checksum */
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_RESUME sent");
-}
-
-/** Send CMD_SEEK with a 0–100 % position. */
-static void send_seek(uint8_t pct)
-{
-    uint8_t pkt[12];  /* magic(8) + cmd(1) + len(1) + payload(1) + checksum(1) */
-    memcpy(&pkt[0], UART_MAGIC_BYTES, 8);
-    pkt[8]  = CMD_SEEK;
-    pkt[9]  = 0x01;
-    pkt[10] = pct;
-    pkt[11] = CMD_SEEK ^ 0x01 ^ pct;  /* checksum */
-    uart_write_bytes(UART_COMM_PORT, pkt, sizeof(pkt));
-    ESP_LOGI(TAG, "CMD_SEEK sent: pct=%u", (unsigned)pct);
-}
-
 /** Helper: create one vertical indicator column on the right panel. */
 static void create_indicator_col(lv_obj_t *parent,
                                  uint8_t col_idx,
@@ -251,12 +199,13 @@ static void on_progress_clicked(lv_event_t *e)
     }
     lv_bar_set_value(s_progress_bar, pct, LV_ANIM_OFF);
 
-    send_seek(pct);
+    uart_comm_send_seek(pct);
 }
 
 /* =========================================================================
- * PAUSE/RESUME button callback – runs in LVGL task
+ * Bypass / lock / pause button callbacks – run in LVGL task
  * ========================================================================= */
+
 static void on_bypass_toggled(lv_event_t *e)
 {
     (void)e;
@@ -314,12 +263,12 @@ static void on_pause_clicked(lv_event_t *e)
     (void)e;
     s_is_paused = !s_is_paused;
     if (s_is_paused) {
-        send_pause_song();
+        uart_comm_send_pause();
         if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PLAY "  RESUME");
         lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x27AE60), 0); /* green */
         lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1E8449), LV_STATE_PRESSED);
     } else {
-        send_resume_song();
+        uart_comm_send_resume();
         if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
         lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0); /* blue */
         lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
@@ -334,7 +283,7 @@ static void on_stop_clicked(lv_event_t *e)
     (void)e;
     s_is_paused = false;  /* reset pause state for next song */
     stop_progress_anim();
-    send_stop_song();
+    uart_comm_send_stop();
     ui_songlist_show(); /* we are in the LVGL task – can call directly */
 }
 

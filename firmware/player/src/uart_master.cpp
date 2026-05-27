@@ -34,6 +34,8 @@ static um_on_seek_cb_t           s_on_seek          = nullptr;
 static um_on_st_bypass_cb_t      s_on_st_bypass     = nullptr;
 static um_on_tempo_lock_cb_t     s_on_tempo_lock    = nullptr;
 static um_on_wifi_ctrl_cb_t      s_on_wifi_ctrl     = nullptr;
+static um_on_song_settings_req_cb_t  s_on_song_settings_req  = nullptr;
+static um_on_set_song_settings_cb_t  s_on_set_song_settings  = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem  = nullptr;
@@ -155,6 +157,32 @@ void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock)
 void uart_master_set_wifi_ctrl_callback(um_on_wifi_ctrl_cb_t on_wifi_ctrl)
 {
     s_on_wifi_ctrl = on_wifi_ctrl;
+}
+
+void uart_master_set_song_settings_req_callback(um_on_song_settings_req_cb_t cb)
+{
+    s_on_song_settings_req = cb;
+}
+
+void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
+{
+    s_on_set_song_settings = cb;
+}
+
+/* ── CMD_SONG_SETTINGS ───────────────────────────────────────────────────────────────────── */
+
+void uart_master_send_song_settings(uint16_t song_id,
+                                    uint8_t  flags,
+                                    uint8_t  fixed_speed_x100)
+{
+    uint8_t payload[4];
+    payload[0] = (uint8_t)(song_id & 0xFF);
+    payload[1] = (uint8_t)(song_id >> 8);
+    payload[2] = flags;
+    payload[3] = fixed_speed_x100;
+    send_packet(CMD_SONG_SETTINGS, payload, 4);
+    ESP_LOGI(TAG, "TX CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u",
+             song_id, flags, fixed_speed_x100);
 }
 
 /* ── CMD_SONG_LIST ─────────────────────────────────────────────────────────── */
@@ -434,9 +462,59 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         }
         break;
 
+    case CMD_SONG_SETTINGS_REQ:
+        if (len < 2) {
+            ESP_LOGW(TAG, "CMD_SONG_SETTINGS_REQ: payload too short");
+            break;
+        }
+        {
+            uint16_t song_id = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+            ESP_LOGI(TAG, "CMD_SONG_SETTINGS_REQ: song_id=%u", song_id);
+            if (s_on_song_settings_req) s_on_song_settings_req(song_id);
+        }
+        break;
+
+    case CMD_SET_SONG_SETTINGS:
+        if (len < 4) {
+            ESP_LOGW(TAG, "CMD_SET_SONG_SETTINGS: payload too short (%u)", len);
+            break;
+        }
+        {
+            uint16_t song_id          = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+            uint8_t  flags            = payload[2];
+            uint8_t  fixed_speed_x100 = payload[3];
+            ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS: id=%u flags=0x%02X spd=%u",
+                     song_id, flags, fixed_speed_x100);
+            if (s_on_set_song_settings) s_on_set_song_settings(song_id, flags, fixed_speed_x100);
+        }
+        break;
+
     case CMD_ACK:
-        ESP_LOGD(TAG, "CMD_ACK received");
+        ESP_LOGD(TAG, "CMD_ACK received (len=%u)", len);
         xSemaphoreGive(s_ack_sem);
+        /* Dispatch any Display->Host sub-commands embedded in the response.
+         * Extended payload (after the base 5 touch bytes):
+         *   [5]     cmd_count : uint8_t
+         *   For each sub-command:
+         *     [n]   cmd_id    : uint8_t
+         *     [n+1] param_len : uint8_t
+         *     [n+2..] params
+         */
+        if (len >= 6) {
+            uint8_t count = payload[5];
+            uint8_t pos   = 6;
+            for (uint8_t i = 0; i < count && pos + 1 < len; i++) {
+                uint8_t sub_cmd = payload[pos++];
+                uint8_t sub_len = payload[pos++];
+                if (pos + sub_len <= len) {
+                    handle_packet(sub_cmd, &payload[pos], sub_len);
+                    pos += sub_len;
+                } else {
+                    ESP_LOGW(TAG, "CMD_ACK: sub-cmd 0x%02X truncated", sub_cmd);
+                    break;
+                }
+            }
+        }
         break;
 
     default:

@@ -78,6 +78,22 @@ void ui_songlist_encoder_move_async(int8_t steps);
  */
 void ui_songlist_encoder_btn_async(void);
 
+/**
+ * @brief Deliver a CMD_SONG_SETTINGS reply from the UART task to the UI.
+ *
+ * Updates the internal settings cache and, if the settings dialog for
+ * @p song_id is currently open, refreshes the checkbox states.
+ *
+ * Safe to call from any task / core.
+ *
+ * @param song_id          1-based song index.
+ * @param flags            Bit 0 = loop, bit 1 = fixed_speed_en.
+ * @param fixed_speed_x100 Fixed speed × 100 (e.g. 100 = 1.0×).
+ */
+void ui_songlist_song_settings_async(uint16_t song_id,
+                                     uint8_t  flags,
+                                     uint8_t  fixed_speed_x100);
+
 #ifdef __cplusplus
 }
 #endif

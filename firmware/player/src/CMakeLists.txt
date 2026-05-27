@@ -14,6 +14,7 @@ set(MAIN_REQUIRES
     esp_netif       # TCP/IP network interface
     esp_event       # Default event loop (required by WiFi)
     esp_http_server # Embedded HTTP server
+    json            # cJSON – per-song settings file parser
 )
 
 # ── ESP-ADF requirements (only when ADF_PATH is set) ─────────────────────
@@ -39,6 +40,7 @@ idf_component_register(
         "potis.cpp"
         "uart_master.cpp"
         "web_server.cpp"
+        "song_settings.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES

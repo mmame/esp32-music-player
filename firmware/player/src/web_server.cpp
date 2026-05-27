@@ -110,6 +110,19 @@ static void build_path(char *buf, size_t bufsz, const char *name)
 }
 
 /**
+ * Derive the sidecar JSON settings path from a WAV path.
+ * Replaces the trailing ".wav" extension with ".json".
+ * Writes an empty string on error (path too short or buffer too small).
+ */
+static void wav_to_json_path(const char *wav_path, char *out, size_t bufsz)
+{
+    size_t len = strlen(wav_path);
+    if (len < 4 || len + 2 >= bufsz) { out[0] = '\0'; return; }
+    memcpy(out, wav_path, len - 4);
+    memcpy(out + len - 4, ".json", 6); /* 5 chars + NUL */
+}
+
+/**
  * Extract and URL-decode a query parameter from a request.
  * Returns false if the key is absent or the result is empty.
  */
@@ -268,9 +281,10 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     }
 
     int       total    = (int)req->content_len;
-    int       received = 0;
     esp_err_t ret      = ESP_OK;
+    int       written  = 0;
 
+    int received = 0;
     while (received < total) {
         int to_read = MIN((int)sizeof(s_xfer_buf), total - received);
         int r = httpd_req_recv(req, s_xfer_buf, (size_t)to_read);
@@ -287,6 +301,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
         }
         received += r;
     }
+    written = total;
     fclose(f);
 
     if (ret != ESP_OK) {
@@ -295,7 +310,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", fname, received);
+    ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", fname, written);
     if (s_rescan_cb) s_rescan_cb();
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
@@ -375,6 +390,22 @@ static esp_err_t rename_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    /* Also rename the optional JSON sidecar settings file if it exists. */
+    char old_json[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 6];
+    char new_json[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 6];
+    wav_to_json_path(old_path, old_json, sizeof(old_json));
+    wav_to_json_path(new_path, new_json, sizeof(new_json));
+    if (old_json[0] != '\0' && new_json[0] != '\0') {
+        struct stat jst = {};
+        if (stat(old_json, &jst) == 0) {
+            if (rename(old_json, new_json) == 0) {
+                ESP_LOGI(TAG, "Renamed settings: %s -> %s", old_json, new_json);
+            } else {
+                ESP_LOGW(TAG, "Settings rename failed (%d) – WAV renamed OK", errno);
+            }
+        }
+    }
+
     ESP_LOGI(TAG, "Renamed: %s -> %s", old_name, new_name);
     if (s_rescan_cb) s_rescan_cb();
     httpd_resp_sendstr(req, "OK");
@@ -398,6 +429,20 @@ static esp_err_t delete_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "remove(%s) failed: %d", path, errno);
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found or cannot delete");
         return ESP_FAIL;
+    }
+
+    /* Also delete the optional JSON sidecar settings file if it exists. */
+    char json_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 6];
+    wav_to_json_path(path, json_path, sizeof(json_path));
+    if (json_path[0] != '\0') {
+        struct stat jst = {};
+        if (stat(json_path, &jst) == 0) {
+            if (remove(json_path) == 0) {
+                ESP_LOGI(TAG, "Deleted settings: %s", json_path);
+            } else {
+                ESP_LOGW(TAG, "Settings delete failed (%d) – WAV deleted OK", errno);
+            }
+        }
     }
 
     ESP_LOGI(TAG, "Deleted: %s", fname);

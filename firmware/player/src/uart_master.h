@@ -52,8 +52,11 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_SEEK            0x0C  /* Display → Host: seek to position (1-byte 0-100%) */
 #define CMD_ST_BYPASS       0x0D  /* Display → Host: enable/disable SoundTouch bypass */
 #define CMD_TEMPO_LOCK      0x0E  /* Display → Host: lock/unlock tempo at a fixed value */
-#define CMD_WIFI_CTRL       0x0F  /* Display → Host: enable (1) / disable (0) WiFi AP  */
-#define CMD_ACK             0xFF  /* Display → Host: ACK with optional touch   */
+#define CMD_WIFI_CTRL           0x0F  /* Display → Host: enable (1) / disable (0) WiFi AP  */
+#define CMD_SONG_SETTINGS_REQ   0x10  /* Display → Host: request settings for a song        */
+#define CMD_SONG_SETTINGS       0x11  /* Host → Display: current settings for a song        */
+#define CMD_SET_SONG_SETTINGS   0x12  /* Display → Host: write new settings for a song      */
+#define CMD_ACK                 0xFF  /* Display → Host: ACK with optional touch            */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
 
@@ -97,6 +100,30 @@ typedef void (*um_on_tempo_lock_cb_t)(bool lock, uint8_t locked_tempo);
  */
 typedef void (*um_on_wifi_ctrl_cb_t)(bool enable);
 
+/**
+ * @brief Called when the display requests the settings for a song (CMD_SONG_SETTINGS_REQ).
+ *
+ * The handler should read the song's JSON sidecar and call
+ * uart_master_send_song_settings() with the result.
+ *
+ * @param song_id  1-based song index as used by CMD_PLAY_SONG.
+ */
+typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
+
+/**
+ * @brief Called when the display writes new settings for a song (CMD_SET_SONG_SETTINGS).
+ *
+ * The handler should persist the settings to the song's JSON sidecar file.
+ *
+ * @param song_id          1-based song index.
+ * @param flags            Bit-field: bit 0 = loop, bit 1 = fixed_speed_en.
+ * @param fixed_speed_x100 Fixed speed multiplier × 100 (e.g. 100 = 1.0×, 120 = 1.2×).
+ *                         Meaningful only when bit 1 of @p flags is set.
+ */
+typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
+                                             uint8_t  flags,
+                                             uint8_t  fixed_speed_x100);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -131,6 +158,27 @@ void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock);
  *        Safe to call at any time; replaces the current callback.
  */
 void uart_master_set_wifi_ctrl_callback(um_on_wifi_ctrl_cb_t on_wifi_ctrl);
+
+/**
+ * @brief Register the callback for CMD_SONG_SETTINGS_REQ.
+ */
+void uart_master_set_song_settings_req_callback(um_on_song_settings_req_cb_t cb);
+
+/**
+ * @brief Register the callback for CMD_SET_SONG_SETTINGS.
+ */
+void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb);
+
+/**
+ * @brief Send CMD_SONG_SETTINGS to the display.
+ *
+ * @param song_id          1-based song index.
+ * @param flags            Bit-field: bit 0 = loop, bit 1 = fixed_speed_en.
+ * @param fixed_speed_x100 Fixed speed × 100 (e.g. 100 = 1.0×). 0 when bit 1 is clear.
+ */
+void uart_master_send_song_settings(uint16_t song_id,
+                                    uint8_t  flags,
+                                    uint8_t  fixed_speed_x100);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 
