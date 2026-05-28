@@ -52,19 +52,19 @@ static const char *TAG = "enc2";
  *   ATTACK   – slow speed changes during playback. τ ≈ 12.5 s  (already moving)
  *   RELEASE  – fast decay when crank stops.        τ ≈  172 ms
  */
-#define ENC2_EMA_ALPHA_STARTUP   0.080f
-#define ENC2_EMA_ALPHA_ATTACK    0.004f
-#define ENC2_EMA_ALPHA_RELEASE   0.250f
+#define ENC2_EMA_ALPHA_STARTUP   1.500f
+#define ENC2_EMA_ALPHA_ATTACK    0.025f
+#define ENC2_EMA_ALPHA_RELEASE   1.500f
 
 /*
  * Consecutive zero-count windows required before switching to fast release.
  * 5 windows × 50 ms = 250 ms of silence before decay kicks in.
  */
-#define ENC2_RELEASE_TICKS  5
+#define ENC2_RELEASE_TICKS  3
 
 /* Hysteretic stop/start thresholds [RPS] */
 #define ENC2_STOP_THRESH     0.25f   /* moving  → stopped (lower threshold) */
-#define ENC2_START_THRESH    0.55f   /* stopped → moving  (upper threshold) */
+#define ENC2_START_THRESH    0.70   /* stopped → moving  (upper threshold) */
 
 /* ── Module state ────────────────────────────────────────────────────────── */
 

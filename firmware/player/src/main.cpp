@@ -473,6 +473,21 @@ static void do_resume(void)
     info.byte_pos = file_offset;
     audio_element_setinfo(g_fatfs_el, &info);
 
+    /* Guard against the race where element tasks (fatfs, wav) processed a
+     * queued RESUME→open→STOP→close cycle after pipeline_stop_and_reset()
+     * returned – possible because audio_element_stop() returns immediately
+     * for elements with is_running==false without aborting their ring
+     * buffers, so wait_for_stop() also returns early.  Those tasks later
+     * run the cycle and land in STOPPED state (not INIT).
+     *
+     * audio_element_on_cmd_resume() clears the output ring buffer when the
+     * element state is STOPPED, which would destroy the injected WAV header.
+     * Re-flushing ring buffers and forcing all elements to INIT here (called
+     * from user-driven interaction, always ≥100 ms after the last stop) is
+     * safe: tasks have long finished by now. */
+    audio_pipeline_reset_ringbuffer(g_pipeline);
+    audio_pipeline_reset_elements(g_pipeline);
+
     /* Inject a synthetic WAV header into the fatfs→wav ring buffer so the
      * WAV decoder reads a valid header ("a new song playing" path) and then
      * reads raw PCM from fatfs which starts at the resumed position. */
@@ -504,6 +519,11 @@ static void do_seek(uint8_t pct)
     audio_element_getinfo(g_fatfs_el, &info);
     info.byte_pos = file_offset;
     audio_element_setinfo(g_fatfs_el, &info);
+
+    /* Same STOPPED-state guard as in do_resume(): force clean ring buffers
+     * and INIT element states before injecting the WAV header. */
+    audio_pipeline_reset_ringbuffer(g_pipeline);
+    audio_pipeline_reset_elements(g_pipeline);
 
     /* Inject a synthetic WAV header into the fatfs→wav ring buffer so the
      * WAV decoder reads a valid header ("a new song playing" path) and then
@@ -554,7 +574,7 @@ static void create_pipeline(void)
     st_cfg.samplerate  = 44100;
     st_cfg.channels    = 2;
     st_cfg.tempo       = g_speed;
-    st_cfg.out_rb_size = 512 * 1024; /* 256 KB PSRAM – absorbs bursty TDHS output (~1.5 s) */
+    st_cfg.out_rb_size = 32 * 1024; /* 128 KB PSRAM – absorbs bursty TDHS output          */
     st_cfg.task_stack  =  16 * 1024; /*  16 KB – TDHS uses significant stack              */
     st_cfg.task_core   =          1; /* core 1: TDHS off core 0 so WAV decoder runs freely */
     g_sonic_el = soundtouch_el_init(&st_cfg);
@@ -563,7 +583,7 @@ static void create_pipeline(void)
     alc_volume_setup_cfg_t alc_cfg = DEFAULT_ALC_VOLUME_SETUP_CONFIG();
     alc_cfg.channel     = 1;   /* all uploaded files are 1ch mono */
     alc_cfg.volume      = 0;
-    alc_cfg.out_rb_size = 64 * 1024; /* 64 KB PSRAM (default 8 KB) */
+    alc_cfg.out_rb_size = 16 * 1024; /* 16 KB PSRAM (default 8 KB) */
     g_alc_el = alc_volume_setup_init(&alc_cfg);
     configASSERT(g_alc_el);
 
@@ -581,13 +601,12 @@ static void create_pipeline(void)
     i2s_cfg.std_cfg.slot_cfg.data_bit_width  = I2S_DATA_BIT_WIDTH_16BIT;
     i2s_cfg.std_cfg.slot_cfg.slot_mode       = I2S_SLOT_MODE_MONO;
     i2s_cfg.std_cfg.slot_cfg.slot_mask       = I2S_STD_SLOT_BOTH;
-    /* Larger buffers reduce underrun risk.  buffer_len must be a multiple of 12
-     * (I2S_BUFFER_ALINED_BYTES_SIZE).  DMA buffers live in internal RAM;
-     * out_rb_size goes to PSRAM via audio_mem_calloc. */
-    i2s_cfg.buffer_len            = 14400;          /* 3600 × 4  (default 3600)  */
-    i2s_cfg.out_rb_size           = 128 * 1024;     /* 128 KB     (default 8 KB)  */
-    i2s_cfg.chan_cfg.dma_desc_num  = 8;             /* descriptors (default 3)   */
-    i2s_cfg.chan_cfg.dma_frame_num = 1024;          /* frames/desc (default 312) */
+    /* DMA buffers live in internal RAM; out_rb_size goes to PSRAM via audio_mem_calloc.
+     * buffer_len must be a multiple of 12 (I2S_BUFFER_ALINED_BYTES_SIZE). */
+    i2s_cfg.buffer_len            = 3600;           /* default                   */
+    i2s_cfg.out_rb_size           =  32 * 1024;     /*  32 KB (was 128 KB)       */
+    i2s_cfg.chan_cfg.dma_desc_num  = 4;             /* descriptors (was 8)       */
+    i2s_cfg.chan_cfg.dma_frame_num = 256;           /* frames/desc (was 1024)    */
     g_i2s_el = i2s_stream_init(&i2s_cfg);
     configASSERT(g_i2s_el);
 
@@ -707,13 +726,14 @@ static void audio_task(void *arg)
                 pipeline_stop_and_reset();
 
                 if (g_song_loop && g_current_song >= 0) {
-                    /* Loop: reload song at position 0 then resume immediately. */
+                    /* Loop: reload song at position 0 then resume immediately.
+                     * Do NOT set g_is_playing/g_is_paused to false here – that
+                     * would briefly signal "stopped" to the io_task state sender
+                     * and cause the display to flash back to the song list.
+                     * play_song_idx() sets g_is_paused=true (keeping playing||paused
+                     * true), and the extra pipeline_stop_and_reset() it may call is
+                     * harmless since the pipeline is already stopped. */
                     uint16_t loop_idx = (uint16_t)g_current_song;
-                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                    g_is_playing  = false;
-                    g_is_paused   = false;
-                    g_audio_pos_s = 0.0f;
-                    xSemaphoreGive(s_state_mutex);
                     ESP_LOGI(TAG, "Loop: restarting song %u", loop_idx);
                     play_song_idx(loop_idx, false); /* load at pos 0, pipeline not started */
                     do_resume();                    /* start immediately                   */
@@ -836,6 +856,11 @@ static void on_set_song_settings(uint16_t song_id,
     if (flags == 0) {
         remove(json_path); /* ignore error if file did not exist */
         ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
+        if ((int16_t)(song_id - 1) == g_current_song) {
+            g_song_loop           = false;
+            g_song_fixed_speed_en = false;
+            g_song_fixed_speed    = 1.0f;
+        }
         return;
     }
 
@@ -865,6 +890,15 @@ static void on_set_song_settings(uint16_t song_id,
         ESP_LOGE("main", "Cannot write %s", json_path);
     }
     cJSON_free(json_str);
+
+    /* Apply immediately if the modified song is currently active */
+    if ((int16_t)(song_id - 1) == g_current_song) {
+        g_song_loop           = loop;
+        g_song_fixed_speed_en = fixed_en;
+        g_song_fixed_speed    = fixed_en ? spd : 1.0f;
+        ESP_LOGI("main", "Applied settings live: loop=%d fixed_en=%d spd=%.2f",
+                 (int)loop, (int)fixed_en, fixed_en ? (double)spd : 1.0);
+    }
 }
 
 /* ======================================================================

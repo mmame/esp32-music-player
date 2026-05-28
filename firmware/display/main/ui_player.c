@@ -41,11 +41,13 @@ static const char *TAG = "ui_player";
 #define STOP_Y           370    /* STOP button top edge                     */
 #define STOP_W           300    /* STOP button width                        */
 #define STOP_H           80     /* STOP button height                       */
-#define PAUSE_Y          260    /* PAUSE/RESUME button top edge             */
-#define PAUSE_W          300    /* PAUSE/RESUME button width                */
-#define PAUSE_H          80     /* PAUSE/RESUME button height               */
-#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass checkbox in right panel */
+#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass label / lock checkbox row */
 #define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
+#define STATUS_LBL_Y     (TIME_LABEL_Y + 22)  /* loop / 1.0x indicator row (left panel) */
+#define GEAR_BTN_W       80
+#define GEAR_BTN_H       80
+/* Gear button x: right of the STOP button with a 12-px gap */
+#define GEAR_BTN_X       ((SPLIT_X - STOP_W) / 2 + STOP_W + 12)
 
 /* Right panel – two indicator columns */
 #define COL_W            (RIGHT_W / 2)   /* 100 px per column               */
@@ -77,14 +79,19 @@ static lv_obj_t *s_time_lbl       = NULL;  /* "elapsed / total" below progress b
 static lv_obj_t *s_bar[2]         = {NULL, NULL};  /* VOL, TMP */
 static lv_obj_t *s_val_lbl[2]     = {NULL, NULL};
 
-/* Pause/Resume toggle button and its label */
-static lv_obj_t *s_pause_btn      = NULL;
-static lv_obj_t *s_pause_lbl      = NULL;
-static bool      s_is_paused      = false;
+/* Bypass SoundTouch checkbox → replaced by read-only label */
+static lv_obj_t *s_bypass_lbl     = NULL;  /* "1.0x" – shown when fixed_speed_en  */
+static bool      s_bypass_active  = false; /* set from song settings, not toggle  */
 
-/* Bypass SoundTouch checkbox */
-static lv_obj_t *s_bypass_check   = NULL;
-static bool      s_bypass_active  = false;
+/* Loop indicator label */
+static lv_obj_t *s_loop_lbl       = NULL;  /* "↺ LOOP" – shown when loop configured */
+
+/* Song-config gear button (bottom-right of play screen) */
+static lv_obj_t *s_gear_btn       = NULL;
+
+/* Current song context (needed for gear dialog and settings updates) */
+static uint16_t  s_current_song_id             = 0;
+static char      s_current_song_name[MAX_SONG_NAME_LEN] = "";
 
 /* Tempo lock checkbox */
 static lv_obj_t *s_lock_check         = NULL;
@@ -203,31 +210,10 @@ static void on_progress_clicked(lv_event_t *e)
 }
 
 /* =========================================================================
- * Bypass / lock / pause button callbacks – run in LVGL task
+ * Bypass / lock button callbacks – run in LVGL task
  * ========================================================================= */
 
-static void on_bypass_toggled(lv_event_t *e)
-{
-    (void)e;
-    s_bypass_active = !s_bypass_active;
-    uart_comm_send_st_bypass(s_bypass_active);
-
-    /* Grey out / restore the TMP bar indicator and value label.
-     * Bypass overrules lock: when bypassed → grey; when un-bypassed and
-     * locked → amber; otherwise → normal cyan. */
-    lv_color_t col;
-    if (s_bypass_active) {
-        col = lv_color_hex(0x445566);       /* muted – bypassed             */
-    } else if (s_tempo_locked) {
-        col = lv_color_hex(COLOR_LOCKED);   /* amber – locked               */
-    } else {
-        col = lv_color_hex(COLOR_ACCENT);   /* normal cyan                  */
-    }
-    if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
-    if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
-
-    ESP_LOGI(TAG, "SoundTouch bypass toggled: %s", s_bypass_active ? "ON" : "OFF");
-}
+static void on_bypass_toggled(lv_event_t *e) { (void)e; /* no-op: bypass is now read-only, driven by song config */ }
 
 /* =========================================================================
  * TEMPO LOCK checkbox callback – runs in LVGL task
@@ -256,22 +242,13 @@ static void on_lock_toggled(lv_event_t *e)
 }
 
 /* =========================================================================
- * PAUSE/RESUME button callback – runs in LVGL task
+ * Song-config gear button callback – runs in LVGL task
  * ========================================================================= */
-static void on_pause_clicked(lv_event_t *e)
+static void on_gear_clicked_player(lv_event_t *e)
 {
     (void)e;
-    s_is_paused = !s_is_paused;
-    if (s_is_paused) {
-        uart_comm_send_pause();
-        if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PLAY "  RESUME");
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x27AE60), 0); /* green */
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1E8449), LV_STATE_PRESSED);
-    } else {
-        uart_comm_send_resume();
-        if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0); /* blue */
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
+    if (s_current_song_id != 0) {
+        ui_songlist_open_settings_dialog(s_current_song_id);
     }
 }
 
@@ -281,7 +258,6 @@ static void on_pause_clicked(lv_event_t *e)
 static void on_stop_clicked(lv_event_t *e)
 {
     (void)e;
-    s_is_paused = false;  /* reset pause state for next song */
     stop_progress_anim();
     uart_comm_send_stop();
     ui_songlist_show(); /* we are in the LVGL task – can call directly */
@@ -366,25 +342,13 @@ void ui_player_create(void)
     lv_obj_set_style_text_align(s_time_lbl, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(s_time_lbl, PROGRESS_PAD_X, TIME_LABEL_Y);
 
-    /* PAUSE / RESUME toggle button --------------------------------------- */
-    s_pause_btn = lv_button_create(left);
-    lv_obj_set_size(s_pause_btn, PAUSE_W, PAUSE_H);
-    lv_obj_set_pos(s_pause_btn,
-                   (SPLIT_X - PAUSE_W) / 2,
-                   PAUSE_Y);
-    lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0); /* blue = playing */
-    lv_obj_set_style_bg_opa(s_pause_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(s_pause_btn, 12, 0);
-    lv_obj_set_style_border_width(s_pause_btn, 0, 0);
-    lv_obj_set_style_shadow_width(s_pause_btn, 0, 0);
-    lv_obj_add_event_cb(s_pause_btn, on_pause_clicked, LV_EVENT_CLICKED, NULL);
-
-    s_pause_lbl = lv_label_create(s_pause_btn);
-    lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
-    lv_obj_set_style_text_font(s_pause_lbl, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(s_pause_lbl, lv_color_white(), 0);
-    lv_obj_center(s_pause_lbl);
+    /* Loop indicator label – shown when the current song has loop enabled -- */
+    s_loop_lbl = lv_label_create(left);
+    lv_label_set_text(s_loop_lbl, LV_SYMBOL_REFRESH "  LOOP");
+    lv_obj_set_style_text_font(s_loop_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_loop_lbl, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_set_pos(s_loop_lbl, PROGRESS_PAD_X, STATUS_LBL_Y);
+    lv_obj_add_flag(s_loop_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
 
     /* STOP button -------------------------------------------------------- */
     lv_obj_t *stop_btn = lv_button_create(left);
@@ -406,6 +370,23 @@ void ui_player_create(void)
     lv_obj_set_style_text_font(stop_lbl, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(stop_lbl, lv_color_white(), 0);
     lv_obj_center(stop_lbl);
+
+    /* Song-config gear button – bottom-right of the left panel ----------- */
+    s_gear_btn = lv_button_create(left);
+    lv_obj_set_size(s_gear_btn, GEAR_BTN_W, GEAR_BTN_H);
+    lv_obj_set_pos(s_gear_btn, GEAR_BTN_X, STOP_Y);
+    lv_obj_set_style_bg_color(s_gear_btn, lv_color_hex(0x2C3E50), 0);
+    lv_obj_set_style_bg_opa(s_gear_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_gear_btn, lv_color_hex(0x1A252F), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(s_gear_btn, 12, 0);
+    lv_obj_set_style_border_width(s_gear_btn, 0, 0);
+    lv_obj_set_style_shadow_width(s_gear_btn, 0, 0);
+    lv_obj_add_event_cb(s_gear_btn, on_gear_clicked_player, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *gear_icon = lv_label_create(s_gear_btn);
+    lv_label_set_text(gear_icon, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_font(gear_icon, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(gear_icon, lv_color_hex(COLOR_TEXT), 0);
+    lv_obj_center(gear_icon);
 
     /* ---- Vertical separator between left and right panels -------------- */
     lv_obj_t *sep = lv_obj_create(s_screen);
@@ -429,28 +410,16 @@ void ui_player_create(void)
     create_indicator_col(right, 0, "VOL");
     create_indicator_col(right, 1, "TMP");
 
-    /* Bypass SoundTouch checkbox – centred under TMP bar (col 1) --------- */
-    /* COL_W=100, indicator 30×30, text "1.0x" at montserrat_20 (~78px total)
-     * → left edge at col_x + (COL_W - 78)/2 ≈ COL_W + 11, use COL_W + 8   */
-    s_bypass_check = lv_checkbox_create(right);
-    lv_checkbox_set_text(s_bypass_check, "1.0x");
-    lv_obj_set_pos(s_bypass_check, COL_W + 8, BYPASS_CHECK_Y_R);
-    lv_obj_set_style_text_font(s_bypass_check, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_bypass_check, lv_color_hex(COLOR_TEXT), 0);
-    /* Indicator (tick box) – 30×30 for easy touch */
-    lv_obj_set_style_width(s_bypass_check,  30, LV_PART_INDICATOR);
-    lv_obj_set_style_height(s_bypass_check, 30, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_bypass_check, lv_color_hex(COLOR_BAR_TRACK), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_bypass_check, lv_color_hex(COLOR_ACCENT),
-                               LV_PART_INDICATOR | LV_STATE_CHECKED);
-    lv_obj_set_style_border_color(s_bypass_check, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
-    lv_obj_set_style_border_width(s_bypass_check, 2, LV_PART_INDICATOR);
-    /* Extra touch padding so the hit area is generously large */
-    lv_obj_set_style_pad_top(s_bypass_check,    10, 0);
-    lv_obj_set_style_pad_bottom(s_bypass_check, 10, 0);
-    lv_obj_set_style_pad_left(s_bypass_check,    8, 0);
-    lv_obj_set_style_pad_right(s_bypass_check,   8, 0);
-    lv_obj_add_event_cb(s_bypass_check, on_bypass_toggled, LV_EVENT_VALUE_CHANGED, NULL);
+    /* 1.0x indicator label – read-only, shown when fixed-speed is configured
+     * for the current song.  Replaces the old interactive bypass checkbox. -- */
+    s_bypass_lbl = lv_label_create(right);
+    lv_label_set_text(s_bypass_lbl, "1.0x");
+    lv_obj_set_style_text_font(s_bypass_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_bypass_lbl, lv_color_hex(0x445566), 0);
+    lv_obj_set_width(s_bypass_lbl, COL_W);
+    lv_obj_set_style_text_align(s_bypass_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_bypass_lbl, COL_W, BYPASS_CHECK_Y_R);
+    lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
 
     /* Tempo Lock checkbox – under VOL bar (col 0), same row as bypass ------ */
     s_lock_check = lv_checkbox_create(right);
@@ -493,12 +462,24 @@ static void async_cb_show(void *user_data)
 {
     async_show_payload_t *p = (async_show_payload_t *)user_data;
 
-    /* Reset pause state for the new song */
-    s_is_paused = false;
-    if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
-    if (s_pause_btn) {
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0);
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
+    /* Store current song context */
+    strlcpy(s_current_song_name, p->song_name, MAX_SONG_NAME_LEN);
+    s_current_song_id = ui_songlist_find_song_id_by_name(p->song_name);
+
+    /* Reset indicators until settings response arrives */
+    s_bypass_active = false;
+    if (s_loop_lbl)   lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
+    if (s_bypass_lbl) lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
+    /* Restore TMP bar to normal (un-bypassed) colour */
+    lv_color_t tmp_col = s_tempo_locked
+                         ? lv_color_hex(COLOR_LOCKED)
+                         : lv_color_hex(COLOR_ACCENT);
+    if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], tmp_col, LV_PART_INDICATOR);
+    if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], tmp_col, 0);
+
+    /* Request fresh settings so loop / 1.0x indicators are populated */
+    if (s_current_song_id != 0) {
+        uart_comm_send_song_settings_req(s_current_song_id);
     }
 
     /* Update title */
@@ -518,12 +499,12 @@ static void async_cb_show(void *user_data)
 static void async_cb_hide(void *user_data)
 {
     (void)user_data;
-    s_is_paused = false;  /* reset for next song */
-    if (s_pause_lbl) lv_label_set_text(s_pause_lbl, LV_SYMBOL_PAUSE "  PAUSE");
-    if (s_pause_btn) {
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x2980B9), 0);
-        lv_obj_set_style_bg_color(s_pause_btn, lv_color_hex(0x1F618D), LV_STATE_PRESSED);
-    }
+    s_bypass_active   = false;
+    s_current_song_id = 0;
+    s_current_song_name[0] = '\0';
+    /* Hide song-setting indicators */
+    if (s_loop_lbl)   lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
+    if (s_bypass_lbl) lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
     stop_progress_anim();
     if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
@@ -648,5 +629,74 @@ void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s)
     p->dur_s = duration_s;
     lv_lock();
     lv_async_call(async_cb_update_progress, p);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * Song-settings delivery – async bridge + callback
+ * ========================================================================= */
+
+typedef struct {
+    uint16_t song_id;
+    uint8_t  flags;
+    uint8_t  fixed_speed_x100;
+} async_player_settings_t;
+
+static void async_cb_song_settings_player(void *user_data)
+{
+    async_player_settings_t *p = (async_player_settings_t *)user_data;
+
+    /* Only apply settings for the song currently on the player screen */
+    if (p->song_id != s_current_song_id || s_current_song_id == 0) {
+        free(p);
+        return;
+    }
+
+    bool loop_en  = (p->flags & 0x01u) != 0;
+    bool speed_en = (p->flags & 0x02u) != 0;
+
+    bool prev_bypass = s_bypass_active;
+    s_bypass_active  = speed_en;
+
+    /* Update 1.0x indicator */
+    if (s_bypass_lbl) {
+        if (speed_en) lv_obj_clear_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
+        else          lv_obj_add_flag(s_bypass_lbl,   LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Update LOOP indicator */
+    if (s_loop_lbl) {
+        if (loop_en) lv_obj_clear_flag(s_loop_lbl, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Re-tint TMP bar if bypass state changed */
+    if (prev_bypass != s_bypass_active) {
+        lv_color_t col;
+        if (s_bypass_active) {
+            col = lv_color_hex(0x445566);       /* muted – fixed speed active   */
+        } else if (s_tempo_locked) {
+            col = lv_color_hex(COLOR_LOCKED);   /* amber – tempo locked         */
+        } else {
+            col = lv_color_hex(COLOR_ACCENT);   /* normal cyan                  */
+        }
+        if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
+        if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
+    }
+
+    free(p);
+}
+
+void ui_player_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fixed_speed_x100)
+{
+    if (!s_screen) return;
+
+    async_player_settings_t *p = malloc(sizeof(async_player_settings_t));
+    if (!p) { ESP_LOGE(TAG, "OOM in song_settings_async"); return; }
+    p->song_id          = song_id;
+    p->flags            = flags;
+    p->fixed_speed_x100 = fixed_speed_x100;
+    lv_lock();
+    lv_async_call(async_cb_song_settings_player, p);
     lv_unlock();
 }

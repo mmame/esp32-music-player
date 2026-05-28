@@ -76,6 +76,20 @@ void ui_player_update_potis_async(uint8_t volume, uint8_t tempo,
  */
 void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s);
 
+/**
+ * @brief Deliver song-settings to the player view.
+ *        Updates the Loop and 1.0x indicator labels and the fixed-speed
+ *        (bypass) state for the TMP bar colouring.
+ *        Safe to call from any task / core.
+ *
+ * @param song_id          1-based song index.
+ * @param flags            Bit 0 = loop, bit 1 = fixed_speed_en.
+ * @param fixed_speed_x100 Fixed speed × 100 (e.g. 100 = 1.0×).
+ */
+void ui_player_song_settings_async(uint16_t song_id,
+                                   uint8_t  flags,
+                                   uint8_t  fixed_speed_x100);
+
 #ifdef __cplusplus
 }
 #endif

@@ -94,6 +94,21 @@ void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  flags,
                                      uint8_t  fixed_speed_x100);
 
+/**
+ * @brief Open the song-settings dialog for @p song_id on whatever screen is
+ *        currently active.  Must be called from the LVGL task (e.g. from a
+ *        button callback).  A song_id of 0 is silently ignored.
+ */
+void ui_songlist_open_settings_dialog(uint16_t song_id);
+
+/**
+ * @brief Find a song's ID by its display name.
+ *        Must be called from the LVGL task (reads the internal song list).
+ *
+ * @return song_id (> 0) if found, 0 if not found.
+ */
+uint16_t ui_songlist_find_song_id_by_name(const char *name);
+
 #ifdef __cplusplus
 }
 #endif

@@ -534,6 +534,7 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         ESP_LOGI(TAG, "CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u",
                  song_id, flags, fixed_speed_x100);
         ui_songlist_song_settings_async(song_id, flags, fixed_speed_x100);
+        ui_player_song_settings_async(song_id, flags, fixed_speed_x100);
         break;
     }
 

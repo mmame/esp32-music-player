@@ -63,7 +63,6 @@ static lv_obj_t  *s_cb_fixed_speed     = NULL;
 
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
-static void on_gear_clicked(lv_event_t *e);
 static void on_wifi_btn_clicked(lv_event_t *e);
 static void update_wifi_btn_style(void);
 static void send_play_song(uint16_t song_id);
@@ -73,6 +72,7 @@ static void on_wifi_info_ok(lv_event_t *e);
 static void create_settings_dialog(uint16_t song_id);
 static void on_settings_ok(lv_event_t *e);
 static void on_settings_cancel(lv_event_t *e);
+static void send_play_song(uint16_t song_id);
 
 /* ---------- async payload structs ---------------------------------------- */
 
@@ -308,19 +308,6 @@ static void rebuild_list(void)
         /* Touch / click event */
         lv_obj_add_event_cb(btn, on_list_item_clicked, LV_EVENT_CLICKED, NULL);
 
-        /* ── Gear icon button (right-aligned inside the row) ───────────── */
-        lv_obj_t *gear = lv_label_create(btn);
-        lv_label_set_text(gear, LV_SYMBOL_SETTINGS);
-        lv_obj_set_style_text_font(gear, &lv_font_montserrat_28, 0);
-        lv_obj_set_style_text_color(gear, lv_color_hex(0x90A0B0), 0);
-        lv_obj_set_style_text_color(gear, lv_color_white(), LV_STATE_PRESSED);
-        lv_obj_align(gear, LV_ALIGN_RIGHT_MID, -6, 0);
-        /* Make it independently clickable so it doesn't trigger play */
-        lv_obj_add_flag(gear, LV_OBJ_FLAG_CLICKABLE);
-        /* Store song-ID so the callback knows which song to configure */
-        lv_obj_set_user_data(gear, (void *)(uintptr_t)s_songs[i].id);
-        lv_obj_add_event_cb(gear, on_gear_clicked, LV_EVENT_CLICKED, NULL);
-
         /* Add to encoder group so it receives focus */
         lv_group_add_obj(s_group, btn);
     }
@@ -359,17 +346,6 @@ static void on_list_item_clicked(lv_event_t *e)
     uint16_t song_id = (uint16_t)(uintptr_t)lv_obj_get_user_data(btn);
     ESP_LOGI(TAG, "Item clicked: song_id=%u", song_id);
     send_play_song(song_id);
-}
-
-static void on_gear_clicked(lv_event_t *e)
-{
-    /* Stop the click from bubbling up to the list-row button */
-    lv_event_stop_bubbling(e);
-
-    lv_obj_t *gear   = lv_event_get_target(e);
-    uint16_t  song_id = (uint16_t)(uintptr_t)lv_obj_get_user_data(gear);
-    ESP_LOGI(TAG, "Gear clicked: song_id=%u", song_id);
-    create_settings_dialog(song_id);
 }
 
 /* =========================================================================
@@ -412,8 +388,9 @@ static void on_settings_ok(lv_event_t *e)
         s_settings[cache_idx].valid            = true;
     }
 
-    /* Send to player */
+    /* Send to player and request fresh response so other views update */
     uart_comm_send_set_song_settings(song_id, flags, fixed_speed_x100);
+    uart_comm_send_song_settings_req(song_id);
     ESP_LOGI(TAG, "Settings saved: song_id=%u flags=0x%02X", song_id, flags);
 
     /* Close dialog */
@@ -497,7 +474,7 @@ static void create_settings_dialog(uint16_t song_id)
 
     /* ── Checkbox: Loop ───────────────────────────────────────────── */
     s_cb_loop = lv_checkbox_create(box);
-    lv_checkbox_set_text(s_cb_loop, "Loop  (restart automatically when song ends)");
+    lv_checkbox_set_text(s_cb_loop, "Loop");
     if (cached_loop) lv_obj_add_state(s_cb_loop, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_loop, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_cb_loop, lv_color_hex(0xE0E0FF), 0);
@@ -505,7 +482,7 @@ static void create_settings_dialog(uint16_t song_id)
 
     /* ── Checkbox: Fixed speed ────────────────────────────────────── */
     s_cb_fixed_speed = lv_checkbox_create(box);
-    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed (1.0×, ignore crank)");
+    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed");
     if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
@@ -546,6 +523,21 @@ static void create_settings_dialog(uint16_t song_id)
     lv_obj_set_style_text_font(lbl_ok, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(lbl_ok, lv_color_white(), 0);
     lv_obj_center(lbl_ok);
+}
+
+void ui_songlist_open_settings_dialog(uint16_t song_id)
+{
+    if (song_id == 0) return;
+    create_settings_dialog(song_id);
+}
+
+uint16_t ui_songlist_find_song_id_by_name(const char *name)
+{
+    if (!name) return 0;
+    for (uint8_t i = 0; i < s_song_count; i++) {
+        if (strcmp(s_songs[i].name, name) == 0) return s_songs[i].id;
+    }
+    return 0;
 }
 
 static void send_play_song(uint16_t song_id)
