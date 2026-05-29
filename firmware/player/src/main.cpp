@@ -36,6 +36,7 @@
 
 /* Application modules (pure ESP-IDF, always compiled) */
 #include "pins.h"
+#include "dimmerlink.h"
 #include "encoder.h"
 #include "encoder2.h"
 #include "potis.h"
@@ -958,10 +959,38 @@ static void io_task(void *arg)
             static uint8_t    s_last_tempo_sent  = 255; /* 255 = force first send */
             static TickType_t s_last_tempo_tick  = 0;
 
+            /* Stop fade-out state: ramp volume to 0 before issuing pause.
+             * Step 4 per 10 ms tick → ~250 ms at full volume, shorter otherwise. */
+            static bool    s_vol_fading = false;
+            static int16_t s_fade_vol   = 0;   /* current fade level 0–100 */
+
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
 
+            /* ── Dimmer: raw crank speed → brightness (no EMA, instant flicker) */
+            {
+                static uint8_t s_last_dimmer_pct = 255u; /* 255 = force first write */
+                float irps = encoder2_get_instant_rps();
+                /* Map [0, SPEED_MAX] → [0, 100%]; clamp */
+                uint8_t dpct = (irps <= 0.0f) ? 0u
+                             : (uint8_t)(irps / SPEED_MAX * 100.0f + 0.5f);
+                if (dpct > 100u) dpct = 100u;
+                if (dpct != s_last_dimmer_pct) {
+                    s_last_dimmer_pct = dpct;
+                    dimmerlink_set_level(dpct);
+                }
+            }
+
             if (enc2_move) {
+                /* If we were fading, cancel it and restore the real volume */
+                if (s_vol_fading) {
+                    s_vol_fading = false;
+#ifdef HAVE_ADF
+                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                    apply_volume_locked(vol);
+                    xSemaphoreGive(s_state_mutex);
+#endif
+                }
                 s_enc2_pause_sent = false; /* re-arm for next stop */
                 /* Rising edge: encoder started spinning while song is paused */
                 if (!s_enc2_was_moving && g_is_paused && g_current_song >= 0) {
@@ -974,10 +1003,37 @@ static void io_task(void *arg)
                     if (speed_target > SPEED_MAX) speed_target = SPEED_MAX;
                 }
             } else {
-                /* Encoder stopped (or never started): pause if song is playing */
+                /* Encoder stopped – fade volume to 0 before pausing */
                 if (g_is_playing && !s_enc2_pause_sent) {
-                    s_cmd_pause = true;
+                    if (!s_vol_fading) {
+                        /* Start fade from the current poti volume */
+                        s_vol_fading = true;
+                        s_fade_vol   = (int16_t)vol;
+                    }
+#ifdef HAVE_ADF
+                    /* Step fade down each 10 ms tick */
+                    s_fade_vol -= 4;
+                    if (s_fade_vol <= 0) {
+                        s_fade_vol = 0;
+                        s_vol_fading = false;
+                        /* Fade complete – issue pause and restore volume so
+                         * the next resume starts at the correct level */
+                        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                        apply_volume_locked(vol);
+                        xSemaphoreGive(s_state_mutex);
+                        s_cmd_pause       = true;
+                        s_enc2_pause_sent = true;
+                    } else {
+                        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                        apply_volume_locked((uint8_t)s_fade_vol);
+                        xSemaphoreGive(s_state_mutex);
+                    }
+#else
+                    /* No ADF – pause immediately */
+                    s_vol_fading      = false;
+                    s_cmd_pause       = true;
                     s_enc2_pause_sent = true;
+#endif
                 }
             }
             s_enc2_was_moving = enc2_move;
@@ -1035,10 +1091,10 @@ static void io_task(void *arg)
         }
         /* btn 1–9: additional buttons, actions to be assigned */
 
-        /* DEBUG: print raw ADC value on BTN_ADC_PIN every 3 s */
+        /* DEBUG: print raw ADC value on BTN_ADC_PIN every 10 s */
         {
             static uint16_t dbg_ctr = 0;
-            if (++dbg_ctr >= 300) {
+            if (++dbg_ctr >= 1000) {
                 dbg_ctr = 0;
                 int raw = 0;
                 adc_oneshot_read(potis_get_adc_handle(), ADC_CHANNEL_2, &raw);
@@ -1118,6 +1174,8 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "=== Music Player starting ===");
+
+    dimmerlink_probe();   /* detect DimmerLink I2C dimmer, log status if present */
 
     /* GPIO ISR service (shared by encoder button and possibly other GPIOs) */
     esp_err_t isr_ret = gpio_install_isr_service(0);

@@ -73,6 +73,7 @@ static pcnt_channel_handle_t s_chan_a = nullptr;
 static pcnt_channel_handle_t s_chan_b = nullptr;
 
 static float   s_speed_smooth = 0.0f;
+static float   s_instant_rps  = 0.0f; /* raw speed from last 50 ms window, no EMA */
 static bool    s_moving       = false;
 static uint8_t s_zero_ticks   = 0;   /* consecutive windows with delta == 0 */
 static uint8_t s_tick_count   = 0;   /* ticks accumulated in current window  */
@@ -149,6 +150,9 @@ float encoder2_update(void)
 
     /* Signed instant speed so direction reversals cancel in the filter. */
     float instant_rps_signed = (float)delta / (ENC2_COUNTS_PER_REV * ENC2_DT);
+    /* Store raw (unsmoothed) magnitude for consumers that want instant response
+     * (e.g. DimmerLink – deliberately skips the heavy audio EMA). */
+    s_instant_rps = fabsf(instant_rps_signed);
 
     /* Asymmetric EMA: slow attack (organ feel), fast release (crank stopped).
      * Release only engages after ENC2_RELEASE_TICKS consecutive zero-count
@@ -188,4 +192,9 @@ float encoder2_update(void)
 bool encoder2_is_moving(void)
 {
     return s_moving;
+}
+
+float encoder2_get_instant_rps(void)
+{
+    return s_instant_rps;
 }

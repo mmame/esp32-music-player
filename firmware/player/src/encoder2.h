@@ -36,6 +36,17 @@ float encoder2_update(void);
  */
 bool  encoder2_is_moving(void);
 
+/**
+ * @brief Raw (unsmoothed) speed from the last 50 ms measurement window.
+ *
+ * Unlike encoder2_update(), this value has no EMA applied, so it responds
+ * instantly to crank irregularities.  Suitable for driving a lamp dimmer
+ * where visible flicker is desirable.  Updated every 50 ms.
+ *
+ * @return Instant speed [rotations/second], always >= 0.
+ */
+float encoder2_get_instant_rps(void);
+
 #ifdef __cplusplus
 }
 #endif

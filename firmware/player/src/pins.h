@@ -21,8 +21,6 @@
 
 /* ── UART1 link to Display-ESP ───────────────────────────────────────────── */
 #define UM_UART_NUM     1   /* UART peripheral index                          */
-//#define UM_TX_PIN       40  /* Player TX  →  Display RX                       */
-//#define UM_RX_PIN       41  /* Player RX  ←  Display TX                       */
 #define UM_TX_PIN       43  /* Player TX  →  Display RX                       */
 #define UM_RX_PIN       44  /* Player RX  ←  Display TX                       */
 
@@ -33,6 +31,10 @@
 /* ── Rotary encoder 2 (organ-player speed wheel, 360 cycles/rev) ─────────── */
 #define ENC2_PIN_A      7   /* Encoder 2 channel A                            */
 #define ENC2_PIN_B      8   /* Encoder 2 channel B                            */
+
+/* ── DimmerLink I2C dimmer (RBDimmer) ────────────────────────────────────── */
+#define DIMMERLINK_SDA_PIN  0   /* I2C SDA – pull-up required                 */
+#define DIMMERLINK_SCL_PIN  4   /* I2C SCL – pull-up required                 */
 
 /* ── Resistor-ladder button array (ADC) ──────────────────────────────────── */
 /* All buttons share one ADC pin.  R38 = 10 kΩ pull-up to 3V3.              */

@@ -35,6 +35,7 @@ endif()
 idf_component_register(
     SRCS
         "main.cpp"
+        "dimmerlink.cpp"
         "encoder.cpp"
         "encoder2.cpp"
         "potis.cpp"
