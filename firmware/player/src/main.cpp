@@ -575,7 +575,7 @@ static void create_pipeline(void)
     st_cfg.samplerate  = 44100;
     st_cfg.channels    = 2;
     st_cfg.tempo       = g_speed;
-    st_cfg.out_rb_size = 32 * 1024; /* 128 KB PSRAM – absorbs bursty TDHS output          */
+    st_cfg.out_rb_size = 16 * 1024; /* 16 KB PSRAM – absorbs bursty TDHS output          */
     st_cfg.task_stack  =  16 * 1024; /*  16 KB – TDHS uses significant stack              */
     st_cfg.task_core   =          1; /* core 1: TDHS off core 0 so WAV decoder runs freely */
     g_sonic_el = soundtouch_el_init(&st_cfg);
@@ -594,7 +594,7 @@ static void create_pipeline(void)
     i2s_cfg.std_cfg.gpio_cfg.ws   = (gpio_num_t)MY_I2S_WS;
     i2s_cfg.std_cfg.gpio_cfg.dout = (gpio_num_t)MY_I2S_DATA;
     i2s_cfg.std_cfg.gpio_cfg.din  = (gpio_num_t)I2S_GPIO_UNUSED;
-    i2s_cfg.std_cfg.gpio_cfg.mclk = (gpio_num_t)MY_I2S_SCK;
+    i2s_cfg.std_cfg.gpio_cfg.mclk = (gpio_num_t)MY_I2S_MCLK;
     /* All uploaded files are normalised to 16-bit / 48 kHz / 1ch mono by the
      * browser before upload.  I2S is configured for mono-on-both-slots so the
      * DAC receives the same sample on both L and R wires ("2CH Mono" I2S). */
@@ -605,7 +605,7 @@ static void create_pipeline(void)
     /* DMA buffers live in internal RAM; out_rb_size goes to PSRAM via audio_mem_calloc.
      * buffer_len must be a multiple of 12 (I2S_BUFFER_ALINED_BYTES_SIZE). */
     i2s_cfg.buffer_len            = 3600;           /* default                   */
-    i2s_cfg.out_rb_size           =  32 * 1024;     /*  32 KB (was 128 KB)       */
+    i2s_cfg.out_rb_size           =  16 * 1024;     /*  16 KB       */
     i2s_cfg.chan_cfg.dma_desc_num  = 4;             /* descriptors (was 8)       */
     i2s_cfg.chan_cfg.dma_frame_num = 256;           /* frames/desc (was 1024)    */
     g_i2s_el = i2s_stream_init(&i2s_cfg);
@@ -959,10 +959,14 @@ static void io_task(void *arg)
             static uint8_t    s_last_tempo_sent  = 255; /* 255 = force first send */
             static TickType_t s_last_tempo_tick  = 0;
 
-            /* Stop fade-out state: ramp volume to 0 before issuing pause.
-             * Step 4 per 10 ms tick → ~250 ms at full volume, shorter otherwise. */
-            static bool    s_vol_fading = false;
-            static int16_t s_fade_vol   = 0;   /* current fade level 0–100 */
+            /* Fade-out: ramp volume to 0 when crank stops, then pause.
+             * Fade-in:  ramp volume from 0 when crank starts, after resume.
+             * Step 1 per 10 ms tick → ~700–1000 ms at full volume.
+             * Mid-transition reversals cross-fade smoothly from current level. */
+            static bool    s_vol_fading  = false; /* fade-out active */
+            static bool    s_vol_fadein  = false; /* fade-in  active */
+            static int16_t s_fade_vol    = 0;     /* fade-out level (vol → 0) */
+            static int16_t s_fadein_vol  = 0;     /* fade-in  level (0 → vol) */
 
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
@@ -982,18 +986,23 @@ static void io_task(void *arg)
             }
 
             if (enc2_move) {
-                /* If we were fading, cancel it and restore the real volume */
+                /* Cancel any in-progress fade-out; continue fading in from that level */
                 if (s_vol_fading) {
                     s_vol_fading = false;
-#ifdef HAVE_ADF
-                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-                    apply_volume_locked(vol);
-                    xSemaphoreGive(s_state_mutex);
-#endif
+                    s_vol_fadein = true;
+                    s_fadein_vol = s_fade_vol;
                 }
                 s_enc2_pause_sent = false; /* re-arm for next stop */
                 /* Rising edge: encoder started spinning while song is paused */
                 if (!s_enc2_was_moving && g_is_paused && g_current_song >= 0) {
+                    /* Pre-silence output, then resume and ramp up */
+                    s_vol_fadein = true;
+                    s_fadein_vol = 0;
+#ifdef HAVE_ADF
+                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                    apply_volume_locked(0);
+                    xSemaphoreGive(s_state_mutex);
+#endif
                     s_cmd_resume = true;
                 }
                 /* Update speed target while song is active and speed not locked */
@@ -1002,7 +1011,30 @@ static void io_task(void *arg)
                     if (speed_target < SPEED_MIN) speed_target = SPEED_MIN;
                     if (speed_target > SPEED_MAX) speed_target = SPEED_MAX;
                 }
+#ifdef HAVE_ADF
+                /* Step fade-in each tick until target volume is reached */
+                if (s_vol_fadein) {
+                    s_fadein_vol += 1;
+                    if (s_fadein_vol >= (int16_t)vol) {
+                        s_fadein_vol = (int16_t)vol;
+                        s_vol_fadein = false;
+                        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                        apply_volume_locked(vol);
+                        xSemaphoreGive(s_state_mutex);
+                    } else {
+                        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                        apply_volume_locked((uint8_t)s_fadein_vol);
+                        xSemaphoreGive(s_state_mutex);
+                    }
+                }
+#endif
             } else {
+                /* Cancel any in-progress fade-in; start fade-out from that level */
+                if (s_vol_fadein) {
+                    s_vol_fadein = false;
+                    s_vol_fading = true;
+                    s_fade_vol   = s_fadein_vol;
+                }
                 /* Encoder stopped – fade volume to 0 before pausing */
                 if (g_is_playing && !s_enc2_pause_sent) {
                     if (!s_vol_fading) {
@@ -1012,7 +1044,7 @@ static void io_task(void *arg)
                     }
 #ifdef HAVE_ADF
                     /* Step fade down each 10 ms tick */
-                    s_fade_vol -= 4;
+                    s_fade_vol -= 1;
                     if (s_fade_vol <= 0) {
                         s_fade_vol = 0;
                         s_vol_fading = false;

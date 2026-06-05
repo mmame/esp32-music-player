@@ -58,9 +58,9 @@ static const char *TAG = "enc2";
 
 /*
  * Consecutive zero-count windows required before switching to fast release.
- * 5 windows × 50 ms = 250 ms of silence before decay kicks in.
+ * 2 windows × 50 ms = 100 ms of silence before decay kicks in.
  */
-#define ENC2_RELEASE_TICKS  3
+#define ENC2_RELEASE_TICKS  2
 
 /* Hysteretic stop/start thresholds [RPS] */
 #define ENC2_STOP_THRESH     0.25f   /* moving  → stopped (lower threshold) */
