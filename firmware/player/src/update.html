@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Music Player &#8212; Firmware Update</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f1a;color:#e0e0e0;min-height:100vh;padding:16px}
+header{margin-bottom:20px}
+header h1{color:#a78bfa;font-size:1.5rem;margin-bottom:2px}
+header p{color:#555;font-size:13px}
+.back{display:inline-flex;align-items:center;gap:6px;color:#7c3aed;font-size:13px;text-decoration:none;margin-bottom:12px}
+.back:hover{color:#a78bfa}
+h2{font-size:.75rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px}
+h3{font-size:.8rem;color:#9090b0;margin:16px 0 10px}
+section{background:#16213e;border:1px solid #1e2a52;border-radius:12px;padding:18px;margin-bottom:16px}
+.btn{display:inline-block;padding:7px 16px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:background .15s}
+.btn-primary{background:#7c3aed;color:#fff}.btn-primary:hover{background:#6d28d9}
+.btn-primary:disabled{background:#3a1a7a;color:#888;cursor:not-allowed}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-ghost{background:#1e2a52;color:#a0a0c0}.btn-ghost:hover{background:#252f5e}
+.fw-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.fw-fname{color:#888;font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fw-log{background:#0a0a14;border:1px solid #1e2a52;border-radius:8px;padding:12px;margin-top:12px;
+        font-size:11px;color:#7cbb7c;max-height:280px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;display:none}
+.divider{border:none;border-top:1px solid #1e2a52;margin:18px 0}
+.note{font-size:11px;color:#555;margin-top:8px;line-height:1.5}
+</style>
+</head>
+<body>
+
+<a href="/" class="back">&#8592; File Manager</a>
+
+<header>
+  <h1>&#128295; Firmware Update</h1>
+  <p>192.168.4.1</p>
+</header>
+
+<!-- ── Display ESP32 ─────────────────────────────────────────────── -->
+<section>
+  <h2>Display ESP32 Firmware</h2>
+  <div class="fw-row">
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('disp-bin-input').click()">Choose .bin&hellip;</button>
+    <span class="fw-fname" id="disp-bin-name">No file chosen</span>
+  </div>
+  <div class="fw-row">
+    <button class="btn btn-primary" id="disp-flash-btn">&#9889; Flash Display</button>
+  </div>
+  <input type="file" id="disp-bin-input" accept=".bin" style="display:none">
+  <pre class="fw-log" id="disp-ota-log"></pre>
+  <p class="note">Firmware is flashed via the ROM UART bootloader (UART1). Flash address: 0x10000.</p>
+</section>
+
+<!-- ── Player ESP32 ──────────────────────────────────────────────── -->
+<section>
+  <h2>Player ESP32 Firmware (OTA)</h2>
+  <div class="fw-row">
+    <button class="btn btn-ghost btn-sm" onclick="document.getElementById('player-bin-input').click()">Choose .bin&hellip;</button>
+    <span class="fw-fname" id="player-bin-name">No file chosen</span>
+  </div>
+  <div class="fw-row">
+    <button class="btn btn-primary" id="player-flash-btn">&#9889; Flash Player</button>
+  </div>
+  <input type="file" id="player-bin-input" accept=".bin" style="display:none">
+  <pre class="fw-log" id="player-ota-log"></pre>
+  <p class="note">Uses ESP-IDF OTA. The device will restart automatically after a successful flash.
+    Upload the <strong>musicplayer.bin</strong> application image (not the full flash image).</p>
+</section>
+
+<script>
+(function(){
+'use strict';
+
+function fmtSize(b){
+  if(b<1024)return b+' B';
+  if(b<1048576)return(b/1024).toFixed(1)+' KB';
+  return(b/1048576).toFixed(1)+' MB';
+}
+
+async function flashFirmware(url, file, logEl, btn, idleLabel) {
+  logEl.style.display = 'block';
+  logEl.textContent   = '';
+  btn.disabled        = true;
+  btn.textContent     = 'Flashing\u2026';
+
+  function appendLog(text) {
+    logEl.textContent += text;
+    logEl.scrollTop    = logEl.scrollHeight;
+  }
+
+  try {
+    var resp = await fetch(url, {
+      method : 'POST',
+      body   : file,
+      headers: {
+        'Content-Type'  : 'application/octet-stream',
+        'Content-Length': String(file.size)
+      }
+    });
+    if (!resp.ok) {
+      appendLog('HTTP error: ' + resp.status + ' ' + resp.statusText + '\n');
+      return;
+    }
+    var reader  = resp.body.getReader();
+    var decoder = new TextDecoder();
+    for (;;) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      appendLog(decoder.decode(chunk.value, { stream: true }));
+    }
+  } catch (e) {
+    /* Connection drop after device restart is expected for player OTA. */
+    appendLog('Connection closed (' + e.message + ')\n');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = idleLabel;
+  }
+}
+
+/* ── Display FW ── */
+var dispInput = document.getElementById('disp-bin-input');
+var dispName  = document.getElementById('disp-bin-name');
+var dispLog   = document.getElementById('disp-ota-log');
+var dispBtn   = document.getElementById('disp-flash-btn');
+
+dispInput.addEventListener('change', function(){
+  dispName.textContent = dispInput.files.length
+    ? dispInput.files[0].name + ' (' + fmtSize(dispInput.files[0].size) + ')'
+    : 'No file chosen';
+});
+
+dispBtn.addEventListener('click', function(){
+  if (!dispInput.files.length) { alert('Choose a .bin file first.'); return; }
+  flashFirmware('/disp_update', dispInput.files[0], dispLog, dispBtn, '\u26A1 Flash Display');
+});
+
+/* ── Player FW ── */
+var playerInput = document.getElementById('player-bin-input');
+var playerName  = document.getElementById('player-bin-name');
+var playerLog   = document.getElementById('player-ota-log');
+var playerBtn   = document.getElementById('player-flash-btn');
+
+playerInput.addEventListener('change', function(){
+  playerName.textContent = playerInput.files.length
+    ? playerInput.files[0].name + ' (' + fmtSize(playerInput.files[0].size) + ')'
+    : 'No file chosen';
+});
+
+playerBtn.addEventListener('click', function(){
+  if (!playerInput.files.length) { alert('Choose a .bin file first.'); return; }
+  if (!confirm('Flash player firmware?\nThe device will restart after flashing.\nYou will need to reconnect to "MusicPlayer" WiFi.')) return;
+  flashFirmware('/player_update', playerInput.files[0], playerLog, playerBtn, '\u26A1 Flash Player');
+});
+
+})();
+</script>
+</body>
+</html>

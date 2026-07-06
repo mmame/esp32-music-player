@@ -37,6 +37,7 @@
 /* Application modules (pure ESP-IDF, always compiled) */
 #include "pins.h"
 #include "dimmerlink.h"
+#include "disp_ota.h"
 #include "encoder.h"
 #include "encoder2.h"
 #include "potis.h"
@@ -1209,6 +1210,8 @@ extern "C" void app_main(void)
 
     dimmerlink_probe();   /* detect DimmerLink I2C dimmer, log status if present */
 
+    disp_ota_init();      /* RST=HIGH, BOOT0=LOW – display ESP32 runs normally    */
+
     /* GPIO ISR service (shared by encoder button and possibly other GPIOs) */
     esp_err_t isr_ret = gpio_install_isr_service(0);
     if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
@@ -1240,7 +1243,13 @@ extern "C" void app_main(void)
     uart_master_set_set_song_settings_callback(on_set_song_settings);
 
     uart_master_send_song_list(g_song_names, g_song_count);
-    uart_master_sync(500);
+
+    if (!uart_master_sync(500)) {
+        /* Display did not respond – auto-enable WiFi so the user can flash it
+         * remotely via the web interface (POST /disp_update).               */
+        ESP_LOGW(TAG, "Display SYNC failed – enabling WiFi for remote display flash");
+        web_server_enable();
+    }
 
 #ifdef HAVE_ADF
     BaseType_t audio_ok = xTaskCreatePinnedToCore(

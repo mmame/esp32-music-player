@@ -25,6 +25,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -270,4 +271,54 @@ void dimmerlink_set_level(uint8_t pct)
     if (pct > 100u) pct = 100u;
     uint8_t buf[2] = { REG_DIM0_LEVEL, pct };
     i2c_master_transmit(s_dev, buf, sizeof(buf), /*timeout_ms=*/20);
+}
+
+void dimmerlink_suspend(void)
+{
+    if (s_dev) {
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = nullptr;
+    }
+    if (s_bus) {
+        i2c_del_master_bus(s_bus);
+        s_bus = nullptr;
+    }
+    /* Reset the pin to high-impedance so disp_ota can drive it freely.  *
+     * The external 4.7 kΩ pull-up will hold the line HIGH during the    *
+     * brief window before disp_ota pulls it LOW for download mode.      */
+    gpio_reset_pin((gpio_num_t)DIMMERLINK_SCL_PIN);
+    ESP_LOGI(TAG, "dimmerlink suspended (I2C released for display OTA)");
+}
+
+void dimmerlink_resume(void)
+{
+    if (s_bus) return;   /* already running */
+
+    i2c_master_bus_config_t bus_cfg;
+    memset(&bus_cfg, 0, sizeof(bus_cfg));
+    bus_cfg.i2c_port           = I2C_NUM_0;
+    bus_cfg.sda_io_num         = (gpio_num_t)DIMMERLINK_SDA_PIN;
+    bus_cfg.scl_io_num         = (gpio_num_t)DIMMERLINK_SCL_PIN;
+    bus_cfg.clk_source         = I2C_CLK_SRC_DEFAULT;
+    bus_cfg.glitch_ignore_cnt  = 7;
+    bus_cfg.flags.enable_internal_pullup = false;
+
+    if (i2c_new_master_bus(&bus_cfg, &s_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "dimmerlink_resume: failed to recreate I2C bus");
+        return;
+    }
+
+    i2c_device_config_t dev_cfg;
+    memset(&dev_cfg, 0, sizeof(dev_cfg));
+    dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_cfg.device_address  = DIMMERLINK_I2C_ADDR;
+    dev_cfg.scl_speed_hz    = DIMMERLINK_SPEED_HZ;
+
+    if (i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev) != ESP_OK) {
+        ESP_LOGE(TAG, "dimmerlink_resume: failed to re-add device");
+        i2c_del_master_bus(s_bus);
+        s_bus = nullptr;
+        return;
+    }
+    ESP_LOGI(TAG, "dimmerlink resumed (I2C restored after display OTA)");
 }

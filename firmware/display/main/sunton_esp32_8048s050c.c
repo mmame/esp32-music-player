@@ -20,7 +20,6 @@
 #include "lvgl.h"
 
 #include "sunton_esp32_8048s050c.h"
-#include "uart_comm.h"
 
 const esp_lcd_rgb_panel_config_t panel_config = {
     .data_width = 16,
@@ -38,22 +37,18 @@ const esp_lcd_rgb_panel_config_t panel_config = {
 #else
     .clk_src = LCD_CLK_SRC_PLL160M,
     .timings = {
-        .pclk_hz = (14*1000000),
+        .pclk_hz = (16*1000000),
 #endif
-        .h_res = SUNTON_ESP32_LCD_WIDTH,
-        .v_res = SUNTON_ESP32_LCD_HEIGHT,
         .hsync_pulse_width = 4,
         .hsync_back_porch = 8,
         .hsync_front_porch = 8,
         .vsync_pulse_width = 4,
         .vsync_back_porch = 8,
         .vsync_front_porch = 8,
+        .h_res = SUNTON_ESP32_LCD_WIDTH,
+        .v_res = SUNTON_ESP32_LCD_HEIGHT,
         .flags = {
-            .hsync_idle_low = true,
-            .vsync_idle_low = true,
-            .de_idle_high = false,
             .pclk_active_neg = true,
-            .pclk_idle_high = false,
         },
     },
     .dma_burst_size = 64,
@@ -102,54 +97,22 @@ void sunton_esp32s3_backlight_init(void)
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, SUNTON_ESP32_BACKLIGHT_LEDC_CHANNEL));
 }
 
-#if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
-IRAM_ATTR bool lvgl_port_task_notify(uint32_t value)
-{
-    BaseType_t need_yield = pdFALSE;
-
-    // Notify LVGL task
-    if (xPortInIsrContext() == pdTRUE)
-    {
-        xTaskNotifyFromISR(lvgl_port_task_handle, value, eNoAction, &need_yield);
-    }
-    else
-    {
-        xTaskNotify(lvgl_port_task_handle, value, eNoAction);
-    }
-
-    return (need_yield == pdTRUE);
-}
-
-static bool lvgl_port_flush_vsync_ready_callback(esp_lcd_panel_handle_t panel_io, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx)
-{
-    return lvgl_port_task_notify(ULONG_MAX);
-}
-#endif
-
-#if !CONFIG_SUNTON_ESP32_DOUBLE_FB
+/* Called by esp_lcd driver when draw_bitmap() has finished updating the framebuffer.
+ * This is the correct place to call lv_display_flush_ready() for BOTH single and
+ * double framebuffer modes, because the driver invokes on_color_trans_done from
+ * within esp_lcd_panel_draw_bitmap() after the cache is flushed and the DMA
+ * redirect is complete. */
 static bool lvgl_port_flush_ready(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_ctx)
 {
     lv_display_t *disp = (lv_display_t *)user_ctx;
     lv_display_flush_ready(disp);
     return false;
 }
-#endif
 
 static void lvgl_disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
 {
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
-#if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
-    if (lv_display_flush_is_last(disp))
-    {
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, lv_disp_get_hor_res(disp), lv_disp_get_ver_res(disp), px_map);
-        /* Waiting for the last frame buffer to complete transmission */
-        ulTaskNotifyValueClear(NULL, ULONG_MAX);
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    }
-    lv_display_flush_ready(disp);
-#else
     esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
-#endif
 };
 
 static void lvgl_port_task(void *arg)
@@ -161,9 +124,7 @@ static void lvgl_port_task(void *arg)
     uint32_t task_delay_ms = CONFIG_LVGL_TASK_MAX_DELAY_MS;
     while (1)
     {
-        lv_lock();
         task_delay_ms = lv_timer_handler();
-        lv_unlock();
         if (task_delay_ms > CONFIG_LVGL_TASK_MAX_DELAY_MS)
         {
             task_delay_ms = CONFIG_LVGL_TASK_MAX_DELAY_MS;
@@ -201,14 +162,6 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     lv_display_set_flush_cb(disp, lvgl_disp_flush);
 
 #if CONFIG_SUNTON_ESP32_DOUBLE_FB
-#if CONFIG_SUNTON_ESP32_DOUBLE_FB_TEARING
-    // register flush callback to avoid tearing effect
-    const esp_lcd_rgb_panel_event_callbacks_t cbs = {
-        .on_vsync = lvgl_port_flush_vsync_ready_callback,
-    };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, disp));
-#endif
-
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
     lv_display_set_buffers(disp, buf1, buf2, SUNTON_ESP32_LCD_WIDTH * SUNTON_ESP32_LCD_HEIGHT * sizeof(lv_color_t), LV_DISPLAY_RENDER_MODE_DIRECT);
 #else
@@ -216,11 +169,15 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     //buf1 = esp_lcd_rgb_alloc_draw_buffer(panel_handle, buffer_size, 0); // Future use, currently not in release
     buf1 = heap_caps_malloc(buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     lv_display_set_buffers(disp, buf1, buf2, buffer_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+#endif
+
+    /* Register on_color_trans_done for all modes. The driver calls this from within
+     * esp_lcd_panel_draw_bitmap() once the cache is flushed and the DMA is updated,
+     * which is the correct moment to signal lv_display_flush_ready(). */
     const esp_lcd_rgb_panel_event_callbacks_t cbs = {
         .on_color_trans_done = lvgl_port_flush_ready,
     };
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, disp));
-#endif
 
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
     const esp_timer_create_args_t lvgl_tick_timer_args = {
@@ -283,13 +240,6 @@ static void touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
     {
         data->state = LV_INDEV_STATE_RELEASED;
     }
-
-    /* Forward touch state to the UART comm layer for ACK responses */
-    uart_comm_update_touch(
-        touchpad_cnt > 0,
-        (int16_t)data_point.x,
-        (int16_t)data_point.y
-    );
 }
 
 static esp_lcd_touch_handle_t touch_init(i2c_master_bus_handle_t i2c_master)

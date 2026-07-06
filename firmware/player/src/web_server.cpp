@@ -40,6 +40,10 @@
 #include "esp_netif.h"
 #include "esp_http_server.h"
 
+#include "disp_ota.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+
 static const char *TAG = "web_server";
 
 /* ── Configuration ─────────────────────────────────────────────────── */
@@ -145,8 +149,10 @@ static bool get_query_param(httpd_req_t *req,
 /* ── GET / ──────────────────────────────────────────────────────────── */
 
 /* Symbols injected by the linker from the EMBED_FILES mechanism. */
-extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+extern const uint8_t index_html_start[]  asm("_binary_index_html_start");
+extern const uint8_t index_html_end[]    asm("_binary_index_html_end");
+extern const uint8_t update_html_start[] asm("_binary_update_html_start");
+extern const uint8_t update_html_end[]   asm("_binary_update_html_end");
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
@@ -154,6 +160,16 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     size_t len = (size_t)(index_html_end - index_html_start);
     return httpd_resp_send(req, (const char *)index_html_start, (ssize_t)len);
+}
+
+/* ── GET /update ────────────────────────────────────────────────────── */
+
+static esp_err_t update_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    size_t len = (size_t)(update_html_end - update_html_start);
+    return httpd_resp_send(req, (const char *)update_html_start, (ssize_t)len);
 }
 
 /* ── GET /api/files ─────────────────────────────────────────────────── */
@@ -451,13 +467,247 @@ static esp_err_t delete_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── POST /player_update ────────────────────────────────────────────── */
+
+/**
+ * Receive a raw firmware binary and flash it to the next OTA partition using
+ * the ESP-IDF OTA API.  Streams text progress to the browser.  Restarts the
+ * device automatically on success.
+ *
+ * Requires otadata + ota_0 partitions in the partition table.
+ * Content-Length must be set by the client; max 4 MB accepted.
+ */
+static esp_err_t player_update_post_handler(httpd_req_t *req)
+{
+    int total = (int)req->content_len;
+    if (total <= 0 || total > 4 * 1024 * 1024) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Content-Length required and must be 1\xe2\x80\x934 MB");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+
+#define PU_SEND(msg) httpd_resp_send_chunk(req, (msg), (ssize_t)strlen(msg))
+    char log_buf[128];
+
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        PU_SEND("ERROR: No OTA partition found. Check partitions.csv.\n");
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    snprintf(log_buf, sizeof(log_buf),
+             "OTA target: %s (0x%08lX, %lu kB)\n",
+             part->label,
+             (unsigned long)part->address,
+             (unsigned long)(part->size / 1024u));
+    PU_SEND(log_buf);
+
+    if ((size_t)total > part->size) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "ERROR: Image (%d bytes) exceeds partition size (%lu bytes).\n",
+                 total, (unsigned long)part->size);
+        PU_SEND(log_buf);
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t ota_handle = 0;
+    esp_err_t err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
+    if (err != ESP_OK) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "ERROR: esp_ota_begin: %s\n", esp_err_to_name(err));
+        PU_SEND(log_buf);
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    snprintf(log_buf, sizeof(log_buf), "Receiving %d bytes...\n", total);
+    PU_SEND(log_buf);
+
+    int      received       = 0;
+    int      last_report_kb = 0;
+    esp_err_t recv_err      = ESP_OK;
+
+    while (received < total) {
+        int to_read = MIN((int)sizeof(s_xfer_buf), total - received);
+        int r = httpd_req_recv(req, s_xfer_buf, (size_t)to_read);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            snprintf(log_buf, sizeof(log_buf),
+                     "ERROR: Receive failed after %d/%d bytes.\n", received, total);
+            PU_SEND(log_buf);
+            recv_err = ESP_FAIL;
+            break;
+        }
+        err = esp_ota_write(ota_handle, s_xfer_buf, (size_t)r);
+        if (err != ESP_OK) {
+            snprintf(log_buf, sizeof(log_buf),
+                     "ERROR: esp_ota_write: %s\n", esp_err_to_name(err));
+            PU_SEND(log_buf);
+            recv_err = ESP_FAIL;
+            break;
+        }
+        received += r;
+
+        /* Report progress every 64 kB. */
+        int current_kb = received / (64 * 1024);
+        if (current_kb > last_report_kb) {
+            last_report_kb = current_kb;
+            snprintf(log_buf, sizeof(log_buf),
+                     "  %d / %d kB (%d%%)\n",
+                     received / 1024, total / 1024,
+                     received * 100 / total);
+            PU_SEND(log_buf);
+        }
+    }
+
+    if (recv_err != ESP_OK) {
+        esp_ota_abort(ota_handle);
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "ERROR: esp_ota_end: %s\n", esp_err_to_name(err));
+        PU_SEND(log_buf);
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_set_boot_partition(part);
+    if (err != ESP_OK) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "ERROR: esp_ota_set_boot_partition: %s\n", esp_err_to_name(err));
+        PU_SEND(log_buf);
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    PU_SEND("SUCCESS: OTA write complete. Restarting in 2 s...\n");
+    httpd_resp_send_chunk(req, nullptr, 0);  /* terminate chunked response */
+
+    /* Allow the final HTTP chunk to flush before the restart. */
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+
+#undef PU_SEND
+    return ESP_OK;  /* unreachable */
+}
+
+/* ── POST /disp_update?addr=<hex_or_dec> ────────────────────────────── */
+
+/**
+ * Receive a raw firmware binary, save it temporarily to the SD card, then
+ * invoke disp_ota_flash() to reflash the display ESP32.
+ *
+ * The response is chunked plain-text so the browser can stream progress.
+ * addr query parameter sets the target flash address (default 0x10000).
+ * Content-Length must be set by the client; max 4 MB accepted.
+ */
+static esp_err_t disp_update_post_handler(httpd_req_t *req)
+{
+    int total = (int)req->content_len;
+    if (total <= 0 || total > 4 * 1024 * 1024) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Content-Length required and must be 1–4 MB");
+        return ESP_FAIL;
+    }
+
+    /* Parse optional flash address (hex or decimal). */
+    uint32_t flash_addr = 0x10000u;
+    char addr_str[24] = {};
+    if (get_query_param(req, "addr", addr_str, sizeof(addr_str))) {
+        long v = strtol(addr_str, nullptr, 0);
+        if (v > 0 && v < 0x1000000L) flash_addr = (uint32_t)v;
+    }
+
+    /* Set up streaming plain-text response. */
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+
+#define DISP_FW_TMP_PATH  MOUNT_POINT "/disp_fw.bin"
+#define SEND_LOG(msg) httpd_resp_send_chunk(req, (msg), (ssize_t)strlen(msg))
+
+    char log_buf[120];
+    snprintf(log_buf, sizeof(log_buf),
+             "Receiving %d bytes -> " DISP_FW_TMP_PATH "\n", total);
+    SEND_LOG(log_buf);
+
+    /* Save binary to SD card. */
+    FILE *f = fopen(DISP_FW_TMP_PATH, "wb");
+    if (!f) {
+        SEND_LOG("ERROR: Cannot create temp file on SD card.\n");
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    esp_err_t save_err = ESP_OK;
+    while (received < total) {
+        int to_read = MIN((int)sizeof(s_xfer_buf), total - received);
+        int r = httpd_req_recv(req, s_xfer_buf, (size_t)to_read);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) {
+            snprintf(log_buf, sizeof(log_buf),
+                     "ERROR: Receive failed after %d/%d bytes.\n", received, total);
+            SEND_LOG(log_buf);
+            save_err = ESP_FAIL;
+            break;
+        }
+        if ((int)fwrite(s_xfer_buf, 1, (size_t)r, f) != r) {
+            SEND_LOG("ERROR: SD card write failed.\n");
+            save_err = ESP_FAIL;
+            break;
+        }
+        received += r;
+    }
+    fclose(f);
+
+    if (save_err != ESP_OK) {
+        remove(DISP_FW_TMP_PATH);
+        httpd_resp_send_chunk(req, nullptr, 0);
+        return ESP_FAIL;
+    }
+
+    snprintf(log_buf, sizeof(log_buf),
+             "Saved %d bytes. Flashing at 0x%08lX...\n",
+             received, (unsigned long)flash_addr);
+    SEND_LOG(log_buf);
+
+    /* Flash the display – progress is streamed directly into req. */
+    esp_err_t flash_ret = disp_ota_flash(DISP_FW_TMP_PATH, flash_addr, req);
+
+    remove(DISP_FW_TMP_PATH);
+
+    if (flash_ret == ESP_OK) {
+        SEND_LOG("SUCCESS: Display reflashed and restarted.\n");
+    } else {
+        SEND_LOG("FAILED: See log above for details.\n");
+    }
+
+    httpd_resp_send_chunk(req, nullptr, 0);  /* terminate chunked response */
+
+#undef SEND_LOG
+#undef DISP_FW_TMP_PATH
+
+    return (flash_ret == ESP_OK) ? ESP_OK : ESP_FAIL;
+}
+
 /* ── HTTP server ────────────────────────────────────────────────────── */
 
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 8192;
-    cfg.max_uri_handlers  = 8;
+    cfg.max_uri_handlers  = 10;
     cfg.recv_wait_timeout = 30;  /* seconds – per individual recv call   */
     cfg.send_wait_timeout = 30;
 
@@ -468,12 +718,15 @@ static httpd_handle_t start_webserver(void)
     }
 
     static const httpd_uri_t handlers[] = {
-        { "/",          HTTP_GET,    root_get_handler,     nullptr },
-        { "/api/files", HTTP_GET,    files_get_handler,    nullptr },
-        { "/download",  HTTP_GET,    download_get_handler, nullptr },
-        { "/upload",    HTTP_POST,   upload_post_handler,  nullptr },
-        { "/rename",    HTTP_POST,   rename_post_handler,  nullptr },
-        { "/delete",    HTTP_DELETE, delete_handler,       nullptr },
+        { "/",              HTTP_GET,    root_get_handler,          nullptr },
+        { "/update",        HTTP_GET,    update_get_handler,        nullptr },
+        { "/api/files",     HTTP_GET,    files_get_handler,         nullptr },
+        { "/download",      HTTP_GET,    download_get_handler,      nullptr },
+        { "/upload",        HTTP_POST,   upload_post_handler,       nullptr },
+        { "/rename",        HTTP_POST,   rename_post_handler,       nullptr },
+        { "/delete",        HTTP_DELETE, delete_handler,            nullptr },
+        { "/disp_update",   HTTP_POST,   disp_update_post_handler,  nullptr },
+        { "/player_update", HTTP_POST,   player_update_post_handler, nullptr },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {
         httpd_register_uri_handler(server, &handlers[i]);

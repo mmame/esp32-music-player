@@ -233,6 +233,28 @@ void uart_master_send_encoder_btn(void);
  */
 bool uart_master_sync(uint32_t timeout_ms);
 
+/* ── OTA support ──────────────────────────────────────────────────────────── */
+
+/**
+ * @brief Temporarily suspend UART1 communication for display OTA flashing.
+ *
+ * Sets a "paused" flag so pending send calls are dropped immediately, waits
+ * for any in-flight transmission to complete, waits for the receive task to
+ * become idle, then uninstalls the UART driver.
+ *
+ * Call uart_master_resume() to restore normal operation.
+ * Must NOT be called before uart_master_init().
+ */
+void uart_master_pause(void);
+
+/**
+ * @brief Restore UART1 after a display OTA flash.
+ *
+ * Re-installs the UART1 driver with the original configuration and clears
+ * the "paused" flag so the receive task and send functions resume normally.
+ */
+void uart_master_resume(void);
+
 #ifdef __cplusplus
 }
 #endif

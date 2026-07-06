@@ -23,6 +23,8 @@
 #define UM_UART_NUM     1   /* UART peripheral index                          */
 #define UM_TX_PIN       43  /* Player TX  →  Display RX                       */
 #define UM_RX_PIN       44  /* Player RX  ←  Display TX                       */
+#define DISP_ESP32_RESET_PIN  9  /* Display-ESP32 reset pin (active low)     */
+#define DISP_ESP32_BOOT0_PIN  4  /* Display-ESP32 BOOT0 pin (LOW=download mode, HIGH=normal boot) -> shared with I2C SCL */
 
 /* ── Rotary encoder 1 (navigation) ──────────────────────────────────────── */
 #define ENC_PIN_A       5   /* Encoder 1 channel A                            */
@@ -34,7 +36,7 @@
 
 /* ── DimmerLink I2C dimmer (RBDimmer) ────────────────────────────────────── */
 #define DIMMERLINK_SDA_PIN  0   /* I2C SDA – pull-up required                 */
-#define DIMMERLINK_SCL_PIN  4   /* I2C SCL – pull-up required                 */
+#define DIMMERLINK_SCL_PIN  4   /* I2C SCL – pull-up required  - shared with DISP_ESP32_BOOT0_PIN  */
 
 /* ── Resistor-ladder button array (ADC) ──────────────────────────────────── */
 /* All buttons share one ADC pin.  R38 = 10 kΩ pull-up to 3V3.              */
@@ -64,3 +66,4 @@
 /* ── Potentiometers (ADC1 channel numbers = GPIO numbers on ESP32-S3) ────── */
 #define POT_PIN_VOLUME  1   /* Master volume  – ADC1 / GPIO1                  */
 #define POT_PIN_TEMPO   2   /* Playback speed – ADC1 / GPIO2                  */
+

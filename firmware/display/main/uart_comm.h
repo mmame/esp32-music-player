@@ -34,8 +34,8 @@ extern "C" {
 
 /* ---------- Hardware configuration ---------- */
 #define UART_COMM_PORT          UART_NUM_1
-#define UART_COMM_TX_PIN        GPIO_NUM_17
-#define UART_COMM_RX_PIN        GPIO_NUM_18
+#define UART_COMM_TX_PIN        GPIO_NUM_43
+#define UART_COMM_RX_PIN        GPIO_NUM_44
 #define UART_COMM_BAUD_RATE     921600
 #define UART_COMM_RX_BUF_SIZE   (2048)
 

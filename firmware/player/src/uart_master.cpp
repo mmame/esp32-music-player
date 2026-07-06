@@ -43,6 +43,12 @@ static SemaphoreHandle_t s_ack_sem  = nullptr;
 /** Mutex serialising concurrent calls to uart_write_bytes. */
 static SemaphoreHandle_t s_tx_mutex = nullptr;
 
+/** Set to true by uart_master_pause(); cleared by uart_master_resume(). */
+static volatile bool     s_paused    = false;
+
+/** Binary semaphore: rx_task gives this once it has stopped calling uart_read_bytes. */
+static SemaphoreHandle_t s_pause_ack = nullptr;
+
 /* ── Parser state machine ──────────────────────────────────────────────────── */
 
 typedef enum {
@@ -61,6 +67,9 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len);
 
 static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len)
 {
+    /* Fast-path: drop silently if UART is taken over for display OTA. */
+    if (s_paused) return;
+
     if (payload_len > UM_MAX_PAYLOAD) {
         ESP_LOGW(TAG, "send_packet: payload too large (%u), clamping", payload_len);
         payload_len = UM_MAX_PAYLOAD;
@@ -85,7 +94,11 @@ static void send_packet(uint8_t cmd, const uint8_t *payload, uint8_t payload_len
     const uint8_t total = (uint8_t)(sizeof(UM_MAGIC) + 2u + payload_len + 1u);
 
     xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
-    uart_write_bytes(UART_PORT, buf, total);
+    /* Double-check inside the mutex: pause may have been set just after the
+     * pre-check above but before we acquired the lock.                     */
+    if (!s_paused) {
+        uart_write_bytes(UART_PORT, buf, total);
+    }
     xSemaphoreGive(s_tx_mutex);
 }
 
@@ -105,10 +118,12 @@ void uart_master_init(um_on_play_song_cb_t     on_play_song,
     s_on_resume        = on_resume;
     s_on_display_ready = on_display_ready;
 
-    s_ack_sem  = xSemaphoreCreateBinary();
-    s_tx_mutex = xSemaphoreCreateMutex();
-    configASSERT(s_ack_sem  != nullptr);
-    configASSERT(s_tx_mutex != nullptr);
+    s_ack_sem   = xSemaphoreCreateBinary();
+    s_tx_mutex  = xSemaphoreCreateMutex();
+    s_pause_ack = xSemaphoreCreateBinary();
+    configASSERT(s_ack_sem   != nullptr);
+    configASSERT(s_tx_mutex  != nullptr);
+    configASSERT(s_pause_ack != nullptr);
 
     const uart_config_t cfg = {
         .baud_rate           = UM_BAUD_RATE,
@@ -311,6 +326,13 @@ static void rx_task(void *arg)
     ESP_LOGI(TAG, "RX task running on core %d", xPortGetCoreID());
 
     while (true) {
+        /* When paused for OTA, signal readiness and yield until resumed. */
+        if (s_paused) {
+            xSemaphoreGive(s_pause_ack);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
         if (uart_read_bytes(UART_PORT, &byte, 1, pdMS_TO_TICKS(50)) != 1) {
             continue;
         }
@@ -521,4 +543,43 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         ESP_LOGW(TAG, "Unknown CMD 0x%02X (len=%u)", cmd, len);
         break;
     }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * OTA pause / resume
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+void uart_master_pause(void)
+{
+    /* 1. Signal all senders to stop. */
+    s_paused = true;
+
+    /* 2. Drain any in-flight transmission: wait to acquire (and immediately
+     *    release) the TX mutex.  After s_paused=true, no new send will enter
+     *    the mutex; any ongoing send will finish and release it. */
+    xSemaphoreTake(s_tx_mutex, pdMS_TO_TICKS(500));
+    xSemaphoreGive(s_tx_mutex);
+
+    /* 3. Wait for the rx_task to leave uart_read_bytes and acknowledge. */
+    xSemaphoreTake(s_pause_ack, pdMS_TO_TICKS(300));
+
+    /* 4. Switch to ROM-bootloader baud rate in-place.
+     *    We deliberately do NOT delete/reinstall the UART driver because
+     *    uart_driver_delete releases the GPIO pins back to UART0 (console),
+     *    and the subsequent uart_set_pin call then fails with
+     *    "GPIO X is not usable".  Keeping the driver alive and only
+     *    changing the baud rate avoids the GPIO conflict entirely.        */
+    uart_set_baudrate(UART_PORT, 115200);
+    uart_flush_input(UART_PORT);
+    ESP_LOGI(TAG, "UART master paused for display OTA (baud -> 115200)");
+}
+
+void uart_master_resume(void)
+{
+    /* Restore original baud rate; the driver and GPIO pins were never
+     * released so no reinstall or pin reconfiguration is needed.        */
+    uart_flush_input(UART_PORT);
+    uart_set_baudrate(UART_PORT, UM_BAUD_RATE);
+    s_paused = false;
+    ESP_LOGI(TAG, "UART master resumed after display OTA");
 }

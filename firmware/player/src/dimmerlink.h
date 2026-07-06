@@ -34,6 +34,23 @@ bool dimmerlink_probe(void);
  */
 void dimmerlink_set_level(uint8_t pct);
 
+/**
+ * @brief Release I2C bus and free GPIO4 (SCL) for use as BOOT0 output.
+ *
+ * Safe to call even if dimmerlink_probe() was never called or failed.
+ * Pair with dimmerlink_resume() to restore the I2C link.
+ */
+void dimmerlink_suspend(void);
+
+/**
+ * @brief Re-create the I2C bus and device handle after dimmerlink_suspend().
+ *
+ * Does not re-run the full probe / UART fallback – just reinstates the
+ * already-configured bus.  dimmerlink_set_level() will be a no-op if the
+ * device is not responding, so this is safe to call unconditionally.
+ */
+void dimmerlink_resume(void);
+
 #ifdef __cplusplus
 }
 #endif
