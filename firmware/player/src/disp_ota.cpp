@@ -13,7 +13,7 @@
  *   SPI_ATTACH   (0x0D) – attach SPI flash
  *   CHANGE_BAUD  (0x0F) – speed up after initial sync
  *   FLASH_BEGIN  (0x02) – erase + prepare write region
- *   FLASH_DATA   (0x03) – write one 1 KB block
+ *   FLASH_DATA   (0x03) – write one 16 KB block
  *   FLASH_END    (0x04) – finalise + reboot
  */
 
@@ -48,26 +48,15 @@ static const char *TAG = "disp_ota";
 static const uint8_t SLIP_ESC_BYTE    = 0xDB;
 static const uint8_t SLIP_END_BYTE    = 0xC0;
 
-#define ROM_SYNC           0x08u
-#define ROM_SPI_ATTACH     0x0Du
-#define ROM_SPI_SET_PARAMS 0x0Bu  /* set SPI flash geometry (id/size/block/sector/page/mask) */
-#define ROM_CHANGE_BAUD    0x0Fu
-#define ROM_FLASH_BEGIN    0x02u
-#define ROM_FLASH_DATA     0x03u
-#define ROM_FLASH_END      0x04u
+#define ROM_SYNC        0x08u
+#define ROM_SPI_ATTACH  0x0Du
+#define ROM_CHANGE_BAUD 0x0Fu
+#define ROM_FLASH_BEGIN 0x02u
+#define ROM_FLASH_DATA  0x03u
+#define ROM_FLASH_END   0x04u
 
 #define FLASH_BLOCK_SIZE  0x400u    /* 1 KB per FLASH_DATA block (ROM loader; stub uses 0x4000) */
-#define OTA_BAUD_RATE     115200    /* baud for OTA; set > 115200 to enable CHANGE_BAUD     */
-
-/*
- * POST_ERASE_DELAY_MS: extra wait after FLASH_BEGIN "Erase OK" before the
- * first FLASH_DATA block.  The ESP32-S3 ROM (esp32s3-20210327) sometimes
- * sends the FLASH_BEGIN response before the flash erase has fully completed.
- * If FLASH_DATA timeouts persist despite other fixes, set this to
- * (ceil(fw_size/4096) * 100) ms — roughly 100 ms per 4 KB sector.
- * Default 0 = no extra wait.
- */
-#define POST_ERASE_DELAY_MS  0
+#define OTA_BAUD_RATE     460800    /* baud after CHANGE_BAUDRATE                       */
 
 #define CSUM_MAGIC 0xEFu            /* XOR-checksum seed for FLASH_DATA                 */
 
@@ -215,20 +204,10 @@ static bool rom_wait_resp(uint8_t cmd, int timeout_ms)
         if (frame[0] != 0x01) continue;   /* not a response direction */
         if (frame[1] != cmd)  continue;   /* wrong command echo       */
         if (frame[8] != 0x00) {
-            ESP_LOGW(TAG, "ROM cmd 0x%02X error status=0x%02X error_code=0x%02X "
-                     "frame[2..9]: %02X %02X  %02X%02X%02X%02X  %02X %02X",
-                     cmd, frame[8], frame[9],
-                     frame[2], frame[3],
-                     frame[4], frame[5], frame[6], frame[7],
-                     frame[8], frame[9]);
+            ESP_LOGW(TAG, "ROM cmd 0x%02X error status=0x%02X error_code=0x%02X",
+                     cmd, frame[8], frame[9]);
             return false;
         }
-        /* Log full response for key commands to aid timing diagnostics. */
-        ESP_LOGI(TAG, "ROM cmd 0x%02X OK  (len=%d) "
-                 "val=%02X%02X%02X%02X  status=%02X%02X",
-                 cmd, len,
-                 frame[4], frame[5], frame[6], frame[7],
-                 frame[8], len > 9 ? frame[9] : 0);
         return true;
     }
     ESP_LOGW(TAG, "ROM cmd 0x%02X: response timeout (%d ms)", cmd, timeout_ms);
@@ -291,53 +270,6 @@ static bool rom_spi_attach(void)
     static const uint8_t payload[8] = {0};   /* all zeros for standard SPI flash */
     rom_send_cmd(ROM_SPI_ATTACH, payload, 8, 0);
     return rom_wait_resp(ROM_SPI_ATTACH, 1000);
-}
-
-/**
- * SPI_SET_PARAMS: tell the ROM the flash geometry so it can correctly set
- * up write-enable, sector-erase, and page-program operations.
- *
- * From esp-serial-flasher loader_spi_parameters():
- *   payload = [id:4][total_size:4][block_size:4][sector_size:4][page_size:4][status_mask:4]
- *
- * Must be called after SPI_ATTACH and before FLASH_BEGIN.
- * Use 4 MB as the default — most ESP32 display modules ship with 4 MB flash.
- */
-static bool rom_spi_set_params(void)
-{
-    static constexpr uint32_t FLASH_TOTAL  = 4u * 1024u * 1024u;
-    static constexpr uint32_t BLOCK_SZ     = 64u * 1024u;
-    static constexpr uint32_t SECTOR_SZ    = 4u * 1024u;
-    static constexpr uint32_t PAGE_SZ      = 256u;
-    static constexpr uint32_t STATUS_MASK  = 0xFFFFu;
-
-    uint8_t p[24] = {};
-    /* id = 0 (p[0..3] already zero) */
-    /* total_size */
-    p[4]  = (uint8_t)(FLASH_TOTAL         & 0xFF);
-    p[5]  = (uint8_t)((FLASH_TOTAL >>  8)  & 0xFF);
-    p[6]  = (uint8_t)((FLASH_TOTAL >> 16)  & 0xFF);
-    p[7]  = (uint8_t)((FLASH_TOTAL >> 24)  & 0xFF);
-    /* block_size */
-    p[8]  = (uint8_t)(BLOCK_SZ         & 0xFF);
-    p[9]  = (uint8_t)((BLOCK_SZ >>  8)  & 0xFF);
-    p[10] = (uint8_t)((BLOCK_SZ >> 16)  & 0xFF);
-    p[11] = (uint8_t)((BLOCK_SZ >> 24)  & 0xFF);
-    /* sector_size */
-    p[12] = (uint8_t)(SECTOR_SZ         & 0xFF);
-    p[13] = (uint8_t)((SECTOR_SZ >>  8)  & 0xFF);
-    p[14] = (uint8_t)((SECTOR_SZ >> 16)  & 0xFF);
-    p[15] = (uint8_t)((SECTOR_SZ >> 24)  & 0xFF);
-    /* page_size */
-    p[16] = (uint8_t)(PAGE_SZ & 0xFF);
-    /* p[17..19] = 0 */
-    /* status_mask */
-    p[20] = (uint8_t)(STATUS_MASK        & 0xFF);
-    p[21] = (uint8_t)((STATUS_MASK >> 8)  & 0xFF);
-    /* p[22..23] = 0 */
-
-    rom_send_cmd(ROM_SPI_SET_PARAMS, p, 24, 0);
-    return rom_wait_resp(ROM_SPI_SET_PARAMS, 1000);
 }
 
 static void ota_set_baud(uint32_t baud);   /* forward declaration */
@@ -414,13 +346,10 @@ static bool rom_flash_begin(uint32_t fw_size, uint32_t addr)
  *
  * `block_data` must point to exactly FLASH_BLOCK_SIZE bytes, padded with 0xFF.
  * `seq` is the 0-based block sequence number.
- *
- * Checksum: per-block XOR seeded fresh with CSUM_MAGIC (0xEF) for every block,
- * matching esp-serial-flasher compute_checksum() which always initialises to 0xEF.
  */
 static bool rom_flash_data_block(const uint8_t *block_data, uint32_t seq)
 {
-    /* Per-block XOR checksum, seeded fresh with 0xEF (matches esp-serial-flasher). */
+    /* XOR checksum of the data bytes, seeded with CSUM_MAGIC (0xEF). */
     uint32_t csum = CSUM_MAGIC;
     for (uint32_t i = 0; i < FLASH_BLOCK_SIZE; i++) csum ^= block_data[i];
 
@@ -452,11 +381,6 @@ static bool rom_flash_data_block(const uint8_t *block_data, uint32_t seq)
     outer_hdr[6] = (uint8_t)((csum >> 16) & 0xFF);
     outer_hdr[7] = (uint8_t)((csum >> 24) & 0xFF);
 
-    ESP_LOGD(TAG, "FLASH_DATA seq=%lu csum=0x%02X dlen=%u  hdr: %02X %02X %02X %02X %02X %02X %02X %02X",
-             (unsigned long)seq, (unsigned)csum, (unsigned)dlen,
-             outer_hdr[0], outer_hdr[1], outer_hdr[2], outer_hdr[3],
-             outer_hdr[4], outer_hdr[5], outer_hdr[6], outer_hdr[7]);
-
     const uint8_t frame_end = SLIP_END;
     uart_write_bytes(OTA_PORT, &frame_end, 1);
     slip_encode_bytes(outer_hdr, 8);
@@ -464,25 +388,16 @@ static bool rom_flash_data_block(const uint8_t *block_data, uint32_t seq)
     slip_encode_bytes(block_data, FLASH_BLOCK_SIZE);
     uart_write_bytes(OTA_PORT, &frame_end, 1);
 
-    return rom_wait_resp(ROM_FLASH_DATA, 10000);   /* allow 10 s: ROM may be busy after erase */
+    return rom_wait_resp(ROM_FLASH_DATA, 5000);
 }
 
-static bool rom_flash_end(bool stay)
+static bool rom_flash_end(bool reboot)
 {
-    /*
-     * payload[0]: 0 = run application (reboot), 1 = stay in download mode.
-     *
-     * Per esp-serial-flasher esp_loader_flash_finish():
-     *   "ROM does not respond to next commands after flash end."
-     * For ROM (no stub), the library skips FLASH_END entirely; the reboot is
-     * driven by the RST pin in cleanup.  We send stay=true so the ROM idles
-     * (rather than auto-rebooting with possibly wrong BOOT0 state), and our
-     * cleanup RST pulse handles the clean reboot.
-     * Ignore the response – the ROM may or may not reply.
-     */
-    uint8_t payload[4] = { static_cast<uint8_t>(stay ? 1u : 0u), 0u, 0u, 0u };
+    /* payload[0]: 0 = reboot after flash, 1 = stay in flash mode */
+    uint8_t payload[4] = { reboot ? 0u : 0u, 0u, 0u, 0u };
     rom_send_cmd(ROM_FLASH_END, payload, 4, 0);
-    rom_wait_resp(ROM_FLASH_END, 500);   /* best-effort; timeout is normal for ROM */
+    /* The display may reset before we receive the ACK – treat timeout as OK. */
+    rom_wait_resp(ROM_FLASH_END, 1000);
     return true;
 }
 
@@ -541,9 +456,8 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
         goto done;
     }
     {
-        uint32_t fw_size      = (uint32_t)st.st_size;
-        uint32_t num_blocks   = (fw_size + FLASH_BLOCK_SIZE - 1u) / FLASH_BLOCK_SIZE;
-        /* Block checksum is per-block (fresh 0xEF seed each call), per source. */
+        uint32_t fw_size    = (uint32_t)st.st_size;
+        uint32_t num_blocks = (fw_size + FLASH_BLOCK_SIZE - 1u) / FLASH_BLOCK_SIZE;
         progress(req, "Firmware: %lu bytes  |  %lu blocks x %u bytes",
                  (unsigned long)fw_size, (unsigned long)num_blocks, FLASH_BLOCK_SIZE);
 
@@ -576,7 +490,8 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
         }
         boot0_set(0);                    /* GPIO0 LOW = download mode         */
         vTaskDelay(pdMS_TO_TICKS(500));  /* wait for cap to fully discharge   */
-        rst_set(0);                      /* assert reset                      */
+        rst_set(0);      
+        uart_flush_input(OTA_PORT);
         vTaskDelay(pdMS_TO_TICKS(200));  /* hold RST low                      */
         rst_set(1);                      /* release reset – ROM reads GPIO0   */
 
@@ -653,20 +568,7 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
         }
         progress(req, "SPI_ATTACH OK");
 
-        /* ── 6b. SPI_SET_PARAMS ────────────────────────────────────── */
-        /* Required before FLASH_BEGIN: sets flash geometry so the ROM's      *
-         * write-enable and sector-erase routines work correctly.             *
-         * Mirrors esp-serial-flasher loader_spi_parameters() call.          */
-        if (!rom_spi_set_params()) {
-            progress(req, "WARNING: SPI_SET_PARAMS failed – continuing (may affect writes)");
-        } else {
-            progress(req, "SPI_SET_PARAMS OK");
-        }
-
         /* ── 7. CHANGE_BAUDRATE (optional speed-up) ──────────────────── */
-        /* Skip if OTA_BAUD_RATE == 115200: no change needed, avoids any     *
-         * residual state issues from the baud-switch handshake.             */
-#if OTA_BAUD_RATE > 115200
         progress(req, "Switching to %d baud...", OTA_BAUD_RATE);
         if (!rom_change_baud(OTA_BAUD_RATE)) {
             progress(req, "Warning: CHANGE_BAUDRATE failed – continuing at 115200");
@@ -674,9 +576,6 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
         } else {
             progress(req, "Baud rate changed to %d", OTA_BAUD_RATE);
         }
-#else
-        progress(req, "OTA at 115200 baud (CHANGE_BAUD skipped)");
-#endif
 
         /* ── 8. FLASH_BEGIN (erase) ───────────────────────────────────── */
         vTaskDelay(pdMS_TO_TICKS(50));   /* settle after baud change         */
@@ -687,108 +586,6 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
             goto cleanup_uart;
         }
         progress(req, "Erase OK");
-
-        /*
-         * ── ROM-restart detection ──────────────────────────────────────────
-         *
-         * When the display boots normally (BOOT0 not driven LOW, or GPIO4
-         * not wired to display GPIO0), its application answers the setup
-         * commands (SYNC / SPI_ATTACH / SPI_SET_PARAMS / FLASH_BEGIN) with
-         * hardcoded fake-OK frames (all with val=07071220 = SYNC magic).
-         * After the fake FLASH_BEGIN response the app is expected to call
-         * esp_restart_rom_uart_bootloader(), putting the display into real
-         * ROM download mode.
-         *
-         * We scan the UART for the ROM "waiting for download" banner for up
-         * to 3 s.  If detected we re-run the full ROM handshake (re-SYNC →
-         * re-SPI_ATTACH → re-SPI_SET_PARAMS → re-FLASH_BEGIN with real
-         * erase) before proceeding to FLASH_DATA.
-         *
-         * If no restart is detected we assume the display is already in real
-         * ROM mode (BOOT0 properly wired) and proceed to FLASH_DATA directly.
-         */
-        {
-            bool rom_restarted = false;
-            uint8_t scan_buf[512];
-            int  scan_len = 0;
-
-            uart_flush_input(OTA_PORT);
-            progress(req, "Scanning for ROM restart after FLASH_BEGIN (3 s)...");
-
-            int64_t scan_dl = esp_timer_get_time() + 3000LL * 1000LL;
-            while (!rom_restarted
-                   && esp_timer_get_time() < scan_dl
-                   && scan_len < (int)sizeof(scan_buf) - 1) {
-                int n = uart_read_bytes(OTA_PORT,
-                                        scan_buf + scan_len,
-                                        (int)(sizeof(scan_buf) - 1) - scan_len,
-                                        pdMS_TO_TICKS(100));
-                if (n > 0) {
-                    scan_len += n;
-                    scan_buf[scan_len] = '\0';          /* NUL-terminate for strstr */
-                    rom_restarted =
-                        (strstr((const char *)scan_buf, "waiting for download") != nullptr) ||
-                        (strstr((const char *)scan_buf, "Waiting for download") != nullptr);
-                }
-            }
-
-            if (scan_len > 0) {
-                /* Log first 32 bytes as hex for diagnosis. */
-                char hex[100]; int hc = 0;
-                int show = scan_len < 32 ? scan_len : 32;
-                for (int i = 0; i < show && hc + 3 < (int)sizeof(hex); i++)
-                    hc += snprintf(hex + hc, sizeof(hex) - hc, "%02X ", scan_buf[i]);
-                ESP_LOGI(TAG, "Post-erase RX %d bytes: %s", scan_len, hex);
-            }
-
-            if (rom_restarted) {
-                /* ── Display restarted – re-run the handshake with real ROM ── */
-                progress(req, "ROM restart detected! Re-running handshake with real ROM...");
-                uart_flush_input(OTA_PORT);
-                vTaskDelay(pdMS_TO_TICKS(200));   /* let ROM finish printing banner */
-                uart_flush_input(OTA_PORT);
-
-                if (!rom_sync()) {
-                    progress(req, "ERROR: Re-SYNC after ROM restart failed");
-                    goto cleanup_uart;
-                }
-                progress(req, "Re-SYNC OK");
-
-                if (!rom_spi_attach()) {
-                    progress(req, "ERROR: Re-SPI_ATTACH failed");
-                    goto cleanup_uart;
-                }
-                progress(req, "Re-SPI_ATTACH OK");
-
-                if (!rom_spi_set_params()) {
-                    progress(req, "Warning: Re-SPI_SET_PARAMS failed – continuing");
-                } else {
-                    progress(req, "Re-SPI_SET_PARAMS OK");
-                }
-
-                progress(req, "Re-FLASH_BEGIN (real erase, allow 90 s)...");
-                if (!rom_flash_begin(fw_size, flash_addr)) {
-                    progress(req, "ERROR: Re-FLASH_BEGIN (real erase) failed");
-                    goto cleanup_uart;
-                }
-                progress(req, "Real erase OK");
-                uart_flush_input(OTA_PORT);
-
-            } else {
-                /* No restart detected – assume display was already in real ROM mode. */
-                if (scan_len == 0) {
-                    progress(req, "No restart detected (display already in ROM mode or "
-                             "BOOT0 pin not connected). Proceeding with FLASH_DATA.");
-                } else {
-                    progress(req, "Bytes received but no ROM banner. Proceeding with FLASH_DATA.");
-                }
-#if POST_ERASE_DELAY_MS > 0
-                progress(req, "Post-erase safety wait: %d ms...", POST_ERASE_DELAY_MS);
-                vTaskDelay(pdMS_TO_TICKS(POST_ERASE_DELAY_MS));
-#endif
-                uart_flush_input(OTA_PORT);
-            }
-        }
 
         /* ── 9. FLASH_DATA blocks ──────────────────────────────────────── */
         fw_file = fopen(path, "rb");
@@ -805,20 +602,8 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
                 goto cleanup_file;
             }
 
-            /* Retry up to 3 times (matches esp-serial-flasher SERIAL_FLASHER_WRITE_BLOCK_RETRIES). */
-            bool block_ok = false;
-            for (int retry = 0; retry < 3 && !block_ok; retry++) {
-                if (retry > 0) {
-                    progress(req, "Retrying block %lu (attempt %d/3)...",
-                             (unsigned long)seq, retry + 1);
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    uart_flush_input(OTA_PORT);
-                }
-                block_ok = rom_flash_data_block(block, seq);
-            }
-            if (!block_ok) {
-                progress(req, "ERROR: FLASH_DATA failed at block %lu after 3 attempts",
-                         (unsigned long)seq);
+            if (!rom_flash_data_block(block, seq)) {
+                progress(req, "ERROR: FLASH_DATA failed at block %lu", (unsigned long)seq);
                 goto cleanup_file;
             }
 
@@ -831,7 +616,7 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
 
         /* ── 10. FLASH_END ───────────────────────────────────────────── */
         progress(req, "Finalising flash...");
-        rom_flash_end(true);    /* stay=true: ROM idles; cleanup RST reboots display cleanly */
+        rom_flash_end(false);   /* reboot display */
         progress(req, "Flash complete!");
         result = ESP_OK;
         goto cleanup_uart;  /* fall through to cleanup */
@@ -843,9 +628,9 @@ cleanup_uart:
         /* ── 11. Restore normal operation ───────────────────────────── */
         /* No uart_driver_delete needed – driver was kept alive.        */
         boot0_set(1);                    /* BOOT0 HIGH = normal boot     */
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(500));
         rst_set(0);
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(200));
         rst_set(1);          /* display boots normally                  */
 
         /* Release BOOT0 pin so I2C can reclaim GPIO4.                  */

@@ -14,8 +14,8 @@ set(MAIN_REQUIRES
     esp_netif       # TCP/IP network interface
     esp_event       # Default event loop (required by WiFi)
     esp_http_server # Embedded HTTP server
+    app_update      # esp_ota_ops.h – OTA for remote ESP32 display firmware
     json            # cJSON – per-song settings file parser
-    app_update      # esp_ota_begin/write/end – player OTA
 )
 
 # ── ESP-ADF requirements (only when ADF_PATH is set) ─────────────────────

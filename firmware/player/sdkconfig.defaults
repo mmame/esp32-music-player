@@ -1,6 +1,9 @@
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 
+# Use new ESP-IDF v5.3+ I2C master driver (not legacy driver/i2c.h)
+CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+
 # 8 MB Octal PSRAM (ESP32-S3-WROOM-1 N16R8 / N8R8)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y

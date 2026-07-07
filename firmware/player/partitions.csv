@@ -5,5 +5,3 @@
 nvs,        data, nvs,      0x9000,   0x6000,
 phy_init,   data, phy,      0xf000,   0x1000,
 factory,    app,  factory,  0x10000,  0x200000,
-otadata,    data, ota,      0x210000, 0x2000,
-ota_0,      app,  ota_0,    0x220000, 0x200000,

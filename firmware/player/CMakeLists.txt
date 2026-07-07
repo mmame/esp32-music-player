@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
+# ── Require ESP-IDF v5.5.x ───────────────────────────────────────────────────
+# ESP-ADF v2.8 officially supports ESP-IDF v5.1–v5.5 (not master).
+set(IDF_VERSION_REQUIRED "5.5")
+
 # ── Target chip – must be set before including project.cmake ─────────────────
 # The VS Code ESP-IDF extension sets $ENV{IDF_TARGET}=esp32 from its own internal
 # state (ignoring idf.idfTarget in settings.json).  Override the env variable
