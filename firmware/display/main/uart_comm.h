@@ -47,7 +47,9 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 };
 
 #define MAX_PAYLOAD_LEN         128
-#define MAX_SONG_NAME_LEN       64
+/* UTF-8 expansion: each Latin-1 byte can become 2 UTF-8 bytes, so keep
+ * double the raw name length as headroom. */
+#define MAX_SONG_NAME_LEN       128
 
 /* Accumulation buffer for multi-packet CMD_SONG_LIST merging.
  * Sized for SONGLIST_MAX_SONGS (64) × max entry = 64 × (2+64+1) + 3 terminator. */

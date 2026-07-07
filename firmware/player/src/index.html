@@ -149,9 +149,11 @@ fileInput.addEventListener('change',function(){
   fileInput.value='';
 });
 
-/* Strip any extension and force .wav as the target filename on the SD card. */
+/* Strip any extension, trim basename to 44 chars, force .wav extension. */
 function toWavName(originalName){
-  return originalName.replace(/\.[^.]+$/,'')+'.wav';
+  var base=originalName.replace(/\.[^.]+$/,'');
+  if(base.length>44)base=base.substring(0,44);
+  return base+'.wav';
 }
 
 function enqueue(files){
@@ -214,8 +216,8 @@ function processQueue(){
       pFileBar.style.width=pct+'%';
       pFilePct.textContent=pct+'%';
     });
-    }).then(function(){
-      setStatus(item,'st-ok','✓ Done');
+    }).then(function(result){
+      setStatus(item,result==='skipped'?'st-q':'st-ok',result==='skipped'?'↷ Ignored':'✓ Done');
       done++;
       var allDone=done;
       var allTotal=allDone+queue.length;
@@ -234,8 +236,23 @@ function processQueue(){
   next();
 }
 
-function uploadOne(blob, name, onProgress){
-  var url='/upload?name='+encodeURIComponent(name);
+function showConflictDialog(name){
+  return new Promise(function(resolve){
+    var modal=document.getElementById('conflict-modal');
+    document.getElementById('conflict-msg').textContent='"'+name+'" already exists on the SD card.';
+    modal.style.display='flex';
+    var btnReplace=document.getElementById('conflict-replace');
+    var btnIgnore=document.getElementById('conflict-ignore');
+    function cleanup(){modal.style.display='none';btnReplace.removeEventListener('click',onReplace);btnIgnore.removeEventListener('click',onIgnore);}
+    function onReplace(){cleanup();resolve('replace');}
+    function onIgnore(){cleanup();resolve('ignore');}
+    btnReplace.addEventListener('click',onReplace);
+    btnIgnore.addEventListener('click',onIgnore);
+  });
+}
+
+function uploadOne(blob, name, onProgress, replace){
+  var url='/upload?name='+encodeURIComponent(name)+(replace?'&replace=1':'');
   return new Promise(function(resolve,reject){
     var xhr=new XMLHttpRequest();
     xhr.open('POST',url);
@@ -244,8 +261,17 @@ function uploadOne(blob, name, onProgress){
       if(e.lengthComputable)onProgress(Math.round(e.loaded/e.total*100));
     });
     xhr.addEventListener('load',function(){
-      if(xhr.status===200)resolve();
-      else reject(new Error(xhr.responseText||'HTTP '+xhr.status));
+      if(xhr.status===200){resolve();}
+      else if(xhr.status===409){
+        var resp={};
+        try{resp=JSON.parse(xhr.responseText);}catch(e){}
+        showConflictDialog(resp.name||name).then(function(choice){
+          if(choice==='replace')uploadOne(blob,name,onProgress,true).then(resolve).catch(reject);
+          else resolve('skipped');
+        });
+      } else {
+        reject(new Error(xhr.responseText||'HTTP '+xhr.status));
+      }
     });
     xhr.addEventListener('error',function(){reject(new Error('Network error'));});
     xhr.addEventListener('abort',function(){reject(new Error('Aborted'));});
@@ -439,6 +465,18 @@ window.deleteFile=deleteFile;
 loadFiles();
 })();
 </script>
+
+<!-- Conflict dialog (file already exists) -->
+<div id="conflict-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#1a1a2e;border:1px solid #7c3aed;border-radius:8px;padding:24px 28px;max-width:400px;width:90%;text-align:center">
+    <p style="margin:0 0 6px;color:#e0e0e0;font-size:14px" id="conflict-msg"></p>
+    <p style="margin:0 0 20px;color:#888;font-size:12px">How do you want to proceed?</p>
+    <div style="display:flex;gap:12px;justify-content:center">
+      <button id="conflict-replace" style="background:#7c3aed;border:none;color:#fff;padding:8px 22px;border-radius:4px;cursor:pointer;font-size:13px">Replace</button>
+      <button id="conflict-ignore" style="background:#333;border:1px solid #555;color:#ccc;padding:8px 22px;border-radius:4px;cursor:pointer;font-size:13px">Ignore</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>

@@ -52,7 +52,8 @@ static const char *TAG = "web_server";
 #define AP_MAX_CONN    4
 #define MOUNT_POINT    "/sdcard"
 #define XFER_BUF_SIZE  16384   /* bytes per SD read/write chunk            */
-#define MAX_FNAME_LEN  128    /* max accepted filename length (bytes)     */
+#define MAX_FNAME_LEN    128   /* max accepted filename length (bytes)     */
+#define MAX_BASENAME_LEN  44   /* max basename chars (excl. .wav extension) */
 
 /* ── State ─────────────────────────────────────────────────────────── */
 static rescan_cb_t    s_rescan_cb = nullptr;
@@ -286,8 +287,33 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    /* Trim basename to MAX_BASENAME_LEN characters (keep .wav extension). */
+    {
+        size_t total = strlen(fname);
+        if (total > 4) {
+            size_t base_len = total - 4; /* length without ".wav" */
+            if (base_len > MAX_BASENAME_LEN) {
+                memmove(fname + MAX_BASENAME_LEN, fname + base_len, 5); /* ".wav\0" */
+            }
+        }
+    }
+
     char path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
     build_path(path, sizeof(path), fname);
+
+    /* Check if file already exists (unless ?replace=1 is set). */
+    char replace_val[4] = {};
+    bool do_replace = get_query_param(req, "replace", replace_val, sizeof(replace_val))
+                      && replace_val[0] == '1';
+    struct stat exist_st = {};
+    if (!do_replace && stat(path, &exist_st) == 0) {
+        /* Return 409 so the client can ask the user what to do. */
+        char resp[160];
+        snprintf(resp, sizeof(resp), "{\"exists\":true,\"name\":\"%s\"}", fname);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, resp);
+    }
 
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -482,7 +508,7 @@ static esp_err_t player_update_post_handler(httpd_req_t *req)
     int total = (int)req->content_len;
     if (total <= 0 || total > 4 * 1024 * 1024) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                            "Content-Length required and must be 1\xe2\x80\x934 MB");
+                            "Content-Length required and must be 1\xe2\x80\x93" "4 MB");
         return ESP_FAIL;
     }
 

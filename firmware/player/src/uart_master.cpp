@@ -220,8 +220,10 @@ void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t co
 
         buf[buf_pos++] = (uint8_t)(song_id & 0xFF);
         buf[buf_pos++] = (uint8_t)(song_id >> 8);
-        memcpy(&buf[buf_pos], name, name_len);
-        buf_pos += name_len;
+        /* Copy name, replacing '_' with ' ' for readability on the display. */
+        for (uint8_t c = 0; c < name_len; c++) {
+            buf[buf_pos++] = (name[c] == '_') ? ' ' : (uint8_t)name[c];
+        }
         buf[buf_pos++] = '\0';
     }
 

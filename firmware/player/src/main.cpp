@@ -1224,6 +1224,9 @@ extern "C" void app_main(void)
     mount_sd();
     scan_playlist();
 
+    //delay 2 seconds to allow the display to boot and send its SYNC command
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
     web_server_init(player_rescan);
 
 #ifdef HAVE_ADF
