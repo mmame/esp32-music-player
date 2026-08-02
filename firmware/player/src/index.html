@@ -57,6 +57,18 @@ tbody tr:hover td{background:#1a1f3a}
 /* Toast */
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(60px);background:#1e2a52;color:#e0e0e0;padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .3s,transform .3s;pointer-events:none;z-index:99;border:1px solid #2d3561}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* Tabs */
+.tab-nav{display:flex;gap:6px;margin-bottom:16px}
+.tab-btn{padding:8px 20px;border:1px solid #1e2a52;border-radius:6px;cursor:pointer;background:#16213e;color:#9090b0;font-size:13px;font-weight:500;transition:all .15s}
+.tab-btn.active{background:#7c3aed;border-color:#7c3aed;color:#fff}
+/* Config */
+.cfg-row{margin-bottom:20px}
+.cfg-label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
+.cfg-name{color:#d0d0e8;font-size:13px;font-weight:500}
+.cfg-val{color:#a78bfa;font-family:monospace;font-size:14px;min-width:52px;text-align:right}
+input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
+.cfg-desc{font-size:11px;color:#555;margin-top:5px;line-height:1.5}
+.cfg-btns{display:flex;gap:8px;margin-top:24px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -65,6 +77,12 @@ tbody tr:hover td{background:#1a1f3a}
   <p>File Manager &mdash; 192.168.4.1 &nbsp;&#8226;&nbsp; <a href="/update" style="color:#7c3aed;text-decoration:none">Firmware Update</a></p>
 </header>
 
+<nav class="tab-nav">
+  <button class="tab-btn active" data-tab="files" onclick="switchTab('files')">Files</button>
+  <button class="tab-btn" data-tab="config" onclick="switchTab('config')">Configuration</button>
+</nav>
+
+<div id="tab-files">
 <section>
   <h2>Upload Audio Files</h2>
   <div id="drop-zone" role="button" tabindex="0">
@@ -93,6 +111,77 @@ tbody tr:hover td{background:#1a1f3a}
   <div class="empty" id="empty">No WAV files on SD card.</div>
   <div class="err-msg" id="load-err">Failed to load file list. Check SD card.</div>
 </section>
+</div><!-- /tab-files -->
+
+<div id="tab-config" style="display:none">
+<section>
+  <h2>Crank &amp; Playback Configuration</h2>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Speed smoothing (attack)</span><span class="cfg-val" id="vv-ema_attack">0.025</span></div>
+    <input type="range" class="cfg-slider" id="sl-ema_attack" min="0.005" max="0.200" step="0.005" value="0.025" oninput="document.getElementById('vv-ema_attack').textContent=parseFloat(this.value).toFixed(3)">
+    <p class="cfg-desc">How gradually the measured crank speed feeds into playback tempo. Lower = smoother (sluggish). Higher = snappier (may sound choppy). Default: 0.025</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Stop decay (release)</span><span class="cfg-val" id="vv-ema_release">1.5</span></div>
+    <input type="range" class="cfg-slider" id="sl-ema_release" min="0.5" max="2.0" step="0.1" value="1.5" oninput="document.getElementById('vv-ema_release').textContent=parseFloat(this.value).toFixed(1)">
+    <p class="cfg-desc">How fast the speed drops to zero when you stop cranking. Higher = abrupt stop. Values &gt; 1 give near-instant cutoff. Default: 1.5</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Decay delay (50&thinsp;ms windows)</span><span class="cfg-val" id="vv-release_ticks">2</span></div>
+    <input type="range" class="cfg-slider" id="sl-release_ticks" min="0" max="10" step="1" value="2" oninput="document.getElementById('vv-release_ticks').textContent=this.value">
+    <p class="cfg-desc">How many 50&thinsp;ms windows of crank silence are tolerated before fast stop-decay starts. Higher values help absorb brief mid-crank pauses. Default: 2 (100&thinsp;ms)</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Pause threshold (rev/s)</span><span class="cfg-val" id="vv-stop_thresh">0.25</span></div>
+    <input type="range" class="cfg-slider" id="sl-stop_thresh" min="0.05" max="0.60" step="0.05" value="0.25" oninput="document.getElementById('vv-stop_thresh').textContent=parseFloat(this.value).toFixed(2)">
+    <p class="cfg-desc">Crank speed below which playback pauses. Must be lower than the resume threshold. Default: 0.25&thinsp;rev/s</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Resume threshold (rev/s)</span><span class="cfg-val" id="vv-start_thresh">0.70</span></div>
+    <input type="range" class="cfg-slider" id="sl-start_thresh" min="0.20" max="1.20" step="0.05" value="0.70" oninput="document.getElementById('vv-start_thresh').textContent=parseFloat(this.value).toFixed(2)">
+    <p class="cfg-desc">Crank speed above which paused playback resumes. A wider gap between pause and resume thresholds reduces false triggers. Default: 0.70&thinsp;rev/s</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Volume fade speed</span><span class="cfg-val" id="vv-vol_fade_step">1</span></div>
+    <input type="range" class="cfg-slider" id="sl-vol_fade_step" min="1" max="10" step="1" value="1" oninput="document.getElementById('vv-vol_fade_step').textContent=this.value">
+    <p class="cfg-desc">Volume units stepped per 10&thinsp;ms tick during fade-in/out when cranking starts or stops. 1&nbsp;=&nbsp;slow fade (~700&thinsp;ms at full volume). 10&nbsp;=&nbsp;fast fade (~70&thinsp;ms). Default: 1</p>
+  </div>
+  <hr style="border-color:#1e2a52;margin:20px 0 14px">
+  <h3 style="font-size:.7rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px">Dimmer</h3>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Max brightness (%)</span><span class="cfg-val" id="vv-dimmer_max">100</span></div>
+    <input type="range" class="cfg-slider" id="sl-dimmer_max" min="0" max="100" step="5" value="100" oninput="document.getElementById('vv-dimmer_max').textContent=this.value">
+    <p class="cfg-desc">Maximum lamp brightness during playback. 0&thinsp;=&thinsp;dimmer always off. The lamp is off whenever no sound is playing. Default: 100</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Min brightness (%)</span><span class="cfg-val" id="vv-dimmer_min">0</span></div>
+    <input type="range" class="cfg-slider" id="sl-dimmer_min" min="0" max="100" step="5" value="0" oninput="document.getElementById('vv-dimmer_min').textContent=this.value">
+    <p class="cfg-desc">Lamp brightness floor while playing. The lamp stays at least this bright whenever a song is active, even at low crank speed. 0&thinsp;=&thinsp;no floor. Default: 0</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Full brightness at (rev/s)</span><span class="cfg-val" id="vv-dimmer_rps_ref">1.40</span></div>
+    <input type="range" class="cfg-slider" id="sl-dimmer_rps_ref" min="0.5" max="2.5" step="0.1" value="1.4" oninput="document.getElementById('vv-dimmer_rps_ref').textContent=parseFloat(this.value).toFixed(2)">
+    <p class="cfg-desc">Crank speed at which maximum brightness is reached. At lower speeds the lamp dims proportionally; above this it stays at max. Default: 1.40&thinsp;rev/s</p>
+  </div>
+  <div class="cfg-btns">
+    <button class="btn btn-primary" onclick="saveConfig()">&#10003; Apply Changes</button>
+    <button class="btn btn-ghost" onclick="resetConfig()">&#10226; Reset to Defaults</button>
+  </div>
+
+  <hr>
+  <h3>Volume Potentiometer Calibration</h3>
+  <p style="color:#888;font-size:13px;margin:0 0 10px">Current calibration — raw ADC values (0–4095): min = <span id="cal-show-lo">---</span>&ensp;center = <span id="cal-show-mid">---</span>&ensp;max = <span id="cal-show-hi">---</span></p>
+  <div id="cal-wizard" style="display:none;background:#12122a;border:1px solid #7c3aed;border-radius:6px;padding:16px 18px;margin-bottom:14px">
+    <p id="cal-step-msg" style="margin:0 0 14px;font-size:14px"></p>
+    <p id="cal-raw-msg" style="margin:0 0 14px;font-size:12px;color:#888"></p>
+    <div style="display:flex;gap:10px">
+      <button class="btn btn-primary" onclick="calNext()">Next →</button>
+      <button class="btn btn-ghost" onclick="calCancel()">Cancel</button>
+    </div>
+  </div>
+  <button class="btn btn-ghost" id="cal-start-btn" onclick="calStart()">&#9654; Calibrate Potentiometer</button>
+</section>
+</div><!-- /tab-config -->
 
 <div id="toast"></div>
 
@@ -461,6 +550,119 @@ function deleteFile(name){
 // Expose rename/delete to onclick attributes
 window.startRename=startRename;
 window.deleteFile=deleteFile;
+
+/* ── Tabs ── */
+function switchTab(t){
+  document.getElementById('tab-files').style.display=(t==='files'?'':'none');
+  document.getElementById('tab-config').style.display=(t==='config'?'':'none');
+  document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.toggle('active',b.dataset.tab===t);});
+  if(t==='config')loadConfig();
+}
+window.switchTab=switchTab;
+
+/* ── Config ── */
+function setSlider(id,val,dec){
+  var sl=document.getElementById('sl-'+id);
+  var vv=document.getElementById('vv-'+id);
+  if(!sl||!vv)return;
+  sl.value=val;
+  vv.textContent=dec>0?parseFloat(val).toFixed(dec):String(parseInt(val));
+}
+function loadConfig(){
+  fetch('/api/crank_config').then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(c){
+    setSlider('ema_attack',   c.ema_attack,   3);
+    setSlider('ema_release',  c.ema_release,  1);
+    setSlider('stop_thresh',  c.stop_thresh,  2);
+    setSlider('start_thresh', c.start_thresh, 2);
+    setSlider('release_ticks',c.release_ticks,0);
+    setSlider('vol_fade_step',c.vol_fade_step,0);
+    setSlider('dimmer_max',   c.dimmer_max,   0);
+    setSlider('dimmer_min',   c.dimmer_min,   0);
+    setSlider('dimmer_rps_ref',c.dimmer_rps_ref,2);
+    if(c.pot_cal_lo  !==undefined)document.getElementById('cal-show-lo') .textContent=c.pot_cal_lo;
+    if(c.pot_cal_mid !==undefined)document.getElementById('cal-show-mid').textContent=c.pot_cal_mid;
+    if(c.pot_cal_hi  !==undefined)document.getElementById('cal-show-hi') .textContent=c.pot_cal_hi;
+  }).catch(function(e){toast('Could not load config: '+e.message,true);});
+}
+function saveConfig(){
+  var att=parseFloat(document.getElementById('sl-ema_attack').value);
+  var rel=parseFloat(document.getElementById('sl-ema_release').value);
+  var stp=parseFloat(document.getElementById('sl-stop_thresh').value);
+  var sta=parseFloat(document.getElementById('sl-start_thresh').value);
+  var rt =parseInt(document.getElementById('sl-release_ticks').value);
+  var fs =parseInt(document.getElementById('sl-vol_fade_step').value);
+  var dm =parseInt(document.getElementById('sl-dimmer_max').value);
+  var dn =parseInt(document.getElementById('sl-dimmer_min').value);
+  var dr =parseFloat(document.getElementById('sl-dimmer_rps_ref').value);
+  if(sta<=stp){toast('Resume threshold must be above pause threshold',true);return;}
+  fetch('/api/crank_config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_max:dm,dimmer_min:dn,dimmer_rps_ref:dr})
+  }).then(function(r){
+    if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
+    toast('Configuration saved');
+  }).catch(function(e){toast('Save failed: '+e.message,true);});
+}
+function resetConfig(){
+  setSlider('ema_attack',   0.025,3);
+  setSlider('ema_release',  1.5,  1);
+  setSlider('stop_thresh',  0.25, 2);
+  setSlider('start_thresh', 0.70, 2);
+  setSlider('release_ticks',2,    0);
+  setSlider('vol_fade_step',  1,    0);
+  setSlider('dimmer_max',     100,  0);
+  setSlider('dimmer_min',     0,    0);
+  setSlider('dimmer_rps_ref', 1.4,  2);
+  toast('Defaults loaded \u2014 click Apply Changes to save');
+}
+window.saveConfig=saveConfig;
+window.resetConfig=resetConfig;
+
+/* ── Pot calibration wizard ── */
+var g_cal_step=0;
+var CAL_MSGS=[
+  'Turn the potentiometer to <strong>MINIMUM</strong> volume and hold it there, then click Next.',
+  'Turn the potentiometer to the <strong>CENTER</strong> position and hold it there, then click Next.',
+  'Turn the potentiometer to <strong>MAXIMUM</strong> volume and hold it there, then click Next.'
+];
+function calStart(){
+  g_cal_step=0;
+  document.getElementById('cal-wizard').style.display='';
+  document.getElementById('cal-start-btn').style.display='none';
+  document.getElementById('cal-step-msg').innerHTML='Step 1 of 3 — '+CAL_MSGS[0];
+  document.getElementById('cal-raw-msg').textContent='';
+}
+function calNext(){
+  var step=g_cal_step;
+  fetch('/api/pot_cal',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({step:step})
+  }).then(function(r){return r.json();}).then(function(d){
+    if(d.error){toast(d.error,true);calCancel();return;}
+    document.getElementById('cal-raw-msg').textContent='Sampled raw ADC: '+d.raw;
+    if(d.done){
+      document.getElementById('cal-show-lo') .textContent=d.lo;
+      document.getElementById('cal-show-mid').textContent=d.mid;
+      document.getElementById('cal-show-hi') .textContent=d.hi;
+      toast('Potentiometer calibration saved!');
+      calCancel();
+    } else {
+      g_cal_step++;
+      document.getElementById('cal-step-msg').innerHTML='Step '+(g_cal_step+1)+' of 3 — '+CAL_MSGS[g_cal_step];
+    }
+  }).catch(function(){toast('Communication error',true);calCancel();});
+}
+function calCancel(){
+  document.getElementById('cal-wizard').style.display='none';
+  document.getElementById('cal-start-btn').style.display='';
+  g_cal_step=0;
+}
+window.calStart=calStart;window.calNext=calNext;window.calCancel=calCancel;
 
 loadFiles();
 })();

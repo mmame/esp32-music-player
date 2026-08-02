@@ -2,13 +2,12 @@
  * @file potis.cpp
  * @brief Rheostat reader using the ESP32-S3 ADC oneshot driver (IDF 5.x).
  *
- * Circuit:
- *   3.3 V ── [Rheostat 0–POT_R_MAX Ω] ──┬── [POT_R_SERIES] ── GND
- *                                        └── ADC pin
+ * Circuit: 3.3 V ── [Rheostat] ──┬── [1.5 kΩ series] ── GND
+ *                                 └── ADC pin
  *
- * The voltage divider produces a non-linear ADC reading for a linear knob
- * position θ.  raw_to_pct() applies the exact inverse transfer function so
- * the caller receives a linear 0–100 value regardless of circuit loading.
+ * raw_to_pct() uses a 3-point piecewise-linear calibration (lo/mid/hi raw
+ * ADC values measured at the physical min / centre / max knob positions).
+ * Defaults match the circuit model; the web calibration wizard overwrites them.
  *
  * Uses the IDF high-level "ADC Oneshot" driver (esp_adc/adc_oneshot.h).
  * Attenuation: ADC_ATTEN_DB_12 → 0–3.3 V input range.
@@ -36,57 +35,47 @@ static bool     s_buf_full = false;
 
 static uint8_t s_last_volume = 0xFF;
 
-/* ── Rheostat circuit constants ──────────────────────────────────────────── */
-
-/* Current-limiting series resistor between 3.3 V rail and ADC pin [Ω] */
-static constexpr float POT_R_SERIES = 1500.0f;
-/* Rheostat full-scale resistance [Ω] */
-static constexpr float POT_R_MAX    = 10000.0f;
-/* 12-bit ADC full scale */
-static constexpr float POT_ADC_FS   = 4095.0f;
-
-/* End-stop calibration: theoretical % the formula produces at the physical
- * mechanical stops.  Real rheostats don't reach exactly 0 Ω / R_MAX, so the
- * raw formula may output ~2 % at one end and ~98 % at the other.
- * These constants stretch that practical range back to a true 0–100 scale.
- * If your bar stops short of 0 or 100, adjust the values to match what the
- * bar actually reads when the knob is pressed against each stop. */
-static constexpr float POT_STOP_LO  =  5.0f;   /* formula output at min-R stop  */
-static constexpr float POT_STOP_HI  = 95.0f;   /* formula output at max-R stop  */
+/* 3-point calibration: raw ADC values at physical min / center / max knob
+ * positions.  Defaults match the circuit model at the physical end-stops
+ * (R_rheo ≈ R_MAX  → raw ≈ 559; R_rheo = R_MAX/2 → raw ≈ 945;
+ *  R_rheo ≈ 0      → raw ≈ 3071).  potis_set_cal() overwrites these. */
+static uint16_t s_cal_lo  = 559;
+static uint16_t s_cal_mid = 945;
+static uint16_t s_cal_hi  = 3071;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
-/**
- * Convert a mean 12-bit ADC value to a linear 0–100 knob position.
- *
- * Transfer function of the voltage divider:
- *   raw = ADC_FS × R_rheo / (R_series + R_rheo)
- *
- * Circuit: 3.3V → [R_rheo] → ADC → [R_series] → GND
- * Inverse (knob position θ = R_rheo / R_max):
- *   θ = (R_series / R_max) × (ADC_FS − raw) / raw
- *   pct = θ × 100
- */
+/* Piecewise-linear mapping using 3-point calibration. */
 static uint8_t raw_to_pct(uint32_t avg_raw)
 {
-    if (avg_raw == 0) return 0;                        /* open circuit / full-scale R */
-    float numer = POT_ADC_FS - (float)avg_raw;
-    if (numer <= 0.0f) return 100;                     /* rheostat at 0 Ω  → 100%   */
-    float pct    = 100.0f * (POT_R_SERIES / POT_R_MAX) * numer / (float)avg_raw;
-    float result = 100.0f - pct;                       /* invert: high R → low %     */
-    /* Stretch [POT_STOP_LO … POT_STOP_HI] → [0 … 100] so physical end-stops
-     * reach exactly 0 % and 100 % despite real rheostat imperfections. */
-    result = (result - POT_STOP_LO) * (100.0f / (POT_STOP_HI - POT_STOP_LO));
-    if (result <= 0.0f)   return 0;
-    if (result >= 100.0f) return 100;
-    return (uint8_t)(result + 0.5f);
+    float raw = (float)avg_raw;
+    float lo  = (float)s_cal_lo;
+    float mid = (float)s_cal_mid;
+    float hi  = (float)s_cal_hi;
+    if (raw <= lo) return 0;
+    if (raw >= hi) return 100;
+    float pct;
+    if (raw <= mid) {
+        pct = 50.0f * (raw - lo) / (mid - lo);
+    } else {
+        pct = 50.0f + 50.0f * (raw - mid) / (hi - mid);
+    }
+    if (pct <= 0.0f)   return 0;
+    if (pct >= 100.0f) return 100;
+    return (uint8_t)(pct + 0.5f);
 }
 
-static uint8_t buf_average(const uint16_t *buf, uint8_t n)
+static uint32_t buf_raw_avg(void)
 {
+    uint8_t n = s_buf_full ? POT_AVG_SAMPLES : (s_buf_idx == 0 ? 1u : s_buf_idx);
     uint32_t sum = 0;
-    for (uint8_t i = 0; i < n; i++) sum += buf[i];
-    return raw_to_pct(sum / n);
+    for (uint8_t i = 0; i < n; i++) sum += s_vol_buf[i];
+    return (n > 0) ? (sum / n) : 0u;
+}
+
+static uint8_t buf_average(void)
+{
+    return raw_to_pct(buf_raw_avg());
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -131,8 +120,7 @@ bool potis_read(uint8_t *out_volume)
     s_buf_idx = (uint8_t)((s_buf_idx + 1) % POT_AVG_SAMPLES);
     if (s_buf_idx == 0) s_buf_full = true;
 
-    uint8_t n = s_buf_full ? POT_AVG_SAMPLES : (s_buf_idx == 0 ? 1 : s_buf_idx);
-    uint8_t vol = buf_average(s_vol_buf, n);
+    uint8_t vol = buf_average();
 
     if (out_volume) *out_volume = vol;
 
@@ -146,4 +134,16 @@ bool potis_read(uint8_t *out_volume)
 adc_oneshot_unit_handle_t potis_get_adc_handle(void)
 {
     return s_adc_handle;
+}
+
+void potis_set_cal(uint16_t raw_lo, uint16_t raw_mid, uint16_t raw_hi)
+{
+    s_cal_lo  = raw_lo;
+    s_cal_mid = raw_mid;
+    s_cal_hi  = raw_hi;
+}
+
+uint16_t potis_read_raw_avg(void)
+{
+    return (uint16_t)buf_raw_avg();
 }

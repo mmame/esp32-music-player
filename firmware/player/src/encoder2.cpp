@@ -79,6 +79,13 @@ static uint8_t s_zero_ticks   = 0;   /* consecutive windows with delta == 0 */
 static uint8_t s_tick_count   = 0;   /* ticks accumulated in current window  */
 static int     s_delta_acc    = 0;   /* running count sum for current window  */
 
+/* ── Runtime-configurable tuning (defaults mirror the compile-time #defines) */
+static float   s_cfg_ema_attack    = ENC2_EMA_ALPHA_ATTACK;
+static float   s_cfg_ema_release   = ENC2_EMA_ALPHA_RELEASE;
+static float   s_cfg_stop_thresh   = ENC2_STOP_THRESH;
+static float   s_cfg_start_thresh  = ENC2_START_THRESH;
+static uint8_t s_cfg_release_ticks = ENC2_RELEASE_TICKS;
+
 /* ══════════════════════════════════════════════════════════════════════════════
  * Public API
  * ══════════════════════════════════════════════════════════════════════════════ */
@@ -158,7 +165,7 @@ float encoder2_update(void)
      * Release only engages after ENC2_RELEASE_TICKS consecutive zero-count
      * windows (5 × 50 ms = 250 ms), so brief pauses mid-crank are ignored. */
     if (delta == 0) {
-        if (s_zero_ticks < ENC2_RELEASE_TICKS) s_zero_ticks++;
+        if (s_zero_ticks < s_cfg_release_ticks) s_zero_ticks++;
     } else {
         s_zero_ticks = 0;
     }
@@ -167,12 +174,12 @@ float encoder2_update(void)
      *   startup  – crank spinning but playback not yet active (fast climb)
      *   attack   – playback running, smooth out speed changes (slow) */
     float alpha;
-    if (s_zero_ticks >= ENC2_RELEASE_TICKS) {
-        alpha = ENC2_EMA_ALPHA_RELEASE;
+    if (s_zero_ticks >= s_cfg_release_ticks) {
+        alpha = s_cfg_ema_release;
     } else if (!s_moving) {
-        alpha = ENC2_EMA_ALPHA_STARTUP;
+        alpha = ENC2_EMA_ALPHA_STARTUP;  /* startup is not user-configurable */
     } else {
-        alpha = ENC2_EMA_ALPHA_ATTACK;
+        alpha = s_cfg_ema_attack;
     }
     s_speed_smooth = alpha * instant_rps_signed
                    + (1.0f - alpha) * s_speed_smooth;
@@ -180,9 +187,9 @@ float encoder2_update(void)
     float speed_abs = fabsf(s_speed_smooth);
 
     /* Hysteretic stopped / moving state machine */
-    if (!s_moving && speed_abs > ENC2_START_THRESH) {
+    if (!s_moving && speed_abs > s_cfg_start_thresh) {
         s_moving = true;
-    } else if (s_moving && speed_abs < ENC2_STOP_THRESH) {
+    } else if (s_moving && speed_abs < s_cfg_stop_thresh) {
         s_moving = false;
     }
 
@@ -197,4 +204,15 @@ bool encoder2_is_moving(void)
 float encoder2_get_instant_rps(void)
 {
     return s_instant_rps;
+}
+
+void encoder2_apply_config(float ema_attack, float ema_release,
+                            float stop_thresh, float start_thresh,
+                            uint8_t release_ticks)
+{
+    s_cfg_ema_attack    = ema_attack;
+    s_cfg_ema_release   = ema_release;
+    s_cfg_stop_thresh   = stop_thresh;
+    s_cfg_start_thresh  = start_thresh;
+    s_cfg_release_ticks = release_ticks;
 }

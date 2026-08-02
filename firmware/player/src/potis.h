@@ -52,6 +52,19 @@ bool potis_read(uint8_t *volume);
  */
 adc_oneshot_unit_handle_t potis_get_adc_handle(void);
 
+/**
+ * @brief Update the 3-point calibration used by raw_to_pct().
+ *        raw_lo < raw_mid < raw_hi must hold; mapping: lo→0%, mid→50%, hi→100%.
+ *        Call after potis_init(); safe to call from any task.
+ */
+void     potis_set_cal(uint16_t raw_lo, uint16_t raw_mid, uint16_t raw_hi);
+
+/**
+ * @brief Return the current moving-average raw ADC value (12-bit, 0–4095).
+ *        Used by the calibration wizard to capture a stable sample.
+ */
+uint16_t potis_read_raw_avg(void);
+
 #ifdef __cplusplus
 }
 #endif

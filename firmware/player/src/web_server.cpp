@@ -41,6 +41,9 @@
 #include "esp_http_server.h"
 
 #include "disp_ota.h"
+#include "crank_config.h"
+#include "potis.h"
+#include "cJSON.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 
@@ -492,7 +495,170 @@ static esp_err_t delete_handler(httpd_req_t *req)
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
+/* ── GET /api/crank_config ─────────────────────────────────────────── */
 
+static esp_err_t crank_config_get_handler(httpd_req_t *req)
+{
+    char buf[400];
+    snprintf(buf, sizeof(buf),
+             "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
+             "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
+             "\"release_ticks\":%u,\"vol_fade_step\":%u,"
+             "\"dimmer_max\":%u,\"dimmer_min\":%u,\"dimmer_rps_ref\":%.2f,"
+             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u}",
+             (double)g_crank_cfg.ema_attack,
+             (double)g_crank_cfg.ema_release,
+             (double)g_crank_cfg.stop_thresh,
+             (double)g_crank_cfg.start_thresh,
+             (unsigned)g_crank_cfg.release_ticks,
+             (unsigned)g_crank_cfg.vol_fade_step,
+             (unsigned)g_crank_cfg.dimmer_max,
+             (unsigned)g_crank_cfg.dimmer_min,
+             (double)g_crank_cfg.dimmer_rps_ref,
+             (unsigned)g_crank_cfg.pot_cal_lo,
+             (unsigned)g_crank_cfg.pot_cal_mid,
+             (unsigned)g_crank_cfg.pot_cal_hi);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, buf);
+}
+
+/* ── POST /api/crank_config  body: JSON object ───────────────────── */
+
+static esp_err_t crank_config_post_handler(httpd_req_t *req)
+{
+    if (req->content_len > 512) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return ESP_FAIL;
+    }
+
+    char body[513] = {};
+    int r = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (r <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    /* Start from current values so partial updates are accepted */
+    crank_config_t nc = g_crank_cfg;
+
+    auto read_f = [](cJSON *obj, const char *key, float mn, float mx, float *dst) {
+        cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+        if (cJSON_IsNumber(it)) {
+            float v = (float)it->valuedouble;
+            if (v >= mn && v <= mx) *dst = v;
+        }
+    };
+    auto read_u8 = [](cJSON *obj, const char *key, int mn, int mx, uint8_t *dst) {
+        cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+        if (cJSON_IsNumber(it)) {
+            int v = (int)it->valuedouble;
+            if (v >= mn && v <= mx) *dst = (uint8_t)v;
+        }
+    };
+
+    read_f (root, "ema_attack",    0.005f, 0.500f, &nc.ema_attack);
+    read_f (root, "ema_release",   0.500f, 2.000f, &nc.ema_release);
+    read_f (root, "stop_thresh",   0.050f, 0.600f, &nc.stop_thresh);
+    read_f (root, "start_thresh",  0.200f, 1.200f, &nc.start_thresh);
+    read_u8(root, "release_ticks", 0, 10, &nc.release_ticks);
+    read_u8(root, "vol_fade_step", 1, 10, &nc.vol_fade_step);
+    read_u8(root, "dimmer_max",    0, 100, &nc.dimmer_max);
+    read_u8(root, "dimmer_min",    0, 100, &nc.dimmer_min);
+    read_f (root, "dimmer_rps_ref", 0.5f, 3.0f, &nc.dimmer_rps_ref);
+    cJSON_Delete(root);
+
+    if (nc.start_thresh <= nc.stop_thresh) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "start_thresh must be greater than stop_thresh");
+        return ESP_FAIL;
+    }
+
+    g_crank_cfg = nc;
+    crank_config_save();
+    crank_config_apply();
+
+    ESP_LOGI("web_server", "crank_config updated via web");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, "OK");
+}
+
+/* ── POST /api/pot_cal ─────────────────────────────────────────────────
+ * Guided 3-step calibration wizard.
+ * Body: {"step":0|1|2}
+ *   step 0 = pot at MINIMUM  → records raw_lo
+ *   step 1 = pot at CENTER   → records raw_mid
+ *   step 2 = pot at MAXIMUM  → records raw_hi, validates, commits & applies
+ * Returns JSON: {"raw":NNN,"done":false} or {"raw":NNN,"done":true,...}
+ * ──────────────────────────────────────────────────────────────────────── */
+
+static uint16_t s_pot_cal_pending[3] = {559, 945, 3071};
+
+static esp_err_t pot_cal_post_handler(httpd_req_t *req)
+{
+    if (req->content_len > 64) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return ESP_FAIL;
+    }
+    char body[65] = {};
+    int r = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (r <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    cJSON *si = cJSON_GetObjectItemCaseSensitive(root, "step");
+    if (!cJSON_IsNumber(si) || (int)si->valuedouble < 0 || (int)si->valuedouble > 2) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "step must be 0–2");
+        return ESP_FAIL;
+    }
+    int step = (int)si->valuedouble;
+    cJSON_Delete(root);
+
+    uint16_t raw = potis_read_raw_avg();
+    s_pot_cal_pending[step] = raw;
+
+    char resp[120];
+    if (step < 2) {
+        snprintf(resp, sizeof(resp), "{\"raw\":%u,\"done\":false}", (unsigned)raw);
+    } else {
+        /* Validate: points must be strictly ascending with at least 100-count spread */
+        uint16_t lo  = s_pot_cal_pending[0];
+        uint16_t mid = s_pot_cal_pending[1];
+        uint16_t hi  = s_pot_cal_pending[2];
+        if (lo >= mid || mid >= hi || (mid - lo) < 100 || (hi - mid) < 100) {
+            snprintf(resp, sizeof(resp),
+                     "{\"raw\":%u,\"done\":false,"
+                     "\"error\":\"Calibration points out of order or too close – retry\"}",
+                     (unsigned)raw);
+        } else {
+            g_crank_cfg.pot_cal_lo  = lo;
+            g_crank_cfg.pot_cal_mid = mid;
+            g_crank_cfg.pot_cal_hi  = hi;
+            crank_config_save();
+            potis_set_cal(lo, mid, hi);
+            snprintf(resp, sizeof(resp),
+                     "{\"raw\":%u,\"done\":true,"
+                     "\"lo\":%u,\"mid\":%u,\"hi\":%u}",
+                     (unsigned)raw, (unsigned)lo, (unsigned)mid, (unsigned)hi);
+            ESP_LOGI(TAG, "Pot calibration saved: lo=%u mid=%u hi=%u", lo, mid, hi);
+        }
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, resp);
+}
 /* ── POST /player_update ────────────────────────────────────────────── */
 
 /**
@@ -733,7 +899,7 @@ static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 8192;
-    cfg.max_uri_handlers  = 10;
+    cfg.max_uri_handlers  = 12;
     cfg.recv_wait_timeout = 30;  /* seconds – per individual recv call   */
     cfg.send_wait_timeout = 30;
 
@@ -744,15 +910,18 @@ static httpd_handle_t start_webserver(void)
     }
 
     static const httpd_uri_t handlers[] = {
-        { "/",              HTTP_GET,    root_get_handler,          nullptr },
-        { "/update",        HTTP_GET,    update_get_handler,        nullptr },
-        { "/api/files",     HTTP_GET,    files_get_handler,         nullptr },
-        { "/download",      HTTP_GET,    download_get_handler,      nullptr },
-        { "/upload",        HTTP_POST,   upload_post_handler,       nullptr },
-        { "/rename",        HTTP_POST,   rename_post_handler,       nullptr },
-        { "/delete",        HTTP_DELETE, delete_handler,            nullptr },
-        { "/disp_update",   HTTP_POST,   disp_update_post_handler,  nullptr },
-        { "/player_update", HTTP_POST,   player_update_post_handler, nullptr },
+        { "/",                   HTTP_GET,    root_get_handler,              nullptr },
+        { "/update",             HTTP_GET,    update_get_handler,            nullptr },
+        { "/api/files",          HTTP_GET,    files_get_handler,             nullptr },
+        { "/api/crank_config",   HTTP_GET,    crank_config_get_handler,      nullptr },
+        { "/api/crank_config",   HTTP_POST,   crank_config_post_handler,     nullptr },
+        { "/api/pot_cal",        HTTP_POST,   pot_cal_post_handler,          nullptr },
+        { "/download",           HTTP_GET,    download_get_handler,          nullptr },
+        { "/upload",             HTTP_POST,   upload_post_handler,           nullptr },
+        { "/rename",             HTTP_POST,   rename_post_handler,           nullptr },
+        { "/delete",             HTTP_DELETE, delete_handler,                nullptr },
+        { "/disp_update",        HTTP_POST,   disp_update_post_handler,      nullptr },
+        { "/player_update",      HTTP_POST,   player_update_post_handler,    nullptr },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {
         httpd_register_uri_handler(server, &handlers[i]);

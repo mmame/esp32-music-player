@@ -10,6 +10,7 @@
  * Reference:  1 RPS  →  1.0× playback speed
  */
 #pragma once
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,24 @@ bool  encoder2_is_moving(void);
  * @return Instant speed [rotations/second], always >= 0.
  */
 float encoder2_get_instant_rps(void);
+
+/**
+ * @brief Apply runtime-configurable tuning parameters.
+ *
+ * Replaces the compile-time #define defaults with caller-supplied values.
+ * Thread-safe for the use-case of a single writer (web handler) and a single
+ * reader (io_task): float writes on Xtensa are atomic at 32-bit alignment.
+ * The new values take effect on the next 50 ms EMA window.
+ *
+ * @param ema_attack     EMA α during playback  (0.005–0.500)
+ * @param ema_release    EMA α when stopped     (0.500–2.000)
+ * @param stop_thresh    Pause  threshold [RPS] (0.050–0.600)
+ * @param start_thresh   Resume threshold [RPS] (0.200–1.200)
+ * @param release_ticks  Zero-windows before fast decay (0–10)
+ */
+void encoder2_apply_config(float ema_attack, float ema_release,
+                            float stop_thresh, float start_thresh,
+                            uint8_t release_ticks);
 
 #ifdef __cplusplus
 }

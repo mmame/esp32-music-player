@@ -44,6 +44,7 @@
 #include "uart_master.h"
 #include "web_server.h"
 #include "song_settings.h"
+#include "crank_config.h"
 #include "cJSON.h"
 
 /* ESP-ADF headers (only when ADF_PATH is set in CMakeLists) */
@@ -990,21 +991,24 @@ static void io_task(void *arg)
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
 
-            /* ── Dimmer: raw flicker while playing; smooth ramp during fade ─── */
+            /* ── Dimmer: no light when silent; ramp smoothly during fade ── */
             {
                 static uint8_t s_last_dimmer_pct = 255u;
                 uint8_t dpct;
+                float dmax = (float)g_crank_cfg.dimmer_max;
                 if (s_vol_fading && vol > 0) {
-                    /* crank stopped – track volume ramp down, no flicker */
-                    dpct = (uint8_t)((float)s_fade_vol / (float)vol * 100.0f + 0.5f);
+                    dpct = (uint8_t)((float)s_fade_vol / (float)vol * dmax + 0.5f);
                 } else if (s_vol_fadein && vol > 0) {
-                    /* crank started – track volume ramp up, no flicker */
-                    dpct = (uint8_t)((float)s_fadein_vol / (float)vol * 100.0f + 0.5f);
+                    dpct = (uint8_t)((float)s_fadein_vol / (float)vol * dmax + 0.5f);
+                } else if (g_is_playing) {
+                    float dmin = (float)g_crank_cfg.dimmer_min;
+                    float ref  = g_crank_cfg.dimmer_rps_ref;
+                    float t    = (ref > 0.0f) ? (encoder2_get_instant_rps() / ref) : 0.0f;
+                    if (t > 1.0f) t = 1.0f;
+                    float pf   = dmin + (dmax - dmin) * t;
+                    dpct = (uint8_t)(pf + 0.5f);
                 } else {
-                    /* steady-state: instant RPS → brightness, flicker retained */
-                    float irps = encoder2_get_instant_rps();
-                    dpct = (irps <= 0.0f) ? 0u
-                         : (uint8_t)(irps / SPEED_MAX * 100.0f + 0.5f);
+                    dpct = 0u;
                 }
                 if (dpct > 100u) dpct = 100u;
                 if (dpct != s_last_dimmer_pct) {
@@ -1042,7 +1046,7 @@ static void io_task(void *arg)
 #ifdef HAVE_ADF
                 /* Step fade-in each tick until target volume is reached */
                 if (s_vol_fadein) {
-                    s_fadein_vol += 1;
+                    s_fadein_vol += (int16_t)g_crank_cfg.vol_fade_step;
                     if (s_fadein_vol >= (int16_t)vol) {
                         s_fadein_vol = (int16_t)vol;
                         s_vol_fadein = false;
@@ -1072,7 +1076,7 @@ static void io_task(void *arg)
                     }
 #ifdef HAVE_ADF
                     /* Step fade down each 10 ms tick */
-                    s_fade_vol -= 1;
+                    s_fade_vol -= (int16_t)g_crank_cfg.vol_fade_step;
                     if (s_fade_vol <= 0) {
                         s_fade_vol = 0;
                         s_vol_fading = false;
@@ -1260,6 +1264,7 @@ extern "C" void app_main(void)
 
     mount_sd();
     scan_playlist();
+    crank_config_load();
 
     //delay 2 seconds to allow the display to boot and send its SYNC command
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -1284,6 +1289,7 @@ extern "C" void app_main(void)
     potis_init();    /* must come before encoder_init() – shares ADC1 handle */
     encoder_init();
     encoder2_init();
+    crank_config_apply();
 
     uart_master_init(on_play_song, on_stop_song, on_pause, on_resume, on_display_ready);
     uart_master_set_seek_callback(on_seek);
