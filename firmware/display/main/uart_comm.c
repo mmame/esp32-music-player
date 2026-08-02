@@ -45,7 +45,8 @@ music_player_state_t g_player_state = {
 static SemaphoreHandle_t s_state_mutex = NULL;
 
 /** Track previous is_playing to detect play/stop transitions. */
-static uint8_t s_was_playing = 0;
+static uint8_t  s_was_playing  = 0;
+static uint16_t s_prev_song_id = 0;
 
 /* ---------- CMD_SONG_LIST accumulation ----------------------------------- */
 
@@ -349,15 +350,17 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     /* ------------------------------------------------------------------ */
     case CMD_SET_STATE: {
         /*
-         * Payload layout (new, 6-byte header):
+         * Payload layout (new, 9-byte header):
          *   [0]       is_playing   : uint8_t
          *   [1]       volume       : uint8_t  (0–100)
          *   [2]       tempo        : uint8_t  (0–100, 50 = 1.0×)
          *   [3]       position_pct : uint8_t  (0–100 %)
          *   [4..5]    duration_s   : uint16_t (speed-adjusted length, LE)
-         *   [6..N-1]  song_name    : char[]   (not null-terminated in packet)
+         *   [6]       flags        : uint8_t  (bit 0 = speed_locked)
+         *   [7..8]    song_id      : uint16_t (1-based; 0 if no song, LE)
+         *   [9..N-1]  song_name    : char[]   (not null-terminated in packet)
          *
-         * Old layout (3-byte header) is still accepted with a warning.
+         * Old 7-byte and 6-byte headers are still accepted (song_id = 0).
          */
         if (len < 3) {
             ESP_LOGW(TAG, "CMD_SET_STATE: payload too short (%u bytes)", len);
@@ -366,11 +369,24 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
 
         uint8_t new_is_playing = payload[0];
 
+        uint8_t  flags_byte   = 0;
         uint8_t  position_pct = 0;
         uint16_t duration_s   = 0;
+        uint16_t song_id      = 0;
         uint8_t  name_offset  = 3;
 
-        if (len >= 6) {
+        if (len >= 9) {
+            position_pct = payload[3];
+            duration_s   = (uint16_t)payload[4] | ((uint16_t)payload[5] << 8);
+            flags_byte   = payload[6];
+            song_id      = (uint16_t)payload[7] | ((uint16_t)payload[8] << 8);
+            name_offset  = 9;
+        } else if (len >= 7) {
+            position_pct = payload[3];
+            duration_s   = (uint16_t)payload[4] | ((uint16_t)payload[5] << 8);
+            flags_byte   = payload[6];
+            name_offset  = 7;
+        } else if (len >= 6) {
             position_pct = payload[3];
             duration_s   = (uint16_t)payload[4] | ((uint16_t)payload[5] << 8);
             name_offset  = 6;
@@ -392,20 +408,26 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         g_player_state.tempo        = payload[2];
         g_player_state.position_pct = position_pct;
         g_player_state.duration_s   = duration_s;
+        g_player_state.flags        = flags_byte;
+        g_player_state.song_id      = song_id;
         memcpy(g_player_state.song_name, song_name_snap, MAX_SONG_NAME_LEN);
         xSemaphoreGive(s_state_mutex);
+
+        ui_player_update_speed_locked_async(!!(flags_byte & 0x01u));
 
         ESP_LOGD(TAG, "State: song='%s'  vol=%u  tempo=%u  playing=%u  pos=%u%%  dur=%us",
                  song_name_snap, g_player_state.volume, g_player_state.tempo,
                  new_is_playing, position_pct, duration_s);
 
-        /* Trigger view transitions on play/stop edges */
-        if (new_is_playing && !s_was_playing) {
-            ui_player_show_async(song_name_snap);
+        /* Trigger view transitions on play/stop edges, or when the song changes */
+        bool song_changed = (song_id != 0 && song_id != s_prev_song_id);
+        if (new_is_playing && (!s_was_playing || song_changed)) {
+            ui_player_show_async(song_name_snap, song_id);
         } else if (!new_is_playing && s_was_playing) {
             ui_player_hide_async();
         }
-        s_was_playing = new_is_playing;
+        s_was_playing  = new_is_playing;
+        s_prev_song_id = song_id;
 
         /* Forward live progress to the UI every tick while playing */
         if (new_is_playing) {

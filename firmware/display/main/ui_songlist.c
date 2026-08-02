@@ -60,6 +60,9 @@ static lv_obj_t  *s_settings_overlay   = NULL; /* backdrop (NULL when not open) 
 static uint16_t   s_settings_song_id   = 0;    /* song_id whose dialog is open  */
 static lv_obj_t  *s_cb_loop            = NULL; /* checkbox objects inside dialog */
 static lv_obj_t  *s_cb_fixed_speed     = NULL;
+static lv_obj_t  *s_cb_pitch_follow    = NULL;
+static lv_obj_t  *s_lbl_speed_val      = NULL; /* speed value label               */
+static uint8_t    s_speed_x100         = 100;  /* dialog speed × 100 (70–140)    */
 
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
@@ -352,6 +355,30 @@ static void on_list_item_clicked(lv_event_t *e)
  * Settings dialog
  * ========================================================================= */
 
+static void update_speed_label(void)
+{
+    if (!s_lbl_speed_val) return;
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%.2fx", (float)s_speed_x100 / 100.0f);
+    lv_label_set_text(s_lbl_speed_val, buf);
+}
+
+static void on_speed_minus(lv_event_t *e)
+{
+    (void)e;
+    if (s_speed_x100 > 70u) s_speed_x100 -= 5u;
+    if (s_cb_fixed_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+    update_speed_label();
+}
+
+static void on_speed_plus(lv_event_t *e)
+{
+    (void)e;
+    if (s_speed_x100 < 140u) s_speed_x100 += 5u;
+    if (s_cb_fixed_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+    update_speed_label();
+}
+
 static void on_settings_cancel(lv_event_t *e)
 {
     (void)e;
@@ -361,6 +388,8 @@ static void on_settings_cancel(lv_event_t *e)
         s_settings_song_id = 0;
         s_cb_loop          = NULL;
         s_cb_fixed_speed   = NULL;
+        s_cb_pitch_follow  = NULL;
+        s_lbl_speed_val    = NULL;
     }
 }
 
@@ -372,13 +401,15 @@ static void on_settings_ok(lv_event_t *e)
     uint16_t song_id = s_settings_song_id;
 
     /* Collect checkbox states */
-    bool loop_en    = (lv_obj_get_state(s_cb_loop)        & LV_STATE_CHECKED) != 0;
-    bool speed_en   = (lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0;
+    bool loop_en         = (lv_obj_get_state(s_cb_loop)         & LV_STATE_CHECKED) != 0;
+    bool speed_en        = (lv_obj_get_state(s_cb_fixed_speed)  & LV_STATE_CHECKED) != 0;
+    bool pitch_follow_en = (lv_obj_get_state(s_cb_pitch_follow) & LV_STATE_CHECKED) != 0;
 
     uint8_t flags = 0;
-    if (loop_en)  flags |= 0x01u;
-    if (speed_en) flags |= 0x02u;
-    uint8_t fixed_speed_x100 = 100u; /* always 1.0× for now */
+    if (loop_en)         flags |= 0x01u;
+    if (speed_en)        flags |= 0x02u;
+    if (pitch_follow_en) flags |= 0x04u;
+    uint8_t fixed_speed_x100 = speed_en ? s_speed_x100 : 100u;
 
     /* Update local cache */
     uint8_t cache_idx = (uint8_t)(song_id - 1);
@@ -399,6 +430,8 @@ static void on_settings_ok(lv_event_t *e)
     s_settings_song_id = 0;
     s_cb_loop          = NULL;
     s_cb_fixed_speed   = NULL;
+    s_cb_pitch_follow  = NULL;
+    s_lbl_speed_val    = NULL;
 }
 
 static void create_settings_dialog(uint16_t song_id)
@@ -420,12 +453,18 @@ static void create_settings_dialog(uint16_t song_id)
 
     /* Determine current values from cache (defaults until response arrives) */
     uint8_t cache_idx = (uint8_t)(song_id - 1);
-    bool    cached_loop  = false;
-    bool    cached_speed = false;
+    bool    cached_loop         = false;
+    bool    cached_speed        = false;
+    bool    cached_pitch_follow = false;
+    uint8_t cached_spd_x100     = 100u;
     if (cache_idx < SONGLIST_MAX_SONGS && s_settings[cache_idx].valid) {
-        cached_loop  = (s_settings[cache_idx].flags & 0x01u) != 0;
-        cached_speed = (s_settings[cache_idx].flags & 0x02u) != 0;
+        cached_loop         = (s_settings[cache_idx].flags & 0x01u) != 0;
+        cached_speed        = (s_settings[cache_idx].flags & 0x02u) != 0;
+        cached_pitch_follow = (s_settings[cache_idx].flags & 0x04u) != 0;
+        cached_spd_x100     = s_settings[cache_idx].fixed_speed_x100;
+        if (cached_spd_x100 < 70u || cached_spd_x100 > 140u) cached_spd_x100 = 100u;
     }
+    s_speed_x100 = cached_spd_x100;
 
     s_settings_song_id = song_id;
 
@@ -442,7 +481,7 @@ static void create_settings_dialog(uint16_t song_id)
 
     /* ── Dialog box ───────────────────────────────────────────────── */
     lv_obj_t *box = lv_obj_create(s_settings_overlay);
-    lv_obj_set_size(box, 500, 320);
+    lv_obj_set_size(box, 500, 400);
     lv_obj_center(box);
     lv_obj_set_style_bg_color(box, lv_color_hex(0x1A1A2E), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
@@ -488,6 +527,54 @@ static void create_settings_dialog(uint16_t song_id)
     lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
     lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 116);
 
+
+    /* ── Speed value row: [ - ]  1.00x  [ + ] ────────────────────────── */
+    /* Centred within the 452-px content area; row total = 50+12+100+12+50 = 224 px */
+    const int16_t ROW_X = (452 - 224) / 2;  /* = 114 */
+    const int16_t ROW_Y = 164;
+
+    lv_obj_t *btn_minus = lv_button_create(box);
+    lv_obj_set_size(btn_minus, 50, 44);
+    lv_obj_align(btn_minus, LV_ALIGN_TOP_LEFT, ROW_X, ROW_Y);
+    lv_obj_set_style_bg_color(btn_minus, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_bg_color(btn_minus, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_minus, 8, 0);
+    lv_obj_set_style_border_width(btn_minus, 0, 0);
+    lv_obj_add_event_cb(btn_minus, on_speed_minus, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_minus = lv_label_create(btn_minus);
+    lv_label_set_text(lbl_minus, "-");
+    lv_obj_set_style_text_font(lbl_minus, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_minus, lv_color_white(), 0);
+    lv_obj_center(lbl_minus);
+
+    s_lbl_speed_val = lv_label_create(box);
+    lv_obj_set_size(s_lbl_speed_val, 100, 44);
+    lv_obj_align(s_lbl_speed_val, LV_ALIGN_TOP_LEFT, ROW_X + 50 + 12, ROW_Y + 8);
+    lv_obj_set_style_text_font(s_lbl_speed_val, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_lbl_speed_val, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_set_style_text_align(s_lbl_speed_val, LV_TEXT_ALIGN_CENTER, 0);
+    update_speed_label();
+
+    lv_obj_t *btn_plus = lv_button_create(box);
+    lv_obj_set_size(btn_plus, 50, 44);
+    lv_obj_align(btn_plus, LV_ALIGN_TOP_LEFT, ROW_X + 50 + 12 + 100 + 12, ROW_Y);
+    lv_obj_set_style_bg_color(btn_plus, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_bg_color(btn_plus, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_plus, 8, 0);
+    lv_obj_set_style_border_width(btn_plus, 0, 0);
+    lv_obj_add_event_cb(btn_plus, on_speed_plus, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_plus = lv_label_create(btn_plus);
+    lv_label_set_text(lbl_plus, "+");
+    lv_obj_set_style_text_font(lbl_plus, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(lbl_plus, lv_color_white(), 0);
+    lv_obj_center(lbl_plus);
+    /* ── Checkbox: Pitch follows speed ────────────────────────────────────── */
+    s_cb_pitch_follow = lv_checkbox_create(box);
+    lv_checkbox_set_text(s_cb_pitch_follow, "Pitch follows speed");
+    if (cached_pitch_follow) lv_obj_add_state(s_cb_pitch_follow, LV_STATE_CHECKED);
+    lv_obj_set_style_text_font(s_cb_pitch_follow, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_cb_pitch_follow, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_align(s_cb_pitch_follow, LV_ALIGN_TOP_LEFT, 0, 222);
     /* ── Buttons row ──────────────────────────────────────────────── */
     /* Cancel */
     lv_obj_t *btn_cancel = lv_obj_create(box);
@@ -540,6 +627,29 @@ uint16_t ui_songlist_find_song_id_by_name(const char *name)
     return 0;
 }
 
+bool ui_songlist_get_song_name(uint16_t song_id, char *buf, size_t buf_len)
+{
+    if (!buf || buf_len == 0) return false;
+    for (uint8_t i = 0; i < s_song_count; i++) {
+        if (s_songs[i].id == song_id) {
+            strlcpy(buf, s_songs[i].name, buf_len);
+            return true;
+        }
+    }
+    return false;
+}
+
+uint16_t ui_songlist_get_next_song_id(uint16_t current_id)
+{
+    if (s_song_count == 0) return 0;
+    for (uint8_t i = 0; i < s_song_count; i++) {
+        if (s_songs[i].id == current_id) {
+            return s_songs[(i + 1) % s_song_count].id;
+        }
+    }
+    return s_songs[0].id;
+}
+
 static void send_play_song(uint16_t song_id)
 {
     /* Auto-disable WiFi when a song is selected */
@@ -585,6 +695,7 @@ static void async_cb_update_list(void *user_data)
         s_songs[s_song_count].id = song_id;
         memcpy(s_songs[s_song_count].name, name_start, name_len);
         s_songs[s_song_count].name[name_len] = '\0';
+        for (char *c = s_songs[s_song_count].name; *c; c++) { if (*c == '_') *c = ' '; }
         s_song_count++;
         ptr++; /* skip '\0' terminator */
     }
@@ -722,6 +833,16 @@ static void async_cb_song_settings(void *user_data)
         if (s_cb_fixed_speed) {
             if (p->flags & 0x02u) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
             else                  lv_obj_clear_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+        }
+        if (s_cb_pitch_follow) {
+            if (p->flags & 0x04u) lv_obj_add_state(s_cb_pitch_follow, LV_STATE_CHECKED);
+            else                  lv_obj_clear_state(s_cb_pitch_follow, LV_STATE_CHECKED);
+        }
+        if (s_lbl_speed_val) {
+            uint8_t spd = p->fixed_speed_x100;
+            if (spd < 70u || spd > 140u) spd = 100u;
+            s_speed_x100 = spd;
+            update_speed_label();
         }
     }
 

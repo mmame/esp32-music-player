@@ -46,7 +46,7 @@ void ui_player_create(void);
  *
  * @param song_name  Null-terminated UTF-8 string (copied internally).
  */
-void ui_player_show_async(const char *song_name);
+void ui_player_show_async(const char *song_name, uint16_t song_id);
 
 /**
  * @brief Switch back to the songlist view.
@@ -89,6 +89,15 @@ void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s);
 void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  flags,
                                    uint8_t  fixed_speed_x100);
+
+/**
+ * @brief Update the speed-lock ("HOLD") indicator.
+ *        Called every ~100 ms with the current hardware switch state.
+ *        Safe to call from any task / core.
+ *
+ * @param locked  true = switch active, speed is held; false = free-running.
+ */
+void ui_player_update_speed_locked_async(bool locked);
 
 #ifdef __cplusplus
 }

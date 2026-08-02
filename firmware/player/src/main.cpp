@@ -95,6 +95,7 @@ static volatile uint8_t g_locked_tempo_raw = 50; /* poti-scale 0–100 value whe
 static volatile bool  g_song_loop           = false; /* true: restart on end instead of stop */
 static volatile bool  g_song_fixed_speed_en = false; /* true: ignore crank, use fixed speed  */
 static volatile float g_song_fixed_speed    = 1.0f;  /* speed multiplier when above is true  */
+static volatile bool  g_song_pitch_follow   = false; /* true: pitch follows speed (tape effect) */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -115,9 +116,9 @@ static volatile bool    s_cmd_st_bypass_value   = false;
 static volatile bool    s_cmd_tempo_lock_pending = false;
 static volatile bool    s_cmd_tempo_lock_value   = false;
 static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
-static volatile bool    s_force_poti_resync      = false; /* set by audio_task on unlock */
 static volatile bool    s_cmd_wifi_enable        = false; /* set by on_wifi_ctrl(true)  */
 static volatile bool    s_cmd_wifi_disable       = false; /* set by on_wifi_ctrl(false) or on_play_song */
+static volatile bool    s_cmd_new_song_loaded    = false; /* set when play_song_idx is called; resets enc2 edge */
 
 static sdmmc_card_t *s_sdcard = nullptr;
 
@@ -337,6 +338,8 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     g_song_loop           = settings.loop;
     g_song_fixed_speed_en = (settings.fixed_speed > 0.0f);
     g_song_fixed_speed    = (settings.fixed_speed > 0.0f) ? settings.fixed_speed : 1.0f;
+    g_song_pitch_follow   = settings.pitch_follow;
+    soundtouch_el_set_rate_mode(g_sonic_el, settings.pitch_follow);
 
     uint32_t data_bytes = 0, sr = 44100;
     uint8_t  ch = 2, bps = 2;
@@ -399,6 +402,8 @@ static void do_stop(void)
     g_song_loop           = false;
     g_song_fixed_speed_en = false;
     g_song_fixed_speed    = 1.0f;
+    g_song_pitch_follow   = false;
+    soundtouch_el_set_rate_mode(g_sonic_el, false);
     ESP_LOGI(TAG, "Stopped");
 }
 
@@ -463,6 +468,10 @@ static void do_resume(void)
 {
     if (!g_is_paused || g_current_song < 0) return;
 
+    /* Ensure pipeline is fully stopped before the reset+run sequence.
+     * Handles the "Without wait stop" race when Next is pressed mid-play. */
+    pipeline_stop_and_reset();
+
     uint32_t bytes_per_sec = g_sample_rate * g_channels * g_bps;
     uint32_t frame_sz      = (g_channels * g_bps > 0) ? (uint32_t)(g_channels * g_bps) : 4u;
     uint32_t raw_off       = (bytes_per_sec > 0)
@@ -503,7 +512,7 @@ static void do_resume(void)
     xSemaphoreGive(s_state_mutex);
 
     audio_pipeline_run(g_pipeline);
-    ESP_LOGI(TAG, "Resumed from %.2f s (byte %u)", (double)g_audio_pos_s, file_offset);
+    ESP_LOGI(TAG, "Resumed from %.2f s (byte %u)  vol=%u", (double)g_audio_pos_s, file_offset, g_volume);
 }
 
 static void do_seek(uint8_t pct)
@@ -655,6 +664,7 @@ static void audio_task(void *arg)
                  * The crank rising edge in io_task sends s_cmd_resume,
                  * which calls do_resume() and starts the pipeline. */
                 play_song_idx((uint16_t)play_id, false);
+                s_cmd_new_song_loaded = true; /* force enc2 rising-edge even if crank is already spinning */
             }
         }
 
@@ -703,10 +713,6 @@ static void audio_task(void *arg)
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                 apply_speed_locked(locked_speed);
                 xSemaphoreGive(s_state_mutex);
-            } else {
-                /* Signal io_task to immediately re-read the live poti value and
-                 * forward it to the display without waiting for the knob to move. */
-                s_force_poti_resync = true;
             }
             ESP_LOGI(TAG, "Tempo lock: %s (tempo_raw=%u)",
                      lock ? "LOCK" : "UNLOCK", (unsigned)lt);
@@ -823,8 +829,9 @@ static void on_song_settings_req(uint16_t song_id)
     song_settings_load(path, &s);
 
     uint8_t flags = 0;
-    if (s.loop)            flags |= 0x01u;
+    if (s.loop)               flags |= 0x01u;
     if (s.fixed_speed > 0.0f) flags |= 0x02u;
+    if (s.pitch_follow)       flags |= 0x04u;
     uint8_t spd_x100 = (s.fixed_speed > 0.0f)
                        ? (uint8_t)(s.fixed_speed * 100.0f + 0.5f) : 100u;
 
@@ -866,9 +873,10 @@ static void on_set_song_settings(uint16_t song_id,
         return;
     }
 
-    bool  loop      = (flags & 0x01u) != 0;
-    bool  fixed_en  = (flags & 0x02u) != 0;
-    float spd       = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
+    bool  loop         = (flags & 0x01u) != 0;
+    bool  fixed_en     = (flags & 0x02u) != 0;
+    bool  pitch_follow = (flags & 0x04u) != 0;
+    float spd          = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
 
     cJSON *root = cJSON_CreateObject();
     if (!root) { ESP_LOGE("main", "OOM creating JSON for song %u", song_id); return; }
@@ -876,6 +884,9 @@ static void on_set_song_settings(uint16_t song_id,
     cJSON_AddBoolToObject(root, "loop", loop);
     if (fixed_en) {
         cJSON_AddNumberToObject(root, "fixed_speed", (double)spd);
+    }
+    if (pitch_follow) {
+        cJSON_AddBoolToObject(root, "pitch_follow", true);
     }
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -898,8 +909,12 @@ static void on_set_song_settings(uint16_t song_id,
         g_song_loop           = loop;
         g_song_fixed_speed_en = fixed_en;
         g_song_fixed_speed    = fixed_en ? spd : 1.0f;
-        ESP_LOGI("main", "Applied settings live: loop=%d fixed_en=%d spd=%.2f",
-                 (int)loop, (int)fixed_en, fixed_en ? (double)spd : 1.0);
+        g_song_pitch_follow   = pitch_follow;
+#ifdef HAVE_ADF
+        soundtouch_el_set_rate_mode(g_sonic_el, pitch_follow);
+#endif
+        ESP_LOGI("main", "Applied settings live: loop=%d fixed_en=%d spd=%.2f pitch_follow=%d",
+                 (int)loop, (int)fixed_en, fixed_en ? (double)spd : 1.0, (int)pitch_follow);
     }
 }
 
@@ -909,12 +924,8 @@ static void on_set_song_settings(uint16_t song_id,
 
 static void io_task(void *arg)
 {
-    /* Read initial volume; tempo poti no longer drives playback speed. */
     uint8_t vol = g_volume;
-    {
-        uint8_t _t = 50;
-        potis_read(&vol, &_t);
-    }
+    potis_read(&vol);
 
     uart_master_send_poti_update(vol, 0, 0,
                                  (uint8_t)(SPEED_MIN * 10.0f),
@@ -939,8 +950,8 @@ static void io_task(void *arg)
 
         /* Volume potentiometer (tempo poti removed from speed control) */
         {
-            uint8_t new_vol = vol, _t = 0;
-            if (potis_read(&new_vol, &_t)) {
+            uint8_t new_vol = vol;
+            if (potis_read(&new_vol)) {
                 vol = new_vol;
 #ifdef HAVE_ADF
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
@@ -960,6 +971,13 @@ static void io_task(void *arg)
             static uint8_t    s_last_tempo_sent  = 255; /* 255 = force first send */
             static TickType_t s_last_tempo_tick  = 0;
 
+            /* New song loaded (e.g. Next button) – force a rising edge so resume
+             * fires even if the crank never stopped between the song switch. */
+            if (s_cmd_new_song_loaded) {
+                s_cmd_new_song_loaded = false;
+                s_enc2_was_moving     = false;
+            }
+
             /* Fade-out: ramp volume to 0 when crank stops, then pause.
              * Fade-in:  ramp volume from 0 when crank starts, after resume.
              * Step 1 per 10 ms tick → ~700–1000 ms at full volume.
@@ -972,13 +990,22 @@ static void io_task(void *arg)
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
 
-            /* ── Dimmer: raw crank speed → brightness (no EMA, instant flicker) */
+            /* ── Dimmer: raw flicker while playing; smooth ramp during fade ─── */
             {
-                static uint8_t s_last_dimmer_pct = 255u; /* 255 = force first write */
-                float irps = encoder2_get_instant_rps();
-                /* Map [0, SPEED_MAX] → [0, 100%]; clamp */
-                uint8_t dpct = (irps <= 0.0f) ? 0u
-                             : (uint8_t)(irps / SPEED_MAX * 100.0f + 0.5f);
+                static uint8_t s_last_dimmer_pct = 255u;
+                uint8_t dpct;
+                if (s_vol_fading && vol > 0) {
+                    /* crank stopped – track volume ramp down, no flicker */
+                    dpct = (uint8_t)((float)s_fade_vol / (float)vol * 100.0f + 0.5f);
+                } else if (s_vol_fadein && vol > 0) {
+                    /* crank started – track volume ramp up, no flicker */
+                    dpct = (uint8_t)((float)s_fadein_vol / (float)vol * 100.0f + 0.5f);
+                } else {
+                    /* steady-state: instant RPS → brightness, flicker retained */
+                    float irps = encoder2_get_instant_rps();
+                    dpct = (irps <= 0.0f) ? 0u
+                         : (uint8_t)(irps / SPEED_MAX * 100.0f + 0.5f);
+                }
                 if (dpct > 100u) dpct = 100u;
                 if (dpct != s_last_dimmer_pct) {
                     s_last_dimmer_pct = dpct;
@@ -1114,9 +1141,7 @@ static void io_task(void *arg)
         int8_t btn = encoder_btn_read();
         if (btn == 0) {
             if (g_is_playing || g_is_paused) {
-                /* Stop playback and return to song list */
                 s_cmd_stop = true;
-                uart_master_send_song_list(g_song_names, g_song_count);
             } else {
                 /* No song active – forward button to display for navigation */
                 uart_master_send_encoder_btn();
@@ -1124,14 +1149,24 @@ static void io_task(void *arg)
         }
         /* btn 1–9: additional buttons, actions to be assigned */
 
-        /* DEBUG: print raw ADC value on BTN_ADC_PIN every 10 s */
+        /* ── Speed-lock switch (SPEED_LOCK_PIN = GPIO2) ─────────────────────────── */
         {
-            static uint16_t dbg_ctr = 0;
-            if (++dbg_ctr >= 1000) {
-                dbg_ctr = 0;
-                int raw = 0;
-                adc_oneshot_read(potis_get_adc_handle(), ADC_CHANNEL_2, &raw);
-                ESP_LOGI("BTN_ADC", "raw=%d", raw);
+            static bool s_lock_sw_prev = false;
+            bool sw_high = (gpio_get_level((gpio_num_t)SPEED_LOCK_PIN) != 0);
+            if (sw_high != s_lock_sw_prev) {
+                s_lock_sw_prev = sw_high;
+                if (sw_high) {
+                    /* Switch closed → lock speed at the current encoder target */
+                    uint8_t raw = (uint8_t)(((speed_applied - SPEED_MIN) /
+                                  (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
+                    if (raw > 100u) raw = 100u;
+                    s_cmd_locked_tempo_raw   = raw;
+                    s_cmd_tempo_lock_value   = true;
+                } else {
+                    s_cmd_tempo_lock_value   = false;
+                }
+                s_cmd_tempo_lock_pending = true;
+                ESP_LOGI(TAG, "Speed-lock switch: %s", sw_high ? "LOCKED" : "UNLOCKED");
             }
         }
 
@@ -1187,8 +1222,10 @@ static void io_task(void *arg)
             const char *name = (song >= 0 && (uint8_t)song < g_song_count)
                                ? g_song_names[song] : "";
 
+            uint8_t  state_flags = g_tempo_locked ? 0x01u : 0x00u;
+            uint16_t state_id    = (song >= 0) ? (uint16_t)((uint16_t)song + 1u) : 0u;
             uart_master_send_state(name, (uint8_t)(playing ? 1 : 0),
-                                   cur_vol, tempo_byte, pct, dur_s);
+                                   cur_vol, tempo_byte, pct, dur_s, state_flags, state_id);
         }
     }
 }
@@ -1232,6 +1269,17 @@ extern "C" void app_main(void)
 #ifdef HAVE_ADF
     create_pipeline();
 #endif
+
+    /* GPIO2: speed-lock switch input, active HIGH */
+    {
+        gpio_config_t sw_cfg = {};
+        sw_cfg.pin_bit_mask = (1ULL << SPEED_LOCK_PIN);
+        sw_cfg.mode         = GPIO_MODE_INPUT;
+        sw_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+        sw_cfg.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        sw_cfg.intr_type    = GPIO_INTR_DISABLE;
+        gpio_config(&sw_cfg);
+    }
 
     potis_init();    /* must come before encoder_init() – shares ADC1 handle */
     encoder_init();

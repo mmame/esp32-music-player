@@ -246,7 +246,9 @@ void uart_master_send_state(const char *song_name,
                             uint8_t     volume,
                             uint8_t     tempo,
                             uint8_t     position_pct,
-                            uint16_t    duration_s)
+                            uint16_t    duration_s,
+                            uint8_t     flags,
+                            uint16_t    song_id)
 {
     uint8_t buf[UM_MAX_PAYLOAD];
     buf[0] = is_playing;
@@ -255,10 +257,13 @@ void uart_master_send_state(const char *song_name,
     buf[3] = position_pct;
     buf[4] = (uint8_t)(duration_s & 0xFF);
     buf[5] = (uint8_t)(duration_s >> 8);
+    buf[6] = flags;
+    buf[7] = (uint8_t)(song_id & 0xFFu);
+    buf[8] = (uint8_t)(song_id >> 8);
 
-    uint8_t name_len = (uint8_t)strnlen(song_name, UM_MAX_PAYLOAD - 6 - 1);
-    memcpy(&buf[6], song_name, name_len);
-    uint8_t total = 6u + name_len;
+    uint8_t name_len = (uint8_t)strnlen(song_name, UM_MAX_PAYLOAD - 9 - 1);
+    memcpy(&buf[9], song_name, name_len);
+    uint8_t total = 9u + name_len;
 
     send_packet(CMD_SET_STATE, buf, total);
 }

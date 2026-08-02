@@ -65,5 +65,7 @@
 
 /* ── Potentiometers (ADC1 channel numbers = GPIO numbers on ESP32-S3) ────── */
 #define POT_PIN_VOLUME  1   /* Master volume  – ADC1 / GPIO1                  */
-#define POT_PIN_TEMPO   2   /* Playback speed – ADC1 / GPIO2                  */
+
+/* ── Speed-lock switch ──────────────────────────────────────────────────────── */
+#define SPEED_LOCK_PIN  2   /* Digital input – HIGH = lock playback speed     */
 

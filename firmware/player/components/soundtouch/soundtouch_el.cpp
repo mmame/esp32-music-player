@@ -43,6 +43,9 @@ struct StCtx {
     volatile bool  bypass;         /* true = passthrough, no SoundTouch         */
     bool           prev_bypass;    /* previous bypass state for transition detect */
 
+    volatile bool  rate_mode;          /* true = setRate() – pitch follows speed */
+    bool           applied_rate_mode;   /* last mode actually sent to SoundTouch  */
+
     /* int16 buffers - interface to ADF ring buffers and SoundTouch        */
     int16_t *pcm_in;   /* ST_CHUNK_FRAMES x channels                       */
     int16_t *pcm_out;  /* ST_DRAIN_FRAMES x channels                       */
@@ -113,11 +116,23 @@ static audio_element_err_t _process(audio_element_handle_t self,
         return static_cast<audio_element_err_t>(bytes_in);
     }
 
-    /* Apply any pending tempo change before processing this chunk. */
+    /* Apply any pending tempo / rate change before processing this chunk. */
     float tgt = ctx->target_tempo;
-    if (tgt != ctx->applied_tempo) {
+    bool  rm  = ctx->rate_mode;
+    bool  mode_changed = (rm != ctx->applied_rate_mode);
+    if (tgt != ctx->applied_tempo || mode_changed) {
+        if (mode_changed) {
+            ctx->st->clear(); /* flush lookahead so no pitch artefacts leak across modes */
+            ctx->applied_rate_mode = rm;
+        }
         ctx->applied_tempo = tgt;
-        ctx->st->setTempo((double)tgt);
+        if (rm) {
+            ctx->st->setRate((double)tgt);  /* pitch follows speed */
+            ctx->st->setTempo(1.0);
+        } else {
+            ctx->st->setTempo((double)tgt); /* time-stretch: pitch preserved */
+            ctx->st->setRate(1.0);
+        }
     }
 
     /* Pull one chunk of int16 PCM from the upstream ring buffer. */
@@ -176,6 +191,15 @@ esp_err_t soundtouch_el_set_bypass(audio_element_handle_t self, bool bypass)
     return ESP_OK;
 }
 
+esp_err_t soundtouch_el_set_rate_mode(audio_element_handle_t self, bool rate_mode)
+{
+    StCtx *ctx = ctx_of(self);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    /* volatile write - effectively atomic on 32-bit aligned Xtensa. */
+    ctx->rate_mode = rate_mode;
+    return ESP_OK;
+}
+
 audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
 {
     StCtx *ctx = static_cast<StCtx *>(audio_calloc(1, sizeof(StCtx)));
@@ -183,10 +207,12 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
 
     ctx->samplerate    = cfg->samplerate;
     ctx->channels      = cfg->channels;
-    ctx->applied_tempo = cfg->tempo;
-    ctx->target_tempo  = cfg->tempo;
-    ctx->bypass        = false;
-    ctx->prev_bypass   = false;
+    ctx->applied_tempo      = cfg->tempo;
+    ctx->target_tempo       = cfg->tempo;
+    ctx->bypass             = false;
+    ctx->prev_bypass        = false;
+    ctx->rate_mode          = false;
+    ctx->applied_rate_mode  = false;
 
     /* int16 PCM buffers (may live in PSRAM via audio_calloc). */
     ctx->pcm_in  = static_cast<int16_t *>(

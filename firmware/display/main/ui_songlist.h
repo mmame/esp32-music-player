@@ -13,6 +13,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -108,6 +110,20 @@ void ui_songlist_open_settings_dialog(uint16_t song_id);
  * @return song_id (> 0) if found, 0 if not found.
  */
 uint16_t ui_songlist_find_song_id_by_name(const char *name);
+
+/**
+ * @brief Copy the display name for @p song_id into @p buf.
+ *        Must be called from the LVGL task.
+ * @return true if found, false if not found (buf is unchanged).
+ */
+bool ui_songlist_get_song_name(uint16_t song_id, char *buf, size_t buf_len);
+
+/**
+ * @brief Return the song ID that follows @p current_id, wrapping at the end.
+ *        Must be called from the LVGL task.
+ * @return next song_id (> 0), or 0 if the song list is empty.
+ */
+uint16_t ui_songlist_get_next_song_id(uint16_t current_id);
 
 #ifdef __cplusplus
 }

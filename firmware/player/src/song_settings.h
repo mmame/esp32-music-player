@@ -25,6 +25,7 @@ extern "C" {
 typedef struct {
     bool  loop;          /**< true: restart automatically when song ends  */
     float fixed_speed;   /**< 0.0f = follow crank; >0.0f = locked speed   */
+    bool  pitch_follow;  /**< true: pitch follows speed (tape effect)      */
 } song_settings_t;
 
 /**

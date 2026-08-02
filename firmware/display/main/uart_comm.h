@@ -78,12 +78,14 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 
 /* ---------- Global system state ---------- */
 typedef struct {
+    uint16_t song_id;                        /* 1-based; 0 = no song    */
     char     song_name[MAX_SONG_NAME_LEN];  /* null-terminated UTF-8 */
     uint8_t  is_playing;                    /* 1 = playing, 0 = paused/stopped */
     uint8_t  volume;                        /* 0–100 */
     uint8_t  tempo;                         /* 0–100 (50 = 1.0× speed) */
     uint8_t  position_pct;                  /* playback progress 0–100 % */
     uint16_t duration_s;                    /* speed-adjusted total length in seconds */
+    uint8_t  flags;                         /* bit 0 = speed_locked */
 } music_player_state_t;
 
 /** Shared player state – read by the UI, written by the UART task. */

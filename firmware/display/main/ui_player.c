@@ -38,16 +38,22 @@ static const char *TAG = "ui_player";
 #define PROGRESS_Y       130    /* progress bar top edge                    */
 #define PROGRESS_H       44     /* progress bar height                      */
 #define PROGRESS_PAD_X   30     /* horizontal padding inside left panel     */
-#define STOP_Y           370    /* STOP button top edge                     */
-#define STOP_W           300    /* STOP button width                        */
-#define STOP_H           80     /* STOP button height                       */
-#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass label / lock checkbox row */
+#define STOP_Y           370    /* button row top edge                      */
+#define STOP_W           110    /* icon-only STOP button width              */
+#define STOP_H           80     /* button height (shared)                   */
+#define NEXT_BTN_W       110    /* icon-only NEXT button width              */
+#define BTN_GAP          20     /* gap between adjacent buttons             */
+#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass (1.0x) label row          */
+#define HOLD_LBL_Y       (VAL_LABEL_Y + 24) /* "HOLD" label row (under TMP bar)  */
 #define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
 #define STATUS_LBL_Y     (TIME_LABEL_Y + 22)  /* loop / 1.0x indicator row (left panel) */
+#define NEXT_SONG_LBL_Y  (STATUS_LBL_Y + 24)  /* next-song name label              */
 #define GEAR_BTN_W       80
 #define GEAR_BTN_H       80
-/* Gear button x: right of the STOP button with a 12-px gap */
-#define GEAR_BTN_X       ((SPLIT_X - STOP_W) / 2 + STOP_W + 12)
+/* Centered button row [STOP][gap][NEXT][gap][GEAR] */
+#define STOP_BTN_X       ((SPLIT_X - STOP_W - BTN_GAP - NEXT_BTN_W - BTN_GAP - GEAR_BTN_W) / 2)
+#define NEXT_BTN_X       (STOP_BTN_X + STOP_W + BTN_GAP)
+#define GEAR_BTN_X       (NEXT_BTN_X + NEXT_BTN_W + BTN_GAP)
 
 /* Right panel – two indicator columns */
 #define COL_W            (RIGHT_W / 2)   /* 100 px per column               */
@@ -80,21 +86,27 @@ static lv_obj_t *s_bar[2]         = {NULL, NULL};  /* VOL, TMP */
 static lv_obj_t *s_val_lbl[2]     = {NULL, NULL};
 
 /* Bypass SoundTouch checkbox → replaced by read-only label */
-static lv_obj_t *s_bypass_lbl     = NULL;  /* "1.0x" – shown when fixed_speed_en  */
+static lv_obj_t *s_bypass_lbl     = NULL;  /* "FIX" – shown when fixed_speed_en   */
 static bool      s_bypass_active  = false; /* set from song settings, not toggle  */
 
 /* Loop indicator label */
 static lv_obj_t *s_loop_lbl       = NULL;  /* "↺ LOOP" – shown when loop configured */
 
+/* Next-song name label (below loop indicator) */
+static lv_obj_t *s_next_song_lbl  = NULL;
+
 /* Song-config gear button (bottom-right of play screen) */
 static lv_obj_t *s_gear_btn       = NULL;
+
+/* NEXT button (skip to next song) */
+static lv_obj_t *s_next_btn       = NULL;
 
 /* Current song context (needed for gear dialog and settings updates) */
 static uint16_t  s_current_song_id             = 0;
 static char      s_current_song_name[MAX_SONG_NAME_LEN] = "";
 
-/* Tempo lock checkbox */
-static lv_obj_t *s_lock_check         = NULL;
+/* "HOLD" speed-lock indicator label (under TMP bar, always visible) */
+static lv_obj_t *s_hold_lbl           = NULL;
 static bool      s_tempo_locked       = false;
 static uint8_t   s_locked_tempo       = 50;    /* last known / locked poti-scale value */
 static uint8_t   s_locked_spd_min_x10 = 4;    /* cached range for label computation   */
@@ -213,34 +225,6 @@ static void on_progress_clicked(lv_event_t *e)
  * Bypass / lock button callbacks – run in LVGL task
  * ========================================================================= */
 
-static void on_bypass_toggled(lv_event_t *e) { (void)e; /* no-op: bypass is now read-only, driven by song config */ }
-
-/* =========================================================================
- * TEMPO LOCK checkbox callback – runs in LVGL task
- * ========================================================================= */
-static void on_lock_toggled(lv_event_t *e)
-{
-    (void)e;
-    s_tempo_locked = !s_tempo_locked;
-
-    /* s_locked_tempo already tracks the most recent poti value (updated in
-     * async_cb_update_potis while unlocked), so it captures the current
-     * running tempo at the moment the user enables lock. */
-    uart_comm_send_tempo_lock(s_tempo_locked, s_locked_tempo);
-
-    /* Update TMP bar colour: bypass overrules lock. */
-    if (!s_bypass_active) {
-        lv_color_t col = s_tempo_locked
-            ? lv_color_hex(COLOR_LOCKED)   /* amber – locked  */
-            : lv_color_hex(COLOR_ACCENT);  /* cyan  – normal  */
-        if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
-        if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
-    }
-
-    ESP_LOGI(TAG, "Tempo lock toggled: %s (locked_tempo=%u)",
-             s_tempo_locked ? "LOCK" : "UNLOCK", (unsigned)s_locked_tempo);
-}
-
 /* =========================================================================
  * Song-config gear button callback – runs in LVGL task
  * ========================================================================= */
@@ -261,6 +245,18 @@ static void on_stop_clicked(lv_event_t *e)
     stop_progress_anim();
     uart_comm_send_stop();
     ui_songlist_show(); /* we are in the LVGL task – can call directly */
+}
+
+/* =========================================================================
+ * NEXT button callback – runs in LVGL task
+ * ========================================================================= */
+static void on_next_clicked(lv_event_t *e)
+{
+    (void)e;
+    uint16_t next_id = ui_songlist_get_next_song_id(s_current_song_id);
+    if (next_id != 0) {
+        uart_comm_send_play_song(next_id);
+    }
 }
 
 /* =========================================================================
@@ -350,12 +346,19 @@ void ui_player_create(void)
     lv_obj_set_pos(s_loop_lbl, PROGRESS_PAD_X, STATUS_LBL_Y);
     lv_obj_add_flag(s_loop_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
 
-    /* STOP button -------------------------------------------------------- */
+    /* Next-song name label – smaller text below the loop indicator row ---- */
+    s_next_song_lbl = lv_label_create(left);
+    lv_label_set_text(s_next_song_lbl, "");
+    lv_label_set_long_mode(s_next_song_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(s_next_song_lbl, SPLIT_X - 2 * PROGRESS_PAD_X);
+    lv_obj_set_style_text_font(s_next_song_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_next_song_lbl, lv_color_hex(COLOR_TEXT), 0);
+    lv_obj_set_pos(s_next_song_lbl, PROGRESS_PAD_X, NEXT_SONG_LBL_Y);
+
+    /* STOP button (icon only) -------------------------------------------- */
     lv_obj_t *stop_btn = lv_button_create(left);
     lv_obj_set_size(stop_btn, STOP_W, STOP_H);
-    lv_obj_set_pos(stop_btn,
-                   (SPLIT_X - STOP_W) / 2,  /* horizontally centred */
-                   STOP_Y);
+    lv_obj_set_pos(stop_btn, STOP_BTN_X, STOP_Y);
     lv_obj_set_style_bg_color(stop_btn, lv_color_hex(COLOR_STOP_BG), 0);
     lv_obj_set_style_bg_opa(stop_btn, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(stop_btn, lv_color_hex(0xC73652),
@@ -366,12 +369,29 @@ void ui_player_create(void)
     lv_obj_add_event_cb(stop_btn, on_stop_clicked, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *stop_lbl = lv_label_create(stop_btn);
-    lv_label_set_text(stop_lbl, LV_SYMBOL_STOP "  STOP");
+    lv_label_set_text(stop_lbl, LV_SYMBOL_STOP);
     lv_obj_set_style_text_font(stop_lbl, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(stop_lbl, lv_color_white(), 0);
     lv_obj_center(stop_lbl);
 
-    /* Song-config gear button – bottom-right of the left panel ----------- */
+    /* NEXT button (icon only) -------------------------------------------- */
+    s_next_btn = lv_button_create(left);
+    lv_obj_set_size(s_next_btn, NEXT_BTN_W, STOP_H);
+    lv_obj_set_pos(s_next_btn, NEXT_BTN_X, STOP_Y);
+    lv_obj_set_style_bg_color(s_next_btn, lv_color_hex(0x1A5276), 0);
+    lv_obj_set_style_bg_opa(s_next_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_next_btn, lv_color_hex(0x1A3A4A), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(s_next_btn, 12, 0);
+    lv_obj_set_style_border_width(s_next_btn, 0, 0);
+    lv_obj_set_style_shadow_width(s_next_btn, 0, 0);
+    lv_obj_add_event_cb(s_next_btn, on_next_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *next_icon = lv_label_create(s_next_btn);
+    lv_label_set_text(next_icon, LV_SYMBOL_NEXT);
+    lv_obj_set_style_text_font(next_icon, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(next_icon, lv_color_white(), 0);
+    lv_obj_center(next_icon);
+
+    /* Song-config gear button -------------------------------------------- */
     s_gear_btn = lv_button_create(left);
     lv_obj_set_size(s_gear_btn, GEAR_BTN_W, GEAR_BTN_H);
     lv_obj_set_pos(s_gear_btn, GEAR_BTN_X, STOP_Y);
@@ -413,32 +433,22 @@ void ui_player_create(void)
     /* 1.0x indicator label – read-only, shown when fixed-speed is configured
      * for the current song.  Replaces the old interactive bypass checkbox. -- */
     s_bypass_lbl = lv_label_create(right);
-    lv_label_set_text(s_bypass_lbl, "1.0x");
+    lv_label_set_text(s_bypass_lbl, "FIX");
     lv_obj_set_style_text_font(s_bypass_lbl, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_bypass_lbl, lv_color_hex(0x445566), 0);
     lv_obj_set_width(s_bypass_lbl, COL_W);
     lv_obj_set_style_text_align(s_bypass_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_bypass_lbl, COL_W, BYPASS_CHECK_Y_R);
+    lv_obj_set_pos(s_bypass_lbl, COL_W, BYPASS_CHECK_Y_R + 24);
     lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
 
-    /* Tempo Lock checkbox – under VOL bar (col 0), same row as bypass ------ */
-    s_lock_check = lv_checkbox_create(right);
-    lv_checkbox_set_text(s_lock_check, "Lock");
-    lv_obj_set_pos(s_lock_check, 8, BYPASS_CHECK_Y_R);
-    lv_obj_set_style_text_font(s_lock_check, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_lock_check, lv_color_hex(COLOR_TEXT), 0);
-    lv_obj_set_style_width(s_lock_check,  30, LV_PART_INDICATOR);
-    lv_obj_set_style_height(s_lock_check, 30, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_lock_check, lv_color_hex(COLOR_BAR_TRACK), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_lock_check, lv_color_hex(COLOR_LOCKED),
-                               LV_PART_INDICATOR | LV_STATE_CHECKED);
-    lv_obj_set_style_border_color(s_lock_check, lv_color_hex(COLOR_LOCKED), LV_PART_INDICATOR);
-    lv_obj_set_style_border_width(s_lock_check, 2, LV_PART_INDICATOR);
-    lv_obj_set_style_pad_top(s_lock_check,    10, 0);
-    lv_obj_set_style_pad_bottom(s_lock_check, 10, 0);
-    lv_obj_set_style_pad_left(s_lock_check,    8, 0);
-    lv_obj_set_style_pad_right(s_lock_check,   8, 0);
-    lv_obj_add_event_cb(s_lock_check, on_lock_toggled, LV_EVENT_VALUE_CHANGED, NULL);
+    /* "HOLD" speed-lock indicator – always visible under TMP bar, greyed when inactive */
+    s_hold_lbl = lv_label_create(right);
+    lv_label_set_text(s_hold_lbl, "HOLD");
+    lv_obj_set_style_text_font(s_hold_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_hold_lbl, lv_color_hex(0x445566), 0);  /* greyed out by default */
+    lv_obj_set_width(s_hold_lbl, COL_W);
+    lv_obj_set_style_text_align(s_hold_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_hold_lbl, COL_W, HOLD_LBL_Y);
 
     ESP_LOGI(TAG, "Player view created");
 }
@@ -448,7 +458,8 @@ void ui_player_create(void)
  * ========================================================================= */
 
 typedef struct {
-    char song_name[MAX_SONG_NAME_LEN];
+    char     song_name[MAX_SONG_NAME_LEN];
+    uint16_t song_id;
 } async_show_payload_t;
 
 typedef struct {
@@ -464,33 +475,50 @@ static void async_cb_show(void *user_data)
 
     /* Store current song context */
     strlcpy(s_current_song_name, p->song_name, MAX_SONG_NAME_LEN);
-    s_current_song_id = ui_songlist_find_song_id_by_name(p->song_name);
+    s_current_song_id = p->song_id;
 
     /* Reset indicators until settings response arrives */
     s_bypass_active = false;
+    s_tempo_locked  = false;
     if (s_loop_lbl)   lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
     if (s_bypass_lbl) lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
-    /* Restore TMP bar to normal (un-bypassed) colour */
-    lv_color_t tmp_col = s_tempo_locked
-                         ? lv_color_hex(COLOR_LOCKED)
-                         : lv_color_hex(COLOR_ACCENT);
-    if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], tmp_col, LV_PART_INDICATOR);
-    if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], tmp_col, 0);
+    /* HOLD label: greyed (not locked) */
+    if (s_hold_lbl) lv_obj_set_style_text_color(s_hold_lbl, lv_color_hex(0x445566), 0);
+    /* Restore TMP bar to normal colour */
+    if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+    if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], lv_color_hex(COLOR_ACCENT), 0);
 
     /* Request fresh settings so loop / 1.0x indicators are populated */
     if (s_current_song_id != 0) {
         uart_comm_send_song_settings_req(s_current_song_id);
     }
 
-    /* Update title */
+    /* Update title (replace underscores with spaces for display) */
+    char display_name[MAX_SONG_NAME_LEN];
+    strlcpy(display_name, p->song_name, MAX_SONG_NAME_LEN);
+    for (char *c = display_name; *c; c++) { if (*c == '_') *c = ' '; }
     char title_buf[MAX_SONG_NAME_LEN + 6]; /* +6: LV_SYMBOL_AUDIO(3) + "  "(2) + '\0'(1) */
-    snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_AUDIO "  %s", p->song_name);
+    snprintf(title_buf, sizeof(title_buf), LV_SYMBOL_AUDIO "  %s", display_name);
     lv_label_set_text(s_title_lbl, title_buf);
 
     /* Reset progress – real data arrives immediately via update_progress_async */
     stop_progress_anim();
     if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
+
+    /* Update next-song label */
+    if (s_next_song_lbl) {
+        char next_name[MAX_SONG_NAME_LEN];
+        uint16_t next_id = ui_songlist_get_next_song_id(p->song_id);
+        if (next_id != 0 && ui_songlist_get_song_name(next_id, next_name, sizeof(next_name))) {
+            char next_buf[MAX_SONG_NAME_LEN + 8];
+            snprintf(next_buf, sizeof(next_buf), LV_SYMBOL_NEXT "  %s", next_name);
+            lv_label_set_text(s_next_song_lbl, next_buf);
+        } else {
+            lv_label_set_text(s_next_song_lbl, "");
+        }
+    }
+
     lv_screen_load_anim(s_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 250, 0, false);
 
     free(p);
@@ -500,14 +528,19 @@ static void async_cb_hide(void *user_data)
 {
     (void)user_data;
     s_bypass_active   = false;
+    s_tempo_locked    = false;
     s_current_song_id = 0;
     s_current_song_name[0] = '\0';
-    /* Hide song-setting indicators */
+    /* Hide song-setting indicators; reset HOLD label to greyed */
     if (s_loop_lbl)   lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
     if (s_bypass_lbl) lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
+    if (s_hold_lbl)   lv_obj_set_style_text_color(s_hold_lbl, lv_color_hex(0x445566), 0);
+    if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+    if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], lv_color_hex(COLOR_ACCENT), 0);
     stop_progress_anim();
     if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
+    if (s_next_song_lbl) lv_label_set_text(s_next_song_lbl, "");
     ui_songlist_show();
 }
 
@@ -577,7 +610,7 @@ static void async_cb_update_progress(void *user_data)
  * Public async bridges
  * ========================================================================= */
 
-void ui_player_show_async(const char *song_name)
+void ui_player_show_async(const char *song_name, uint16_t song_id)
 {
     if (!s_screen) {
         ESP_LOGW(TAG, "show_async called before ui_player_create()");
@@ -588,6 +621,7 @@ void ui_player_show_async(const char *song_name)
     if (!p) { ESP_LOGE(TAG, "OOM in show_async"); return; }
 
     strlcpy(p->song_name, song_name ? song_name : "", MAX_SONG_NAME_LEN);
+    p->song_id = song_id;
     lv_lock();
     lv_async_call(async_cb_show, p);
     lv_unlock();
@@ -698,5 +732,36 @@ void ui_player_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fixe
     p->fixed_speed_x100 = fixed_speed_x100;
     lv_lock();
     lv_async_call(async_cb_song_settings_player, p);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * Speed-lock ("HOLD") indicator
+ * ========================================================================= */
+
+static void async_cb_update_speed_locked(void *user_data)
+{
+    bool locked = (bool)(uintptr_t)user_data;
+    s_tempo_locked = locked;
+
+    /* Tint HOLD label: amber when active, grey when inactive */
+    if (s_hold_lbl) {
+        lv_color_t col = locked ? lv_color_hex(COLOR_LOCKED) : lv_color_hex(0x445566);
+        lv_obj_set_style_text_color(s_hold_lbl, col, 0);
+    }
+
+    /* Tint TMP bar (bypass takes priority) */
+    if (!s_bypass_active) {
+        lv_color_t col = locked ? lv_color_hex(COLOR_LOCKED) : lv_color_hex(COLOR_ACCENT);
+        if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
+        if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
+    }
+}
+
+void ui_player_update_speed_locked_async(bool locked)
+{
+    if (!s_screen) return;
+    lv_lock();
+    lv_async_call(async_cb_update_speed_locked, (void *)(uintptr_t)locked);
     lv_unlock();
 }

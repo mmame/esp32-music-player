@@ -47,3 +47,8 @@ endif()
 # ── ESP-IDF project ──────────────────────────────────────────────────────────
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(musicplayer)
+
+# Workaround: GCC esp-14.2 ICE in IRA pass on esp_lcd_panel_rgb.c at -Og
+if(TARGET __idf_esp_lcd)
+    target_compile_options(__idf_esp_lcd PRIVATE -O1)
+endif()

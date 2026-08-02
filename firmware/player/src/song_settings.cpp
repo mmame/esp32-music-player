@@ -22,9 +22,10 @@ static const char *TAG = "song_cfg";
 
 void song_settings_load(const char *wav_path, song_settings_t *out)
 {
-    /* Safe defaults: no loop, follow crank speed. */
-    out->loop        = false;
-    out->fixed_speed = 0.0f;
+    /* Safe defaults: no loop, follow crank speed, time-stretch mode. */
+    out->loop         = false;
+    out->fixed_speed  = 0.0f;
+    out->pitch_follow = false;
 
     if (!wav_path) return;
 
@@ -84,11 +85,18 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         out->fixed_speed = (float)speed_item->valuedouble;
     }
 
+    /* "pitch_follow": boolean – pitch tracks speed (tape effect) */
+    const cJSON *pitch_item = cJSON_GetObjectItemCaseSensitive(root, "pitch_follow");
+    if (cJSON_IsBool(pitch_item)) {
+        out->pitch_follow = cJSON_IsTrue(pitch_item);
+    }
+
     cJSON_Delete(root);
 
-    ESP_LOGI(TAG, "Settings for '%s': loop=%s fixed_speed=%s(%.2f)",
+    ESP_LOGI(TAG, "Settings for '%s': loop=%s fixed_speed=%s(%.2f) pitch_follow=%s",
              json_path,
              out->loop ? "yes" : "no",
              out->fixed_speed > 0.0f ? "" : "off ",
-             (double)out->fixed_speed);
+             (double)out->fixed_speed,
+             out->pitch_follow ? "yes" : "no");
 }

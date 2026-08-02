@@ -199,14 +199,18 @@ void uart_master_send_song_list(const char names[][UM_MAX_SONG_NAME], uint8_t co
  *   [2]       tempo        : uint8_t   (0–100, 50 = 1.0× speed)
  *   [3]       position_pct : uint8_t   (0–100, playback progress)
  *   [4..5]    duration_s   : uint16_t  (speed-adjusted song length in seconds)
- *   [6..N-1]  song_name    : char[]    (no null terminator; length = LEN - 6)
+ *   [6]       flags        : uint8_t   (bit 0 = speed_locked)
+ *   [7..8]    song_id      : uint16_t  (1-based song index; 0 if no song)
+ *   [9..N-1]  song_name    : char[]    (no null terminator; length = LEN - 9)
  */
 void uart_master_send_state(const char *song_name,
                             uint8_t     is_playing,
                             uint8_t     volume,
                             uint8_t     tempo,
                             uint8_t     position_pct,
-                            uint16_t    duration_s);
+                            uint16_t    duration_s,
+                            uint8_t     flags,
+                            uint16_t    song_id);
 
 /**
  * @brief Send CMD_POTI_UPDATE so the display can refresh its visual bars.
