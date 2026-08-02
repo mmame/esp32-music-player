@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 /* Moving-average window size (power of 2 recommended for cheap division) */
-#define POT_AVG_SAMPLES  8
+#define POT_AVG_SAMPLES  32
 
 /* Minimum change (0–100 scale) before a new value is considered "changed" */
 #define POT_CHANGE_THRESHOLD  2
