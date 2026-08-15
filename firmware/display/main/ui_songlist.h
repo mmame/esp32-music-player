@@ -97,6 +97,12 @@ void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  fixed_speed_x100);
 
 /**
+ * @brief Update the BT enable/disable button state from the player's flags.
+ *        Safe to call from any task / core.
+ */
+void ui_songlist_update_bt_enabled_async(bool enabled);
+
+/**
  * @brief Open the song-settings dialog for @p song_id on whatever screen is
  *        currently active.  Must be called from the LVGL task (e.g. from a
  *        button callback).  A song_id of 0 is silently ignored.

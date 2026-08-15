@@ -69,3 +69,9 @@
 /* ── Speed-lock switch ──────────────────────────────────────────────────────── */
 #define SPEED_LOCK_PIN  2   /* Digital input – HIGH = lock playback speed     */
 
+/* ── JAB5 BLE-disconnect control (open-collector) ───────────────────────────── */
+/* GPIO46 is driven LOW for 300 ms every 2 s to keep BLE disconnected.          */
+/* Released to INPUT (high-Z) while BLE is enabled.                              */
+/* Note: GPIO46 is also a ROM-log strapping pin; safe to repurpose at runtime.   */
+#define BT_CTRL_PIN     46
+

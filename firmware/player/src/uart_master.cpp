@@ -34,6 +34,7 @@ static um_on_seek_cb_t           s_on_seek          = nullptr;
 static um_on_st_bypass_cb_t      s_on_st_bypass     = nullptr;
 static um_on_tempo_lock_cb_t     s_on_tempo_lock    = nullptr;
 static um_on_wifi_ctrl_cb_t      s_on_wifi_ctrl     = nullptr;
+static um_on_bt_ctrl_cb_t        s_on_bt_ctrl       = nullptr;
 static um_on_song_settings_req_cb_t  s_on_song_settings_req  = nullptr;
 static um_on_set_song_settings_cb_t  s_on_set_song_settings  = nullptr;
 
@@ -172,6 +173,11 @@ void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock)
 void uart_master_set_wifi_ctrl_callback(um_on_wifi_ctrl_cb_t on_wifi_ctrl)
 {
     s_on_wifi_ctrl = on_wifi_ctrl;
+}
+
+void uart_master_set_bt_ctrl_callback(um_on_bt_ctrl_cb_t on_bt_ctrl)
+{
+    s_on_bt_ctrl = on_bt_ctrl;
 }
 
 void uart_master_set_song_settings_req_callback(um_on_song_settings_req_cb_t cb)
@@ -488,6 +494,18 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             bool enable = (payload[0] != 0);
             ESP_LOGI(TAG, "CMD_WIFI_CTRL: %s", enable ? "ENABLE" : "DISABLE");
             if (s_on_wifi_ctrl) s_on_wifi_ctrl(enable);
+        }
+        break;
+
+    case CMD_BT_CTRL:
+        if (len < 1) {
+            ESP_LOGW(TAG, "CMD_BT_CTRL: missing payload");
+            break;
+        }
+        {
+            bool enable = (payload[0] != 0);
+            ESP_LOGI(TAG, "CMD_BT_CTRL: %s", enable ? "ENABLE" : "DISABLE");
+            if (s_on_bt_ctrl) s_on_bt_ctrl(enable);
         }
         break;
 

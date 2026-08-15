@@ -74,6 +74,7 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_SONG_SETTINGS_REQ   0x10  /* Display -> Host: request settings for a song       */
 #define CMD_SONG_SETTINGS       0x11  /* Host -> Display: current settings for a song       */
 #define CMD_SET_SONG_SETTINGS   0x12  /* Display -> Host: write new settings for a song     */
+#define CMD_BT_CTRL             0x13  /* Display -> Host: enable (1) / disable (0) BLE module */
 #define CMD_ACK                 0xFF  /* Display -> Host: sync acknowledgement              */
 
 /* ---------- Global system state ---------- */
@@ -124,6 +125,14 @@ void uart_comm_send_tempo_lock(bool lock, uint8_t locked_tempo);
  *                false = stop them.
  */
 void uart_comm_send_wifi_ctrl(bool enable);
+
+/**
+ * @brief Send CMD_BT_CTRL to the player.
+ *
+ * @param enable  true  = allow BLE connections (GPIO held high-Z),
+ *                false = periodic LOW pulse to keep BLE disconnected.
+ */
+void uart_comm_send_bt_ctrl(bool enable);
 
 /**
  * @brief Send CMD_SONG_SETTINGS_REQ to the player to request the current

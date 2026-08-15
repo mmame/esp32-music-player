@@ -170,6 +170,13 @@ void uart_comm_send_wifi_ctrl(bool enable)
     ESP_LOGI(TAG, "CMD_WIFI_CTRL queued: %s", enable ? "ENABLE" : "DISABLE");
 }
 
+void uart_comm_send_bt_ctrl(bool enable)
+{
+    uint8_t val = enable ? 0x01u : 0x00u;
+    enqueue_pending_cmd(CMD_BT_CTRL, &val, 1);
+    ESP_LOGI(TAG, "CMD_BT_CTRL queued: %s", enable ? "ENABLE" : "DISABLE");
+}
+
 void uart_comm_send_song_settings_req(uint16_t song_id)
 {
     uint8_t params[2];
@@ -414,6 +421,7 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         xSemaphoreGive(s_state_mutex);
 
         ui_player_update_speed_locked_async(!!(flags_byte & 0x01u));
+        ui_songlist_update_bt_enabled_async(!!(flags_byte & 0x02u));
 
         ESP_LOGD(TAG, "State: song='%s'  vol=%u  tempo=%u  playing=%u  pos=%u%%  dur=%us",
                  song_name_snap, g_player_state.volume, g_player_state.tempo,

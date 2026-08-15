@@ -45,6 +45,7 @@
 #include "web_server.h"
 #include "song_settings.h"
 #include "crank_config.h"
+#include "bt_ctrl.h"
 #include "cJSON.h"
 
 /* ESP-ADF headers (only when ADF_PATH is set in CMakeLists) */
@@ -767,8 +768,7 @@ static void audio_task(void *arg)
 static void on_play_song(uint16_t song_id)
 {
     if (song_id > 0 && song_id <= g_song_count) {
-        s_cmd_play_id    = (int16_t)(song_id - 1);
-        s_cmd_wifi_disable = true; /* auto-disable WiFi when playback starts */
+        s_cmd_play_id = (int16_t)(song_id - 1);
     }
 }
 
@@ -799,6 +799,11 @@ static void on_wifi_ctrl(bool enable)
         s_cmd_wifi_disable = true;
         s_cmd_wifi_enable  = false;
     }
+}
+
+static void on_bt_ctrl(bool enable)
+{
+    bt_ctrl_set_enabled(enable);
 }
 
 static void on_seek(uint8_t pct)
@@ -1150,8 +1155,11 @@ static void io_task(void *arg)
                 /* No song active – forward button to display for navigation */
                 uart_master_send_encoder_btn();
             }
+        } else if (btn == 1) {
+            bt_ctrl_set_enabled(!bt_ctrl_is_enabled());
+            /* display icon syncs via state_flags bit 1 in the next CMD_SET_STATE */
         }
-        /* btn 1–9: additional buttons, actions to be assigned */
+        /* btn 2–9: additional buttons, actions to be assigned */
 
         /* ── Speed-lock switch (SPEED_LOCK_PIN = GPIO2) ─────────────────────────── */
         {
@@ -1227,6 +1235,7 @@ static void io_task(void *arg)
                                ? g_song_names[song] : "";
 
             uint8_t  state_flags = g_tempo_locked ? 0x01u : 0x00u;
+            if (bt_ctrl_is_enabled()) state_flags |= 0x02u;
             uint16_t state_id    = (song >= 0) ? (uint16_t)((uint16_t)song + 1u) : 0u;
             uart_master_send_state(name, (uint8_t)(playing ? 1 : 0),
                                    cur_vol, tempo_byte, pct, dur_s, state_flags, state_id);
@@ -1290,12 +1299,14 @@ extern "C" void app_main(void)
     encoder_init();
     encoder2_init();
     crank_config_apply();
+    bt_ctrl_init();
 
     uart_master_init(on_play_song, on_stop_song, on_pause, on_resume, on_display_ready);
     uart_master_set_seek_callback(on_seek);
     uart_master_set_st_bypass_callback(on_st_bypass);
     uart_master_set_tempo_lock_callback(on_tempo_lock);
     uart_master_set_wifi_ctrl_callback(on_wifi_ctrl);
+    uart_master_set_bt_ctrl_callback(on_bt_ctrl);
     uart_master_set_song_settings_req_callback(on_song_settings_req);
     uart_master_set_set_song_settings_callback(on_set_song_settings);
 

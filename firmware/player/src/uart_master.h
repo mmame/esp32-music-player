@@ -56,6 +56,7 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_SONG_SETTINGS_REQ   0x10  /* Display → Host: request settings for a song        */
 #define CMD_SONG_SETTINGS       0x11  /* Host → Display: current settings for a song        */
 #define CMD_SET_SONG_SETTINGS   0x12  /* Display → Host: write new settings for a song      */
+#define CMD_BT_CTRL             0x13  /* Display → Host: enable (1) / disable (0) BLE module */
 #define CMD_ACK                 0xFF  /* Display → Host: ACK with optional touch            */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -99,6 +100,12 @@ typedef void (*um_on_tempo_lock_cb_t)(bool lock, uint8_t locked_tempo);
  * @param enable  true = start WiFi AP + HTTP server, false = stop them.
  */
 typedef void (*um_on_wifi_ctrl_cb_t)(bool enable);
+
+/**
+ * @brief Called when the display sends CMD_BT_CTRL.
+ * @param enable  true = allow BLE connections (input/high-Z), false = periodic LOW pulse (disconnect).
+ */
+typedef void (*um_on_bt_ctrl_cb_t)(bool enable);
 
 /**
  * @brief Called when the display requests the settings for a song (CMD_SONG_SETTINGS_REQ).
@@ -158,6 +165,12 @@ void uart_master_set_tempo_lock_callback(um_on_tempo_lock_cb_t on_tempo_lock);
  *        Safe to call at any time; replaces the current callback.
  */
 void uart_master_set_wifi_ctrl_callback(um_on_wifi_ctrl_cb_t on_wifi_ctrl);
+
+/**
+ * @brief Register a BLE-control callback after init.
+ *        Safe to call at any time; replaces the current callback.
+ */
+void uart_master_set_bt_ctrl_callback(um_on_bt_ctrl_cb_t on_bt_ctrl);
 
 /**
  * @brief Register the callback for CMD_SONG_SETTINGS_REQ.

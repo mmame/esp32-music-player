@@ -50,10 +50,18 @@ static lv_group_t *s_group       = NULL;
 static lv_indev_t *s_enc_indev   = NULL; /* virtual encoder indev */
 
 /* WiFi toggle button */
-static lv_obj_t *s_wifi_btn   = NULL;   /* clickable container */
-static lv_obj_t *s_wifi_icon  = NULL;   /* label: LV_SYMBOL_WIFI */
-static lv_obj_t *s_wifi_slash = NULL;   /* "\" overlay when disabled */
-static bool      s_wifi_enabled = false; /* starts disabled */
+static lv_obj_t  *s_wifi_btn     = NULL;   /* clickable container */
+static lv_obj_t  *s_wifi_icon    = NULL;   /* label: LV_SYMBOL_WIFI */
+static lv_obj_t  *s_wifi_slash   = NULL;   /* "\/" overlay when disabled */
+static bool       s_wifi_enabled = false;  /* starts disabled */
+static lv_timer_t *s_wifi_timer  = NULL;   /* auto-disable after 15 min */
+
+#define WIFI_TIMEOUT_MS  (15u * 60u * 1000u)
+
+/* BT enable/disable button */
+static lv_obj_t *s_bt_btn     = NULL;
+static lv_obj_t *s_bt_icon    = NULL;
+static bool      s_bt_enabled = false; /* starts disabled */
 
 /* Settings dialog – at most one open at a time */
 static lv_obj_t  *s_settings_overlay   = NULL; /* backdrop (NULL when not open) */
@@ -68,6 +76,9 @@ static uint8_t    s_speed_x100         = 100;  /* dialog speed × 100 (70–140)
 static void on_list_item_clicked(lv_event_t *e);
 static void on_wifi_btn_clicked(lv_event_t *e);
 static void update_wifi_btn_style(void);
+static void wifi_timeout_cb(lv_timer_t *t);
+static void on_bt_btn_clicked(lv_event_t *e);
+static void update_bt_btn_style(void);
 static void send_play_song(uint16_t song_id);
 static void focus_item(int16_t idx);
 static void create_wifi_info_popup(void);
@@ -122,9 +133,51 @@ static void on_wifi_btn_clicked(lv_event_t *e)
     update_wifi_btn_style();
     uart_comm_send_wifi_ctrl(s_wifi_enabled);
     ESP_LOGI(TAG, "WiFi icon toggled: %s", s_wifi_enabled ? "ENABLE" : "DISABLE");
+
     if (s_wifi_enabled) {
+        if (s_wifi_timer) { lv_timer_delete(s_wifi_timer); s_wifi_timer = NULL; }
+        s_wifi_timer = lv_timer_create(wifi_timeout_cb, WIFI_TIMEOUT_MS, NULL);
+        lv_timer_set_repeat_count(s_wifi_timer, 1);
         create_wifi_info_popup();
+    } else {
+        if (s_wifi_timer) { lv_timer_delete(s_wifi_timer); s_wifi_timer = NULL; }
     }
+}
+
+static void wifi_timeout_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_wifi_timer = NULL; /* auto-deleted by LVGL after repeat_count reaches 0 */
+    s_wifi_enabled = false;
+    update_wifi_btn_style();
+    uart_comm_send_wifi_ctrl(false);
+    ESP_LOGI(TAG, "WiFi auto-disabled after 15-minute timeout");
+}
+
+/* =========================================================================
+ * BT button helpers
+ * ========================================================================= */
+
+static void update_bt_btn_style(void)
+{
+    if (s_bt_enabled) {
+        lv_obj_set_style_bg_color(s_bt_btn, lv_color_hex(0x00B4D8), 0);
+        lv_obj_set_style_bg_opa(s_bt_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(s_bt_icon, lv_color_white(), 0);
+    } else {
+        lv_obj_set_style_bg_color(s_bt_btn, lv_color_hex(0x2A2A3E), 0);
+        lv_obj_set_style_bg_opa(s_bt_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(s_bt_icon, lv_color_hex(0x505060), 0);
+    }
+}
+
+static void on_bt_btn_clicked(lv_event_t *e)
+{
+    (void)e;
+    s_bt_enabled = !s_bt_enabled;
+    update_bt_btn_style();
+    uart_comm_send_bt_ctrl(s_bt_enabled);
+    ESP_LOGI(TAG, "BT icon toggled: %s", s_bt_enabled ? "ENABLE" : "DISABLE");
 }
 
 /* =========================================================================
@@ -174,7 +227,9 @@ static void create_wifi_info_popup(void)
         "        \"MusicPlayer\"\n"
         "\n"
         "2. Open in your browser:\n"
-        "        192.168.4.1");
+        "        192.168.4.1\n"
+        "\n"
+        "Auto-disables after 15 minutes.");
     lv_obj_set_style_text_font(msg, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(msg, lv_color_hex(0xE0E0FF), 0);
     lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
@@ -219,6 +274,21 @@ void ui_songlist_create(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0xE0E0FF), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
 
+    /* BT toggle button – left of the WiFi button */
+    s_bt_btn = lv_obj_create(s_screen);
+    lv_obj_set_size(s_bt_btn, 46, 44);
+    lv_obj_align(s_bt_btn, LV_ALIGN_TOP_RIGHT, -58, 6);
+    lv_obj_set_style_border_width(s_bt_btn, 0, 0);
+    lv_obj_set_style_radius(s_bt_btn, 8, 0);
+    lv_obj_set_style_pad_all(s_bt_btn, 0, 0);
+    lv_obj_clear_flag(s_bt_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_bt_btn, on_bt_btn_clicked, LV_EVENT_CLICKED, NULL);
+    s_bt_icon = lv_label_create(s_bt_btn);
+    lv_label_set_text(s_bt_icon, LV_SYMBOL_BLUETOOTH);
+    lv_obj_set_style_text_font(s_bt_icon, &lv_font_montserrat_28, 0);
+    lv_obj_center(s_bt_icon);
+    update_bt_btn_style();
+
     /* WiFi toggle button – top-right of the header strip */
     s_wifi_btn = lv_obj_create(s_screen);
     lv_obj_set_size(s_wifi_btn, 46, 44);
@@ -232,11 +302,13 @@ void ui_songlist_create(void)
     /* WiFi icon label inside the button */
     s_wifi_icon = lv_label_create(s_wifi_btn);
     lv_label_set_text(s_wifi_icon, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(s_wifi_icon, &lv_font_montserrat_28, 0);
     lv_obj_center(s_wifi_icon);
 
     /* Diagonal slash overlay – shown only when WiFi is disabled */
     s_wifi_slash = lv_label_create(s_wifi_btn);
     lv_label_set_text(s_wifi_slash, "/");
+    lv_obj_set_style_text_font(s_wifi_slash, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_wifi_slash, lv_color_hex(0xE94560), 0);
     lv_obj_center(s_wifi_slash);
 
@@ -652,14 +724,6 @@ uint16_t ui_songlist_get_next_song_id(uint16_t current_id)
 
 static void send_play_song(uint16_t song_id)
 {
-    /* Auto-disable WiFi when a song is selected */
-    if (s_wifi_enabled) {
-        s_wifi_enabled = false;
-        update_wifi_btn_style();
-        uart_comm_send_wifi_ctrl(false);
-        ESP_LOGI(TAG, "WiFi auto-disabled on song selection");
-    }
-
     uart_comm_send_play_song(song_id);
 }
 
@@ -864,5 +928,20 @@ void ui_songlist_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fi
 
     lv_lock();
     lv_async_call(async_cb_song_settings, p);
+    lv_unlock();
+}
+
+static void async_cb_update_bt_enabled(void *user_data)
+{
+    bool enabled = (bool)(uintptr_t)user_data;
+    s_bt_enabled = enabled;
+    if (s_bt_btn) update_bt_btn_style();
+}
+
+void ui_songlist_update_bt_enabled_async(bool enabled)
+{
+    if (!s_screen) return;
+    lv_lock();
+    lv_async_call(async_cb_update_bt_enabled, (void *)(uintptr_t)enabled);
     lv_unlock();
 }
