@@ -435,7 +435,7 @@ void ui_player_create(void)
     s_bypass_lbl = lv_label_create(right);
     lv_label_set_text(s_bypass_lbl, "FIX");
     lv_obj_set_style_text_font(s_bypass_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_bypass_lbl, lv_color_hex(0x445566), 0);
+    lv_obj_set_style_text_color(s_bypass_lbl, lv_color_hex(COLOR_LOCKED), 0);
     lv_obj_set_width(s_bypass_lbl, COL_W);
     lv_obj_set_style_text_align(s_bypass_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(s_bypass_lbl, COL_W, BYPASS_CHECK_Y_R + 24);
@@ -674,6 +674,11 @@ typedef struct {
     uint16_t song_id;
     uint8_t  flags;
     uint8_t  fixed_speed_x100;
+    uint8_t  dimmer_max;
+    uint8_t  dimmer_min;
+    uint8_t  dimmer_rps_ref_x10;
+    uint8_t  dimmer_holdoff_s;
+    uint8_t  pitch_influence_pct;
 } async_player_settings_t;
 
 static void async_cb_song_settings_player(void *user_data)
@@ -721,15 +726,27 @@ static void async_cb_song_settings_player(void *user_data)
     free(p);
 }
 
-void ui_player_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fixed_speed_x100)
+void ui_player_song_settings_async(uint16_t song_id,
+                                   uint8_t  flags,
+                                   uint8_t  fixed_speed_x100,
+                                   uint8_t  dimmer_max,
+                                   uint8_t  dimmer_min,
+                                   uint8_t  dimmer_rps_ref_x10,
+                                   uint8_t  dimmer_holdoff_s,
+                                   uint8_t  pitch_influence_pct)
 {
     if (!s_screen) return;
 
     async_player_settings_t *p = malloc(sizeof(async_player_settings_t));
     if (!p) { ESP_LOGE(TAG, "OOM in song_settings_async"); return; }
-    p->song_id          = song_id;
-    p->flags            = flags;
-    p->fixed_speed_x100 = fixed_speed_x100;
+    p->song_id             = song_id;
+    p->flags               = flags;
+    p->fixed_speed_x100    = fixed_speed_x100;
+    p->dimmer_max          = dimmer_max;
+    p->dimmer_min          = dimmer_min;
+    p->dimmer_rps_ref_x10  = dimmer_rps_ref_x10;
+    p->dimmer_holdoff_s    = dimmer_holdoff_s;
+    p->pitch_influence_pct = pitch_influence_pct;
     lv_lock();
     lv_async_call(async_cb_song_settings_player, p);
     lv_unlock();

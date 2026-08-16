@@ -22,10 +22,15 @@ static const char *TAG = "song_cfg";
 
 void song_settings_load(const char *wav_path, song_settings_t *out)
 {
-    /* Safe defaults: no loop, follow crank speed, time-stretch mode. */
-    out->loop         = false;
-    out->fixed_speed  = 0.0f;
-    out->pitch_follow = false;
+    /* Safe defaults: no loop, follow crank speed, time-stretch mode, system dimmer. */
+    out->loop             = false;
+    out->fixed_speed      = 0.0f;
+    out->pitch_influence  = 0u;
+    out->dimmer_override  = false;
+    out->dimmer_max       = 100u;
+    out->dimmer_min       = 0u;
+    out->dimmer_rps_ref   = 1.4f;
+    out->dimmer_holdoff_s = 0u;
 
     if (!wav_path) return;
 
@@ -85,18 +90,57 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         out->fixed_speed = (float)speed_item->valuedouble;
     }
 
-    /* "pitch_follow": boolean – pitch tracks speed (tape effect) */
-    const cJSON *pitch_item = cJSON_GetObjectItemCaseSensitive(root, "pitch_follow");
-    if (cJSON_IsBool(pitch_item)) {
-        out->pitch_follow = cJSON_IsTrue(pitch_item);
+    /* "pitch_influence": 0-100; also accept legacy "pitch_follow" bool (→ 0 or 100) */
+    const cJSON *pitch_item = cJSON_GetObjectItemCaseSensitive(root, "pitch_influence");
+    if (cJSON_IsNumber(pitch_item)) {
+        int v = pitch_item->valueint;
+        out->pitch_influence = (uint8_t)(v < 0 ? 0 : v > 100 ? 100 : v);
+    } else {
+        const cJSON *pf = cJSON_GetObjectItemCaseSensitive(root, "pitch_follow");
+        if (cJSON_IsTrue(pf)) out->pitch_influence = 100u;
+    }
+
+    /* "dimmer_override": boolean – use per-song dimmer values */
+    const cJSON *dov_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_override");
+    if (cJSON_IsBool(dov_item)) {
+        out->dimmer_override = cJSON_IsTrue(dov_item);
+    }
+
+    /* "dimmer_max": integer 0-100 */
+    const cJSON *dmax_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_max");
+    if (cJSON_IsNumber(dmax_item) && dmax_item->valueint >= 0 && dmax_item->valueint <= 100) {
+        out->dimmer_max = (uint8_t)dmax_item->valueint;
+    }
+
+    /* "dimmer_min": integer 0-100 */
+    const cJSON *dmin_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_min");
+    if (cJSON_IsNumber(dmin_item) && dmin_item->valueint >= 0 && dmin_item->valueint <= 100) {
+        out->dimmer_min = (uint8_t)dmin_item->valueint;
+    }
+
+    /* "dimmer_rps_ref": positive float – RPS at full brightness */
+    const cJSON *drps_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_rps_ref");
+    if (cJSON_IsNumber(drps_item) && drps_item->valuedouble > 0.0) {
+        out->dimmer_rps_ref = (float)drps_item->valuedouble;
+    }
+
+    /* "dimmer_holdoff_s": integer 0-255 seconds */
+    const cJSON *dhld_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_holdoff_s");
+    if (cJSON_IsNumber(dhld_item) && dhld_item->valueint >= 0 && dhld_item->valueint <= 255) {
+        out->dimmer_holdoff_s = (uint8_t)dhld_item->valueint;
     }
 
     cJSON_Delete(root);
 
-    ESP_LOGI(TAG, "Settings for '%s': loop=%s fixed_speed=%s(%.2f) pitch_follow=%s",
+    ESP_LOGI(TAG, "Settings for '%s': loop=%s fixed_speed=%s(%.2f) pitch_influence=%u%% "
+             "dimmer_override=%s max=%u min=%u rps_ref=%.1f holdoff=%us",
              json_path,
              out->loop ? "yes" : "no",
              out->fixed_speed > 0.0f ? "" : "off ",
              (double)out->fixed_speed,
-             out->pitch_follow ? "yes" : "no");
+             out->pitch_influence,
+             out->dimmer_override ? "yes" : "no",
+             out->dimmer_max, out->dimmer_min,
+             (double)out->dimmer_rps_ref,
+             out->dimmer_holdoff_s);
 }

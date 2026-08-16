@@ -188,16 +188,26 @@ void uart_comm_send_song_settings_req(uint16_t song_id)
 
 void uart_comm_send_set_song_settings(uint16_t song_id,
                                       uint8_t  flags,
-                                      uint8_t  fixed_speed_x100)
+                                      uint8_t  fixed_speed_x100,
+                                      uint8_t  dimmer_max,
+                                      uint8_t  dimmer_min,
+                                      uint8_t  dimmer_rps_ref_x10,
+                                      uint8_t  dimmer_holdoff_s,
+                                      uint8_t  pitch_influence_pct)
 {
-    uint8_t params[4];
+    uint8_t params[9];
     params[0] = (uint8_t)(song_id & 0xFF);
     params[1] = (uint8_t)(song_id >> 8);
     params[2] = flags;
     params[3] = fixed_speed_x100;
-    enqueue_pending_cmd(CMD_SET_SONG_SETTINGS, params, 4);
-    ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS queued: id=%u flags=0x%02X spd=%u",
-             song_id, flags, fixed_speed_x100);
+    params[4] = dimmer_max;
+    params[5] = dimmer_min;
+    params[6] = dimmer_rps_ref_x10;
+    params[7] = dimmer_holdoff_s;
+    params[8] = pitch_influence_pct;
+    enqueue_pending_cmd(CMD_SET_SONG_SETTINGS, params, 9);
+    ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS queued: id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u pitch=%u",
+             song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_ref_x10, dimmer_holdoff_s, pitch_influence_pct);
 }
 
 void uart_comm_init(void)
@@ -549,22 +559,34 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     /* ------------------------------------------------------------------ */
     case CMD_SONG_SETTINGS: {
         /*
-         * Payload layout (4 bytes):
-         *   [0..1]  song_id          : uint16_t  (LE)
-         *   [2]     flags            : uint8_t   (bit 0 = loop, bit 1 = fixed_speed_en)
-         *   [3]     fixed_speed_x100 : uint8_t   (speed × 100, e.g. 100 = 1.0×)
+         * Payload layout (9 bytes):
+         *   [0..1]  song_id            : uint16_t  (LE)
+         *   [2]     flags              : uint8_t   (bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override)
+         *   [3]     fixed_speed_x100   : uint8_t
+         *   [4]     dimmer_max         : uint8_t   (0-100)
+         *   [5]     dimmer_min         : uint8_t   (0-100)
+         *   [6]     dimmer_rps_ref_x10 : uint8_t   (e.g. 14 = 1.4 rps)
+         *   [7]     dimmer_holdoff_s   : uint8_t   (seconds)
+         *   [8]     pitch_influence_pct: uint8_t   (0-100)
          */
         if (len < 4) {
             ESP_LOGW(TAG, "CMD_SONG_SETTINGS: payload too short (%u)", len);
             break;
         }
-        uint16_t song_id          = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
-        uint8_t  flags            = payload[2];
-        uint8_t  fixed_speed_x100 = payload[3];
-        ESP_LOGI(TAG, "CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u",
-                 song_id, flags, fixed_speed_x100);
-        ui_songlist_song_settings_async(song_id, flags, fixed_speed_x100);
-        ui_player_song_settings_async(song_id, flags, fixed_speed_x100);
+        uint16_t song_id           = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+        uint8_t  flags             = payload[2];
+        uint8_t  fixed_speed_x100  = payload[3];
+        uint8_t  dimmer_max        = (len >= 8) ? payload[4] : 100u;
+        uint8_t  dimmer_min        = (len >= 8) ? payload[5] : 0u;
+        uint8_t  dimmer_rps_x10    = (len >= 8) ? payload[6] : 14u;
+        uint8_t  dimmer_holdoff_s  = (len >= 8) ? payload[7] : 0u;
+        uint8_t  pitch_infl_pct    = (len >= 9) ? payload[8] : 0u;
+        ESP_LOGI(TAG, "CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u pitch=%u",
+                 song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, pitch_infl_pct);
+        ui_songlist_song_settings_async(song_id, flags, fixed_speed_x100,
+                                        dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, pitch_infl_pct);
+        ui_player_song_settings_async(song_id, flags, fixed_speed_x100,
+                                      dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, pitch_infl_pct);
         break;
     }
 

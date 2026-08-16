@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,20 +15,25 @@ extern "C" {
  * If the file is absent the defaults (no loop, no fixed speed) apply silently.
  *
  * Supported JSON keys (all optional):
- *   "loop"        : boolean – restart the song from the beginning when it ends,
- *                   until Stop is pressed.
- *   "fixed_speed" : number  – play at this speed multiplier regardless of crank
- *                   speed (e.g. 1.0 for normal speed, 1.2 for 20 % faster).
- *                   Omitting the key (or setting it to 0) restores crank control.
- *
- * Example:
- *   { "loop": true, "fixed_speed": 1.0 }
+ *   "loop"              : boolean – restart the song from the beginning when it ends.
+ *   "fixed_speed"       : number  – play at this speed multiplier regardless of crank speed.
+ *   "pitch_influence"   : number  – pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
+ *   "dimmer_override"   : boolean – use per-song dimmer params instead of system config.
+ *   "dimmer_max"        : number  – max brightness 0-100 (default 100).
+ *   "dimmer_min"        : number  – min brightness 0-100 (default 0).
+ *   "dimmer_rps_ref"    : number  – RPS at which full brightness is reached (default 1.4).
+ *   "dimmer_holdoff_s"  : number  – seconds after song start before dimmer activates (default 0).
  */
 
 typedef struct {
-    bool  loop;          /**< true: restart automatically when song ends  */
-    float fixed_speed;   /**< 0.0f = follow crank; >0.0f = locked speed   */
-    bool  pitch_follow;  /**< true: pitch follows speed (tape effect)      */
+    bool    loop;            /**< true: restart automatically when song ends           */
+    float   fixed_speed;     /**< 0.0f = follow crank; >0.0f = locked speed            */
+    uint8_t pitch_influence; /**< pitch blend 0-100: 0=time-stretch, 100=full tape effect */
+    bool    dimmer_override; /**< true: use per-song dimmer params instead of system   */
+    uint8_t dimmer_max;      /**< max brightness 0-100                                 */
+    uint8_t dimmer_min;      /**< min brightness 0-100                                 */
+    float   dimmer_rps_ref;  /**< RPS at which full brightness is reached              */
+    uint8_t dimmer_holdoff_s;/**< seconds from song start before dimmer activates      */
 } song_settings_t;
 
 /**

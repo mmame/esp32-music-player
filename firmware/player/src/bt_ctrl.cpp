@@ -2,8 +2,8 @@
  * @file bt_ctrl.cpp
  * @brief JAB5 BLE-disconnect open-collector driver.
  *
- * GPIO46 is driven as an open-collector output:
- *   Disabled: 300 ms OUTPUT-LOW  → 1700 ms INPUT (high-Z)  [repeating, 2 s period]
+ * GPIO46 is driven as an open-emitter output:
+ *   Disabled: 300 ms OUTPUT-HIGH → 1700 ms INPUT (high-Z)  [repeating, 2 s period]
  *   Enabled : INPUT (high-Z) permanently
  *
  * The transition between states is handled by a lightweight FreeRTOS task.
@@ -36,9 +36,9 @@ static void bt_ctrl_task(void *arg)
             gpio_set_direction((gpio_num_t)BT_CTRL_PIN, GPIO_MODE_INPUT);
             vTaskDelay(pdMS_TO_TICKS(100));
         } else {
-            /* BT disabled: 300 ms LOW pulse */
+            /* BT disabled: 300 ms HIGH pulse */
+            gpio_set_level((gpio_num_t)BT_CTRL_PIN, 1);
             gpio_set_direction((gpio_num_t)BT_CTRL_PIN, GPIO_MODE_OUTPUT);
-            gpio_set_level((gpio_num_t)BT_CTRL_PIN, 0);
             vTaskDelay(pdMS_TO_TICKS(300));
             /* 1700 ms high-Z */
             gpio_set_direction((gpio_num_t)BT_CTRL_PIN, GPIO_MODE_INPUT);

@@ -122,14 +122,23 @@ typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
  *
  * The handler should persist the settings to the song's JSON sidecar file.
  *
- * @param song_id          1-based song index.
- * @param flags            Bit-field: bit 0 = loop, bit 1 = fixed_speed_en.
- * @param fixed_speed_x100 Fixed speed multiplier × 100 (e.g. 100 = 1.0×, 120 = 1.2×).
- *                         Meaningful only when bit 1 of @p flags is set.
+ * @param song_id            1-based song index.
+ * @param flags              Bit-field: bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override.
+ * @param fixed_speed_x100   Fixed speed multiplier × 100. Meaningful only when bit 1 set.
+ * @param dimmer_max         Max brightness 0-100.
+ * @param dimmer_min         Min brightness 0-100.
+ * @param dimmer_rps_ref_x10 Full-brightness RPS × 10 (e.g. 14 = 1.4 rps).
+ * @param dimmer_holdoff_s   Seconds after song start before dimmer activates.
+ * @param pitch_influence_pct Pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
  */
 typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  flags,
-                                             uint8_t  fixed_speed_x100);
+                                             uint8_t  fixed_speed_x100,
+                                             uint8_t  dimmer_max,
+                                             uint8_t  dimmer_min,
+                                             uint8_t  dimmer_rps_ref_x10,
+                                             uint8_t  dimmer_holdoff_s,
+                                             uint8_t  pitch_influence_pct);
 
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
@@ -185,13 +194,24 @@ void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
 /**
  * @brief Send CMD_SONG_SETTINGS to the display.
  *
- * @param song_id          1-based song index.
- * @param flags            Bit-field: bit 0 = loop, bit 1 = fixed_speed_en.
- * @param fixed_speed_x100 Fixed speed × 100 (e.g. 100 = 1.0×). 0 when bit 1 is clear.
+ * Payload (8 bytes):
+ *   [0..1] song_id            : uint16_t LE
+ *   [2]    flags              : bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override
+ *   [3]    fixed_speed_x100   : speed × 100 (e.g. 100 = 1.0×).
+ *   [4]    dimmer_max         : 0-100
+ *   [5]    dimmer_min         : 0-100
+ *   [6]    dimmer_rps_ref_x10 : full-brightness RPS × 10 (e.g. 14 = 1.4 rps)
+ *   [7]    dimmer_holdoff_s   : seconds before dimmer activates (0 = immediate)
+ *   [8]    pitch_influence_pct: pitch blend factor 0-100
  */
 void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  flags,
-                                    uint8_t  fixed_speed_x100);
+                                    uint8_t  fixed_speed_x100,
+                                    uint8_t  dimmer_max,
+                                    uint8_t  dimmer_min,
+                                    uint8_t  dimmer_rps_ref_x10,
+                                    uint8_t  dimmer_holdoff_s,
+                                    uint8_t  pitch_influence_pct);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

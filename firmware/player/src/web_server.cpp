@@ -43,6 +43,7 @@
 #include "disp_ota.h"
 #include "crank_config.h"
 #include "potis.h"
+#include "song_settings.h"
 #include "cJSON.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -51,6 +52,7 @@ static const char *TAG = "web_server";
 
 /* ── Configuration ─────────────────────────────────────────────────── */
 #define AP_SSID        "MusicPlayer"
+#define AP_PASS        "Crank!837"
 #define AP_CHANNEL     6
 #define AP_MAX_CONN    4
 #define MOUNT_POINT    "/sdcard"
@@ -893,13 +895,157 @@ static esp_err_t disp_update_post_handler(httpd_req_t *req)
     return (flash_ret == ESP_OK) ? ESP_OK : ESP_FAIL;
 }
 
+/* ── GET /api/song_settings?name=<file.wav> ────────────────────────── */
+
+static esp_err_t song_settings_get_handler(httpd_req_t *req)
+{
+    char fname[MAX_FNAME_LEN + 1] = {};
+    if (!get_query_param(req, "name", fname, sizeof(fname)) || !fname_valid(fname)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing filename");
+        return ESP_FAIL;
+    }
+
+    char wav_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
+    build_path(wav_path, sizeof(wav_path), fname);
+
+    song_settings_t s;
+    song_settings_load(wav_path, &s);
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"loop\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
+             "\"pitch_influence\":%u,"
+             "\"dimmer_override\":%s,\"dimmer_max\":%u,\"dimmer_min\":%u,"
+             "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u}",
+             s.loop ? "true" : "false",
+             (s.fixed_speed > 0.0f) ? "true" : "false",
+             (s.fixed_speed > 0.0f) ? (double)s.fixed_speed : 1.0,
+             (unsigned)s.pitch_influence,
+             s.dimmer_override ? "true" : "false",
+             (unsigned)s.dimmer_max,
+             (unsigned)s.dimmer_min,
+             (double)s.dimmer_rps_ref,
+             (unsigned)s.dimmer_holdoff_s);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, buf);
+}
+
+/* ── POST /api/song_settings?name=<file.wav> ────────────────────────── */
+
+static esp_err_t song_settings_post_handler(httpd_req_t *req)
+{
+    char fname[MAX_FNAME_LEN + 1] = {};
+    if (!get_query_param(req, "name", fname, sizeof(fname)) || !fname_valid(fname)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing filename");
+        return ESP_FAIL;
+    }
+    if (req->content_len > 512) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return ESP_FAIL;
+    }
+    char body[513] = {};
+    int r = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (r <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    bool    loop      = false;
+    bool    fixed_en  = false;
+    float   fixed_spd = 1.0f;
+    uint8_t pitch     = 0;
+    bool    dim_ov    = false;
+    uint8_t d_max     = 100;
+    uint8_t d_min     = 0;
+    float   d_rps     = 1.4f;
+    uint8_t d_hoff    = 0;
+
+    cJSON *it;
+    it = cJSON_GetObjectItemCaseSensitive(root, "loop");
+    if (cJSON_IsBool(it)) loop = cJSON_IsTrue(it);
+    it = cJSON_GetObjectItemCaseSensitive(root, "fixed_speed_en");
+    if (cJSON_IsBool(it)) fixed_en = cJSON_IsTrue(it);
+    it = cJSON_GetObjectItemCaseSensitive(root, "fixed_speed");
+    if (cJSON_IsNumber(it)) { float v = (float)it->valuedouble; if (v >= 0.5f && v <= 2.0f) fixed_spd = v; }
+    it = cJSON_GetObjectItemCaseSensitive(root, "pitch_influence");
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; pitch = (uint8_t)(v < 0 ? 0 : v > 100 ? 100 : v); }
+    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_override");
+    if (cJSON_IsBool(it)) dim_ov = cJSON_IsTrue(it);
+    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_max");
+    if (cJSON_IsNumber(it) && it->valueint >= 0 && it->valueint <= 100) d_max = (uint8_t)it->valueint;
+    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_min");
+    if (cJSON_IsNumber(it) && it->valueint >= 0 && it->valueint <= 100) d_min = (uint8_t)it->valueint;
+    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_rps_ref");
+    if (cJSON_IsNumber(it)) { float v = (float)it->valuedouble; if (v >= 0.1f && v <= 5.0f) d_rps = v; }
+    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_holdoff_s");
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; d_hoff = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+    cJSON_Delete(root);
+
+    char wav_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
+    build_path(wav_path, sizeof(wav_path), fname);
+    char json_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 6];
+    wav_to_json_path(wav_path, json_path, sizeof(json_path));
+
+    /* All-default → delete sidecar so the player uses built-in defaults. */
+    if (!loop && !fixed_en && pitch == 0 && !dim_ov && d_hoff == 0) {
+        remove(json_path);
+        ESP_LOGI(TAG, "Song settings cleared via web for %s", fname);
+        httpd_resp_sendstr(req, "OK");
+        return ESP_OK;
+    }
+
+    cJSON *out = cJSON_CreateObject();
+    if (!out) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    cJSON_AddBoolToObject(out, "loop", loop);
+    if (fixed_en)  cJSON_AddNumberToObject(out, "fixed_speed", (double)fixed_spd);
+    if (pitch > 0) cJSON_AddNumberToObject(out, "pitch_influence", pitch);
+    if (dim_ov) {
+        cJSON_AddBoolToObject(out, "dimmer_override", true);
+        cJSON_AddNumberToObject(out, "dimmer_max", d_max);
+        cJSON_AddNumberToObject(out, "dimmer_min", d_min);
+        cJSON_AddNumberToObject(out, "dimmer_rps_ref", (double)d_rps);
+    }
+    if (d_hoff > 0) cJSON_AddNumberToObject(out, "dimmer_holdoff_s", d_hoff);
+
+    char *js = cJSON_PrintUnformatted(out);
+    cJSON_Delete(out);
+    if (!js) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    FILE *f = fopen(json_path, "w");
+    if (f) { fputs(js, f); fclose(f); }
+    cJSON_free(js);
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot write %s", json_path);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot write settings file");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Song settings saved via web for %s", fname);
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
 /* ── HTTP server ────────────────────────────────────────────────────── */
 
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 8192;
-    cfg.max_uri_handlers  = 12;
+    cfg.max_uri_handlers  = 14;
     cfg.recv_wait_timeout = 30;  /* seconds – per individual recv call   */
     cfg.send_wait_timeout = 30;
 
@@ -922,6 +1068,8 @@ static httpd_handle_t start_webserver(void)
         { "/delete",             HTTP_DELETE, delete_handler,                nullptr },
         { "/disp_update",        HTTP_POST,   disp_update_post_handler,      nullptr },
         { "/player_update",      HTTP_POST,   player_update_post_handler,    nullptr },
+        { "/api/song_settings",  HTTP_GET,    song_settings_get_handler,     nullptr },
+        { "/api/song_settings",  HTTP_POST,   song_settings_post_handler,    nullptr },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {
         httpd_register_uri_handler(server, &handlers[i]);
@@ -957,9 +1105,10 @@ static void wifi_stack_init(void)
     wifi_config_t ap_cfg = {};
     memcpy(ap_cfg.ap.ssid, AP_SSID, strlen(AP_SSID));
     ap_cfg.ap.ssid_len       = (uint8_t)strlen(AP_SSID);
+    memcpy(ap_cfg.ap.password, AP_PASS, strlen(AP_PASS));
     ap_cfg.ap.channel        = AP_CHANNEL;
     ap_cfg.ap.max_connection = AP_MAX_CONN;
-    ap_cfg.ap.authmode       = WIFI_AUTH_OPEN;
+    ap_cfg.ap.authmode       = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 

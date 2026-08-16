@@ -87,25 +87,20 @@ esp_err_t soundtouch_el_set_tempo(audio_element_handle_t self, float tempo);
 esp_err_t soundtouch_el_set_bypass(audio_element_handle_t self, bool bypass);
 
 /**
- * @brief  Switch between time-stretch mode (default) and rate mode.
+ * @brief  Set the pitch-influence factor at runtime (0.0–1.0).
  *
- * Rate mode: SoundTouch calls setRate() so both tempo AND pitch follow the
- * speed multiplier – identical to a tape running fast/slow.  The I2S output
- * sample rate is unchanged; the resampling happens inside SoundTouch.
+ * 0.0 = pure time-stretch (pitch unchanged regardless of speed).
+ * 1.0 = pure tape effect  (pitch tracks speed 1:1).
+ * At factor α and speed S: rate = S^α, tempo = S^(1-α).
  *
- * Time-stretch mode (rate_mode=false): pitch is preserved regardless of
- * speed (original behaviour).
- *
- * On a mode transition SoundTouch's internal state is cleared to prevent
- * pitch artefacts from leaked lookahead data.
- *
+ * On any change SoundTouch's internal state is cleared to prevent artefacts.
  * Thread-safe; takes effect at the start of the next processing chunk.
  *
- * @param  self       Element handle returned by soundtouch_el_init().
- * @param  rate_mode  true = pitch follows speed, false = time-stretch.
+ * @param  self             Element handle returned by soundtouch_el_init().
+ * @param  pitch_influence  Blend factor in [0.0, 1.0] (clamped).
  * @return ESP_OK or ESP_ERR_INVALID_ARG.
  */
-esp_err_t soundtouch_el_set_rate_mode(audio_element_handle_t self, bool rate_mode);
+esp_err_t soundtouch_el_set_pitch_influence(audio_element_handle_t self, float pitch_influence);
 
 #ifdef __cplusplus
 }

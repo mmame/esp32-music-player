@@ -18,6 +18,7 @@
 
 #include <new>      /* std::nothrow */
 #include <string.h>
+#include <math.h>
 
 static const char *TAG = "SOUNDTOUCH";
 
@@ -43,8 +44,8 @@ struct StCtx {
     volatile bool  bypass;         /* true = passthrough, no SoundTouch         */
     bool           prev_bypass;    /* previous bypass state for transition detect */
 
-    volatile bool  rate_mode;          /* true = setRate() – pitch follows speed */
-    bool           applied_rate_mode;   /* last mode actually sent to SoundTouch  */
+    volatile float pitch_influence;         /* 0.0 = time-stretch, 1.0 = tape effect  */
+    float          applied_pitch_influence; /* last value applied to SoundTouch        */
 
     /* int16 buffers - interface to ADF ring buffers and SoundTouch        */
     int16_t *pcm_in;   /* ST_CHUNK_FRAMES x channels                       */
@@ -117,22 +118,20 @@ static audio_element_err_t _process(audio_element_handle_t self,
     }
 
     /* Apply any pending tempo / rate change before processing this chunk. */
-    float tgt = ctx->target_tempo;
-    bool  rm  = ctx->rate_mode;
-    bool  mode_changed = (rm != ctx->applied_rate_mode);
-    if (tgt != ctx->applied_tempo || mode_changed) {
-        if (mode_changed) {
-            ctx->st->clear(); /* flush lookahead so no pitch artefacts leak across modes */
-            ctx->applied_rate_mode = rm;
+    float tgt   = ctx->target_tempo;
+    float alpha = ctx->pitch_influence;
+    if (alpha < 0.0f) alpha = 0.0f; else if (alpha > 1.0f) alpha = 1.0f;
+    bool changed = (tgt != ctx->applied_tempo || alpha != ctx->applied_pitch_influence);
+    if (changed) {
+        if (alpha != ctx->applied_pitch_influence) {
+            ctx->st->clear(); /* flush lookahead on influence change */
+            ctx->applied_pitch_influence = alpha;
         }
         ctx->applied_tempo = tgt;
-        if (rm) {
-            ctx->st->setRate((double)tgt);  /* pitch follows speed */
-            ctx->st->setTempo(1.0);
-        } else {
-            ctx->st->setTempo((double)tgt); /* time-stretch: pitch preserved */
-            ctx->st->setRate(1.0);
-        }
+        float rate  = powf(tgt, alpha);
+        float tempo = powf(tgt, 1.0f - alpha);
+        ctx->st->setRate((double)rate);
+        ctx->st->setTempo((double)tempo);
     }
 
     /* Pull one chunk of int16 PCM from the upstream ring buffer. */
@@ -191,12 +190,13 @@ esp_err_t soundtouch_el_set_bypass(audio_element_handle_t self, bool bypass)
     return ESP_OK;
 }
 
-esp_err_t soundtouch_el_set_rate_mode(audio_element_handle_t self, bool rate_mode)
+esp_err_t soundtouch_el_set_pitch_influence(audio_element_handle_t self, float pitch_influence)
 {
     StCtx *ctx = ctx_of(self);
     if (!ctx) return ESP_ERR_INVALID_ARG;
-    /* volatile write - effectively atomic on 32-bit aligned Xtensa. */
-    ctx->rate_mode = rate_mode;
+    if (pitch_influence < 0.0f) pitch_influence = 0.0f;
+    else if (pitch_influence > 1.0f) pitch_influence = 1.0f;
+    ctx->pitch_influence = pitch_influence;
     return ESP_OK;
 }
 
@@ -211,8 +211,8 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
     ctx->target_tempo       = cfg->tempo;
     ctx->bypass             = false;
     ctx->prev_bypass        = false;
-    ctx->rate_mode          = false;
-    ctx->applied_rate_mode  = false;
+    ctx->pitch_influence         = 0.0f;
+    ctx->applied_pitch_influence = 0.0f;
 
     /* int16 PCM buffers (may live in PSRAM via audio_calloc). */
     ctx->pcm_in  = static_cast<int16_t *>(

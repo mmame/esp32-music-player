@@ -88,13 +88,23 @@ void ui_songlist_encoder_btn_async(void);
  *
  * Safe to call from any task / core.
  *
- * @param song_id          1-based song index.
- * @param flags            Bit 0 = loop, bit 1 = fixed_speed_en.
- * @param fixed_speed_x100 Fixed speed × 100 (e.g. 100 = 1.0×).
+ * @param song_id              1-based song index.
+ * @param flags                bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override.
+ * @param fixed_speed_x100     Fixed speed × 100.
+ * @param dimmer_max           Max brightness 0-100.
+ * @param dimmer_min           Min brightness 0-100.
+ * @param dimmer_rps_ref_x10   Full-brightness RPS × 10.
+ * @param dimmer_holdoff_s     Seconds before dimmer activates.
+ * @param pitch_influence_pct  Pitch blend factor 0-100.
  */
 void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  flags,
-                                     uint8_t  fixed_speed_x100);
+                                     uint8_t  fixed_speed_x100,
+                                     uint8_t  dimmer_max,
+                                     uint8_t  dimmer_min,
+                                     uint8_t  dimmer_rps_ref_x10,
+                                     uint8_t  dimmer_holdoff_s,
+                                     uint8_t  pitch_influence_pct);
 
 /**
  * @brief Update the BT enable/disable button state from the player's flags.

@@ -69,6 +69,19 @@ tbody tr:hover td{background:#1a1f3a}
 input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
 .cfg-desc{font-size:11px;color:#555;margin-top:5px;line-height:1.5}
 .cfg-btns{display:flex;gap:8px;margin-top:24px;flex-wrap:wrap}
+/* Song settings modal */
+#ss-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:1000;align-items:center;justify-content:center;padding:12px}
+.ss-box{background:#1a1a2e;border:1px solid #7c3aed;border-radius:10px;padding:20px 22px;width:100%;max-width:460px;max-height:90vh;overflow-y:auto}
+.ss-title{color:#a78bfa;font-size:.95rem;font-weight:600;margin-bottom:14px;word-break:break-all}
+.ss-check-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.ss-check-row label{font-size:13px;color:#d0d0e8;cursor:pointer}
+.ss-sub{padding:8px 0 4px 16px;border-left:2px solid #2d3561;margin-bottom:4px}
+.ss-sr{margin-bottom:10px}
+.ss-sl{display:flex;justify-content:space-between;margin-bottom:3px}
+.ss-sn{font-size:12px;color:#9090b0}.ss-sv{font-size:12px;color:#a78bfa;font-family:monospace}
+.ss-hint{font-size:11px;color:#555;margin-top:3px;line-height:1.4}
+.ss-sep{border-color:#1e2a52;margin:12px 0 10px}
+.ss-btns{display:flex;gap:8px;margin-top:16px}
 </style>
 </head>
 <body>
@@ -467,6 +480,7 @@ function renderFiles(files){
       +'</div></td>'
       +'<td class="td-size">'+fmtSize(f.size)+'</td>'
       +'<td class="td-acts"><div class="acts">'
+      +'<button class="btn btn-sm btn-ghost" title="Song settings" onclick="openSongSettings(\'' + esc(f.name) + '\')">&#9881;</button>'
       +'<a class="btn btn-sm btn-ghost" href="/download?name='+encodeURIComponent(f.name)+'" download="'+esc(f.name)+'">&#8595; DL</a>'
       +'<button class="btn btn-sm btn-ghost" id="rb-'+sid+'" onclick="startRename(\''+sid+'\')">&#9998; Rename</button>'
       +'<button class="btn btn-sm btn-danger" onclick="deleteFile(\''+esc(f.name)+'\')">&#128465;</button>'
@@ -664,9 +678,139 @@ function calCancel(){
 }
 window.calStart=calStart;window.calNext=calNext;window.calCancel=calCancel;
 
+/* ── Song settings modal ── */
+var g_ss_name='';
+function openSongSettings(name){
+  g_ss_name=name;
+  document.getElementById('ss-title').textContent='Song Settings: '+name;
+  fetch('/api/song_settings?name='+encodeURIComponent(name))
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    .then(function(s){
+      document.getElementById('ss-loop').checked=!!s.loop;
+      document.getElementById('ss-fixed-en').checked=!!s.fixed_speed_en;
+      var spd=s.fixed_speed||1.0;
+      document.getElementById('ss-fixed-spd').value=spd;
+      document.getElementById('ss-fixed-val').textContent=spd.toFixed(2)+'\u00d7';
+      ssSyncFixed();
+      var pi=s.pitch_influence||0;
+      document.getElementById('ss-pitch').value=pi;
+      document.getElementById('ss-pitch-val').textContent=pi+'%';
+      var ho=s.dimmer_holdoff_s||0;
+      document.getElementById('ss-holdoff').value=ho;
+      document.getElementById('ss-holdoff-val').textContent=ho+'s';
+      document.getElementById('ss-dimmer-ov').checked=!!s.dimmer_override;
+      var dmax=s.dimmer_max!==undefined?s.dimmer_max:100;
+      document.getElementById('ss-dmax').value=dmax;
+      document.getElementById('ss-dmax-val').textContent=dmax+'%';
+      var dmin=s.dimmer_min!==undefined?s.dimmer_min:0;
+      document.getElementById('ss-dmin').value=dmin;
+      document.getElementById('ss-dmin-val').textContent=dmin+'%';
+      var rps=s.dimmer_rps_ref!==undefined?s.dimmer_rps_ref:1.4;
+      document.getElementById('ss-drps').value=rps;
+      document.getElementById('ss-drps-val').textContent=parseFloat(rps).toFixed(2);
+      ssSyncDimmer();
+      document.getElementById('ss-modal').style.display='flex';
+    })
+    .catch(function(e){toast('Could not load settings: '+e.message,true);});
+}
+function ssClose(){document.getElementById('ss-modal').style.display='none';}
+function ssSyncFixed(){document.getElementById('ss-fixed-sub').style.display=document.getElementById('ss-fixed-en').checked?'':'none';}
+function ssSyncDimmer(){document.getElementById('ss-dimmer-sub').style.display=document.getElementById('ss-dimmer-ov').checked?'':'none';}
+function ssSave(){
+  var payload={
+    loop:document.getElementById('ss-loop').checked,
+    fixed_speed_en:document.getElementById('ss-fixed-en').checked,
+    fixed_speed:parseFloat(document.getElementById('ss-fixed-spd').value),
+    pitch_influence:parseInt(document.getElementById('ss-pitch').value),
+    dimmer_holdoff_s:parseInt(document.getElementById('ss-holdoff').value),
+    dimmer_override:document.getElementById('ss-dimmer-ov').checked,
+    dimmer_max:parseInt(document.getElementById('ss-dmax').value),
+    dimmer_min:parseInt(document.getElementById('ss-dmin').value),
+    dimmer_rps_ref:parseFloat(document.getElementById('ss-drps').value)
+  };
+  fetch('/api/song_settings?name='+encodeURIComponent(g_ss_name),{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload)
+  }).then(function(r){
+    if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
+    toast('Settings saved for '+g_ss_name);
+    ssClose();
+  }).catch(function(e){toast('Save failed: '+e.message,true);});
+}
+window.openSongSettings=openSongSettings;
+window.ssClose=ssClose;
+window.ssSyncFixed=ssSyncFixed;
+window.ssSyncDimmer=ssSyncDimmer;
+window.ssSave=ssSave;
+
 loadFiles();
 })();
 </script>
+
+<!-- Song settings modal -->
+<div id="ss-modal">
+  <div class="ss-box">
+    <div class="ss-title" id="ss-title">Song Settings</div>
+    <div class="ss-check-row">
+      <input type="checkbox" id="ss-loop">
+      <label for="ss-loop">Loop &mdash; restart automatically when song ends</label>
+    </div>
+    <hr class="ss-sep">
+    <div class="ss-check-row">
+      <input type="checkbox" id="ss-fixed-en" onchange="ssSyncFixed()">
+      <label for="ss-fixed-en">Fixed speed (ignore crank)</label>
+    </div>
+    <div id="ss-fixed-sub" class="ss-sub" style="display:none">
+      <div class="ss-sr">
+        <div class="ss-sl"><span class="ss-sn">Speed multiplier</span><span class="ss-sv" id="ss-fixed-val">1.00&times;</span></div>
+        <input type="range" class="cfg-slider" id="ss-fixed-spd" min="0.70" max="1.40" step="0.01" value="1.00"
+          oninput="document.getElementById('ss-fixed-val').textContent=parseFloat(this.value).toFixed(2)+'\u00d7'">
+      </div>
+    </div>
+    <hr class="ss-sep">
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Pitch influence</span><span class="ss-sv" id="ss-pitch-val">0%</span></div>
+      <input type="range" class="cfg-slider" id="ss-pitch" min="0" max="100" step="5" value="0"
+        oninput="document.getElementById('ss-pitch-val').textContent=this.value+'%'">
+      <p class="ss-hint">0% = time-stretch only (pitch unchanged at any speed).<br>100% = tape effect (pitch rises and falls with crank speed).</p>
+    </div>
+    <hr class="ss-sep">
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Dimmer holdoff (s)</span><span class="ss-sv" id="ss-holdoff-val">0s</span></div>
+      <input type="range" class="cfg-slider" id="ss-holdoff" min="0" max="255" step="1" value="0"
+        oninput="document.getElementById('ss-holdoff-val').textContent=this.value+'s'">
+      <p class="ss-hint">Seconds from song start before the lamp activates.</p>
+    </div>
+    <hr class="ss-sep">
+    <div class="ss-check-row">
+      <input type="checkbox" id="ss-dimmer-ov" onchange="ssSyncDimmer()">
+      <label for="ss-dimmer-ov">Per-song dimmer override</label>
+    </div>
+    <div id="ss-dimmer-sub" class="ss-sub" style="display:none">
+      <div class="ss-sr">
+        <div class="ss-sl"><span class="ss-sn">Max brightness</span><span class="ss-sv" id="ss-dmax-val">100%</span></div>
+        <input type="range" class="cfg-slider" id="ss-dmax" min="0" max="100" step="5" value="100"
+          oninput="document.getElementById('ss-dmax-val').textContent=this.value+'%'">
+      </div>
+      <div class="ss-sr">
+        <div class="ss-sl"><span class="ss-sn">Min brightness</span><span class="ss-sv" id="ss-dmin-val">0%</span></div>
+        <input type="range" class="cfg-slider" id="ss-dmin" min="0" max="100" step="5" value="0"
+          oninput="document.getElementById('ss-dmin-val').textContent=this.value+'%'">
+      </div>
+      <div class="ss-sr">
+        <div class="ss-sl"><span class="ss-sn">Full brightness at (rev/s)</span><span class="ss-sv" id="ss-drps-val">1.40</span></div>
+        <input type="range" class="cfg-slider" id="ss-drps" min="0.5" max="3.0" step="0.1" value="1.4"
+          oninput="document.getElementById('ss-drps-val').textContent=parseFloat(this.value).toFixed(2)">
+      </div>
+    </div>
+    <p class="ss-hint" style="margin-top:10px">Changes take effect when the song is next loaded.</p>
+    <div class="ss-btns">
+      <button class="btn btn-primary" onclick="ssSave()">&#10003; Save</button>
+      <button class="btn btn-ghost" onclick="ssClose()">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <!-- Conflict dialog (file already exists) -->
 <div id="conflict-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:1000;align-items:center;justify-content:center">
