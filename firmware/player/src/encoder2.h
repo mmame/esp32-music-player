@@ -61,10 +61,11 @@ float encoder2_get_instant_rps(void);
  * @param stop_thresh    Pause  threshold [RPS] (0.050–0.600)
  * @param start_thresh   Resume threshold [RPS] (0.200–1.200)
  * @param release_ticks  Zero-windows before fast decay (0–10)
+ * @param crank_dir      Direction filter: 0=any, +1=positive only, -1=negative only
  */
 void encoder2_apply_config(float ema_attack, float ema_release,
                             float stop_thresh, float start_thresh,
-                            uint8_t release_ticks);
+                            uint8_t release_ticks, int8_t crank_dir);
 
 #ifdef __cplusplus
 }

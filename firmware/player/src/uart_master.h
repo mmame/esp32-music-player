@@ -123,7 +123,7 @@ typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
  * The handler should persist the settings to the song's JSON sidecar file.
  *
  * @param song_id            1-based song index.
- * @param flags              Bit-field: bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override.
+ * @param flags              Bit-field: bit0=loop, bit1=fixed_speed_en, bit2=autoplay_next.
  * @param fixed_speed_x100   Fixed speed multiplier × 100. Meaningful only when bit 1 set.
  * @param dimmer_max         Max brightness 0-100.
  * @param dimmer_min         Min brightness 0-100.
@@ -198,7 +198,7 @@ void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
  *
  * Payload (8 bytes):
  *   [0..1] song_id            : uint16_t LE
- *   [2]    flags              : bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override
+ *   [2]    flags              : bit0=loop, bit1=fixed_speed_en, bit2=autoplay_next
  *   [3]    fixed_speed_x100   : speed × 100 (e.g. 100 = 1.0×).
  *   [4]    dimmer_max         : 0-100
  *   [5]    dimmer_min         : 0-100
@@ -254,8 +254,8 @@ void uart_master_send_state(const char *song_name,
  *
  * Payload layout (5 bytes):
  *   [0]  volume        : uint8_t  (0–100)
- *   [1]  tempo         : uint8_t  (0–100, 50 = 1.0×)
- *   [2]  expression    : uint8_t  (0–100, reserved)
+ *   [1]  tempo         : uint8_t  (0–100, effective tempo shown as main TMP)
+ *   [2]  expression    : uint8_t  (0–100, live crank tempo)
  *   [3]  speed_min_x10 : uint8_t  (SPEED_MIN × 10, e.g. 5 for 0.5×)
  *   [4]  speed_max_x10 : uint8_t  (SPEED_MAX × 10, e.g. 20 for 2.0×)
  */

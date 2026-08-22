@@ -89,7 +89,7 @@ void ui_songlist_encoder_btn_async(void);
  * Safe to call from any task / core.
  *
  * @param song_id              1-based song index.
- * @param flags                bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override.
+ * @param flags                bit0=loop, bit1=fixed_speed_en, bit2=autoplay_next.
  * @param fixed_speed_x100     Fixed speed × 100.
  * @param dimmer_max           Max brightness 0-100.
  * @param dimmer_min           Min brightness 0-100.

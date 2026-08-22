@@ -58,6 +58,7 @@ static const char *TAG = "ui_player";
 /* Right panel – two indicator columns */
 #define COL_W            (RIGHT_W / 2)   /* 100 px per column               */
 #define BAR_W            34              /* indicator bar width              */
+#define BAR_LIVE_W       8               /* slim live-speed overlay bar      */
 #define BAR_H            300             /* indicator bar height             */
 #define BAR_TOP_Y        55              /* bar top edge inside right panel  */
 #define COLLABEL_Y       12              /* column name label top edge       */
@@ -84,6 +85,7 @@ static lv_obj_t *s_time_lbl       = NULL;  /* "elapsed / total" below progress b
 /* Two poti bars + value labels */
 static lv_obj_t *s_bar[2]         = {NULL, NULL};  /* VOL, TMP */
 static lv_obj_t *s_val_lbl[2]     = {NULL, NULL};
+static lv_obj_t *s_tmp_live_bar   = NULL;          /* live TMP mini-bar while HOLD */
 
 /* Bypass SoundTouch checkbox → replaced by read-only label */
 static lv_obj_t *s_bypass_lbl     = NULL;  /* "FIX" – shown when fixed_speed_en   */
@@ -430,6 +432,28 @@ void ui_player_create(void)
     create_indicator_col(right, 0, "VOL");
     create_indicator_col(right, 1, "TMP");
 
+    /* Slim live TMP bar next to the main TMP bar.
+     * In HOLD mode, the main bar shows the locked value while this bar shows
+     * incoming live tempo updates for comparison. */
+    {
+        lv_coord_t col_x = COL_W; /* TMP column */
+        lv_coord_t bar_x = col_x + (lv_coord_t)((COL_W - BAR_W) / 2);
+        lv_coord_t live_x = bar_x + BAR_W + 3;
+
+        s_tmp_live_bar = lv_bar_create(right);
+        lv_obj_set_size(s_tmp_live_bar, BAR_LIVE_W, BAR_H);
+        lv_obj_set_pos(s_tmp_live_bar, live_x, BAR_TOP_Y);
+        lv_bar_set_range(s_tmp_live_bar, 0, 100);
+        lv_bar_set_value(s_tmp_live_bar, 0, LV_ANIM_OFF);
+
+        lv_obj_set_style_bg_opa(s_tmp_live_bar, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(s_tmp_live_bar, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(s_tmp_live_bar, 3, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(s_tmp_live_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(s_tmp_live_bar, LV_OPA_60, LV_PART_INDICATOR);
+        lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+
     /* 1.0x indicator label – read-only, shown when fixed-speed is configured
      * for the current song.  Replaces the old interactive bypass checkbox. -- */
     s_bypass_lbl = lv_label_create(right);
@@ -465,6 +489,7 @@ typedef struct {
 typedef struct {
     uint8_t volume;
     uint8_t tempo;
+    uint8_t live_tempo;
     uint8_t speed_min_x10;  /* SPEED_MIN × 10, e.g. 4 → 0.4× */
     uint8_t speed_max_x10;  /* SPEED_MAX × 10, e.g. 20 → 2.0× */
 } async_poti_payload_t;
@@ -487,6 +512,10 @@ static void async_cb_show(void *user_data)
     /* Restore TMP bar to normal colour */
     if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
     if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], lv_color_hex(COLOR_ACCENT), 0);
+    if (s_tmp_live_bar) {
+        lv_bar_set_value(s_tmp_live_bar, 0, LV_ANIM_OFF);
+        lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+    }
 
     /* Request fresh settings so loop / 1.0x indicators are populated */
     if (s_current_song_id != 0) {
@@ -537,6 +566,10 @@ static void async_cb_hide(void *user_data)
     if (s_hold_lbl)   lv_obj_set_style_text_color(s_hold_lbl, lv_color_hex(0x445566), 0);
     if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
     if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], lv_color_hex(COLOR_ACCENT), 0);
+    if (s_tmp_live_bar) {
+        lv_bar_set_value(s_tmp_live_bar, 0, LV_ANIM_OFF);
+        lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+    }
     stop_progress_anim();
     if (s_progress_bar) lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     if (s_time_lbl)     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
@@ -575,6 +608,19 @@ static void async_cb_update_potis(void *user_data)
         uint8_t display_tempo = s_locked_tempo; /* frozen or just refreshed */
 
         lv_bar_set_value(s_bar[1], display_tempo, LV_ANIM_ON);
+
+        /* In HOLD/fixed mode, keep showing the live incoming tempo on a slim
+         * secondary bar so both effective and live values are visible. */
+        if (s_tmp_live_bar) {
+            bool show_live = s_tempo_locked || s_bypass_active;
+            if (show_live) {
+                lv_obj_clear_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+                lv_bar_set_value(s_tmp_live_bar, p->live_tempo, LV_ANIM_ON);
+            } else {
+                lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+
         /* Derive actual speed multiplier from the display value */
         uint32_t speed_x100 = (uint32_t)p->speed_min_x10 * 10
                             + ((uint32_t)(p->speed_max_x10 - p->speed_min_x10) * 10 * display_tempo + 50) / 100;
@@ -635,7 +681,7 @@ void ui_player_hide_async(void)
     lv_unlock();
 }
 
-void ui_player_update_potis_async(uint8_t volume, uint8_t tempo,
+void ui_player_update_potis_async(uint8_t volume, uint8_t tempo, uint8_t live_tempo,
                                   uint8_t speed_min_x10, uint8_t speed_max_x10)
 {
     if (!s_screen) return;
@@ -645,6 +691,7 @@ void ui_player_update_potis_async(uint8_t volume, uint8_t tempo,
 
     p->volume        = volume;
     p->tempo         = tempo;
+    p->live_tempo    = live_tempo;
     p->speed_min_x10 = speed_min_x10;
     p->speed_max_x10 = speed_max_x10;
     lv_lock();
@@ -722,6 +769,10 @@ static void async_cb_song_settings_player(void *user_data)
         }
         if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
         if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
+
+        if (s_tmp_live_bar && !(s_tempo_locked || s_bypass_active)) {
+            lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     free(p);
@@ -775,6 +826,11 @@ static void async_cb_update_speed_locked(void *user_data)
         lv_color_t col = locked ? lv_color_hex(COLOR_LOCKED) : lv_color_hex(COLOR_ACCENT);
         if (s_bar[1])     lv_obj_set_style_bg_color(s_bar[1], col, LV_PART_INDICATOR);
         if (s_val_lbl[1]) lv_obj_set_style_text_color(s_val_lbl[1], col, 0);
+    }
+
+    if (s_tmp_live_bar) {
+        if (locked || s_bypass_active) lv_obj_clear_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+        else                           lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
     }
 }
 

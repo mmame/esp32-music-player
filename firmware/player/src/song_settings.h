@@ -15,7 +15,9 @@ extern "C" {
  * If the file is absent the defaults (no loop, no fixed speed) apply silently.
  *
  * Supported JSON keys (all optional):
- *   "loop"              : boolean – restart the song from the beginning when it ends.
+ *   "end_action"        : string  – what to do when the song ends: "none", "next", "loop".
+ *   "loop"              : boolean – legacy key, mapped to end_action="loop".
+ *   "autoplay_next"     : boolean – legacy key, mapped to end_action="next".
  *   "fixed_speed"       : number  – play at this speed multiplier regardless of crank speed.
  *   "pitch_influence"   : number  – pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
  *   "dimmer_max"        : number  – max brightness 0-100 (default 100).
@@ -28,6 +30,7 @@ extern "C" {
 
 typedef struct {
     bool    loop;            /**< true: restart automatically when song ends           */
+    bool    autoplay_next;   /**< true: continue with next song when this song ends    */
     float   fixed_speed;     /**< 0.0f = follow crank; >0.0f = locked speed            */
     uint8_t pitch_influence; /**< pitch blend 0-100: 0=time-stretch, 100=full tape effect */
     uint8_t dimmer_max;      /**< max brightness 0-100                                 */

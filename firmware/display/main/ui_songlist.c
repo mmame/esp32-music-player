@@ -34,7 +34,7 @@ typedef struct {
 /* Per-song settings cache – populated on first gear-tap via CMD_SONG_SETTINGS */
 typedef struct {
     bool    valid;               /* true once player has responded                */
-    uint8_t flags;               /* bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override */
+    uint8_t flags;               /* bit0=loop, bit1=fixed_speed_en, bit2=autoplay_next */
     uint8_t fixed_speed_x100;    /* speed × 100 (e.g. 100 = 1.0×)                */
     uint8_t dimmer_max;          /* max brightness 0-100                          */
     uint8_t dimmer_min;          /* min brightness 0-100                          */
@@ -69,7 +69,8 @@ static bool      s_bt_enabled = false; /* starts disabled */
 /* Settings dialog – at most one open at a time */
 static lv_obj_t  *s_settings_overlay   = NULL; /* backdrop (NULL when not open) */
 static uint16_t   s_settings_song_id   = 0;    /* song_id whose dialog is open  */
-static lv_obj_t  *s_cb_loop            = NULL; /* checkbox objects inside dialog */
+static lv_obj_t  *s_dd_end_action      = NULL; /* 0=none, 1=next, 2=loop */
+static uint8_t    s_end_action         = 0u;
 static lv_obj_t  *s_cb_fixed_speed     = NULL;
 static lv_obj_t  *s_cb_light_organ     = NULL; /* light-organ mode checkbox        */
 static lv_obj_t  *s_lbl_pitch_val      = NULL;
@@ -513,7 +514,7 @@ static void on_settings_cancel(lv_event_t *e)
         lv_obj_delete(s_settings_overlay);
         s_settings_overlay = NULL;
         s_settings_song_id = 0;
-        s_cb_loop          = NULL;
+        s_dd_end_action    = NULL;
         s_cb_fixed_speed   = NULL;
         s_cb_light_organ   = NULL;
         s_lbl_pitch_val    = NULL;
@@ -533,14 +534,20 @@ static void on_settings_ok(lv_event_t *e)
     uint16_t song_id = s_settings_song_id;
 
     /* Collect checkbox states */
-    bool loop_en       = (lv_obj_get_state(s_cb_loop)        & LV_STATE_CHECKED) != 0;
+    if (s_dd_end_action) {
+        s_end_action = (uint8_t)lv_dropdown_get_selected(s_dd_end_action);
+        if (s_end_action > 2u) s_end_action = 0u;
+    } else {
+        s_end_action = 0u;
+    }
     bool speed_en      = (lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0;
     bool light_org_en  = s_cb_light_organ
                          ? ((lv_obj_get_state(s_cb_light_organ) & LV_STATE_CHECKED) != 0)
                          : false;
 
     uint8_t flags = 0;
-    if (loop_en)       flags |= 0x01u;
+    if (s_end_action == 2u) flags |= 0x01u; /* loop */
+    if (s_end_action == 1u) flags |= 0x04u; /* autoplay next */
     if (speed_en)      flags |= 0x02u;
     if (light_org_en)  flags |= 0x10u;
     uint8_t fixed_speed_x100 = speed_en ? s_speed_x100 : 100u;
@@ -574,7 +581,7 @@ static void on_settings_ok(lv_event_t *e)
     lv_obj_delete(s_settings_overlay);
     s_settings_overlay   = NULL;
     s_settings_song_id   = 0;
-    s_cb_loop            = NULL;
+    s_dd_end_action      = NULL;
     s_cb_fixed_speed     = NULL;
     s_cb_light_organ     = NULL;
     s_lbl_pitch_val      = NULL;
@@ -602,7 +609,7 @@ static void create_settings_dialog(uint16_t song_id)
 
     /* Determine current values from cache (factory defaults if not yet saved). */
     uint8_t cache_idx = (uint8_t)(song_id - 1);
-    bool    cached_loop            = false;
+    uint8_t cached_end_action      = 0u; /* 0=none, 1=next, 2=loop */
     bool    cached_speed           = false;
     bool    cached_light_organ     = false;
     uint8_t cached_pitch_influence = 0u;
@@ -613,7 +620,10 @@ static void create_settings_dialog(uint16_t song_id)
     uint8_t cached_dhld            = 0u;
     uint8_t cached_dfad            = 0u;
     if (cache_idx < SONGLIST_MAX_SONGS && s_settings[cache_idx].valid) {
-        cached_loop            = (s_settings[cache_idx].flags & 0x01u) != 0;
+        bool cached_loop          = (s_settings[cache_idx].flags & 0x01u) != 0;
+        bool cached_autoplay_next = (s_settings[cache_idx].flags & 0x04u) != 0;
+        if (cached_loop) cached_end_action = 2u;
+        else if (cached_autoplay_next) cached_end_action = 1u;
         cached_speed           = (s_settings[cache_idx].flags & 0x02u) != 0;
         cached_light_organ     = (s_settings[cache_idx].flags & 0x10u) != 0;
         cached_pitch_influence = s_settings[cache_idx].pitch_influence_pct;
@@ -627,6 +637,7 @@ static void create_settings_dialog(uint16_t song_id)
         cached_dfad = s_settings[cache_idx].dimmer_fadein_s;
     }
     s_pitch_influence  = cached_pitch_influence;
+    s_end_action       = cached_end_action;
     s_speed_x100       = cached_spd_x100;
     s_dimmer_max       = cached_dmax;
     s_dimmer_min       = cached_dmin;
@@ -680,19 +691,35 @@ static void create_settings_dialog(uint16_t song_id)
     lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_ACTIVE);
 
     /* ── Sound controls ───────────────────────────────────────────── */
-    s_cb_loop = lv_checkbox_create(content);
-    lv_checkbox_set_text(s_cb_loop, "Loop");
-    if (cached_loop) lv_obj_add_state(s_cb_loop, LV_STATE_CHECKED);
-    lv_obj_set_style_text_font(s_cb_loop, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_cb_loop, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_loop, LV_ALIGN_TOP_LEFT, 0, 0);
+    {
+        lv_obj_t *ea_lbl = lv_label_create(content);
+        lv_label_set_text(ea_lbl, "When song ends");
+        lv_obj_set_style_text_font(ea_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(ea_lbl, lv_color_hex(0xA0A0C0), 0);
+        lv_obj_align(ea_lbl, LV_ALIGN_TOP_LEFT, 0, 8);
+
+        s_dd_end_action = lv_dropdown_create(content);
+        lv_dropdown_set_options(s_dd_end_action,
+                                "Stop (default)\n"
+                                "Play next track\n"
+                                "Repeat this track");
+        lv_dropdown_set_selected(s_dd_end_action, s_end_action);
+        lv_obj_set_style_text_font(s_dd_end_action, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(s_dd_end_action, lv_color_hex(0xE0E0FF), 0);
+        lv_obj_set_style_bg_color(s_dd_end_action, lv_color_hex(0x10223A), 0);
+        lv_obj_set_style_border_color(s_dd_end_action, lv_color_hex(0x1E88E5), 0);
+        lv_obj_set_style_border_width(s_dd_end_action, 1, 0);
+        lv_obj_set_style_radius(s_dd_end_action, 6, 0);
+        lv_obj_set_width(s_dd_end_action, 340);
+        lv_obj_align(s_dd_end_action, LV_ALIGN_TOP_LEFT, 0, 36);
+    }
 
     s_cb_fixed_speed = lv_checkbox_create(content);
     lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed (ignore crank)");
     if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 38);
+    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 88);
 
     /* Reuse MAKE_DIMMER_ROW for speed and pitch spinners */
 #define MAKE_DIMMER_ROW(par, ypos, lbl_txt, on_m, on_p, lbl_ref)                    \
@@ -736,16 +763,16 @@ static void create_settings_dialog(uint16_t song_id)
         lv_obj_center(_rpl);                                                            \
     } while(0)
 
-    MAKE_DIMMER_ROW(content, 76,  "Speed \xc3\x97",  on_speed_minus, on_speed_plus, s_lbl_speed_val);
+    MAKE_DIMMER_ROW(content, 126,  "Speed \xc3\x97",  on_speed_minus, on_speed_plus, s_lbl_speed_val);
     update_speed_label();
-    MAKE_DIMMER_ROW(content, 118, "Pitch %",  on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
+    MAKE_DIMMER_ROW(content, 168, "Pitch %",  on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
     update_pitch_label();
 
     /* ── Separator ────────────────────────────────────────────────── */
     {
         lv_obj_t *sep = lv_obj_create(content);
         lv_obj_set_size(sep, 452, 1);
-        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 164);
+        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 214);
         lv_obj_set_style_bg_color(sep, lv_color_hex(0x2A3A5A), 0);
         lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(sep, 0, 0);
@@ -755,7 +782,7 @@ static void create_settings_dialog(uint16_t song_id)
         lv_label_set_text(dim_lbl, "Dimmer");
         lv_obj_set_style_text_font(dim_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(dim_lbl, lv_color_hex(0x6d6d8a), 0);
-        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 170);
+        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 220);
     }
 
     /* ── Dimmer controls ──────────────────────────────────────────── */
@@ -764,17 +791,17 @@ static void create_settings_dialog(uint16_t song_id)
     if (cached_light_organ) lv_obj_add_state(s_cb_light_organ, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_light_organ, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_light_organ, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 196);
+    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 246);
 
-    MAKE_DIMMER_ROW(content, 234, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
-    MAKE_DIMMER_ROW(content, 276, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
-    MAKE_DIMMER_ROW(content, 318, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
+    MAKE_DIMMER_ROW(content, 284, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
+    MAKE_DIMMER_ROW(content, 326, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
+    MAKE_DIMMER_ROW(content, 368, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
 
     /* ── Separator ────────────────────────────────────────────────── */
     {
         lv_obj_t *sep2 = lv_obj_create(content);
         lv_obj_set_size(sep2, 452, 1);
-        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 384);
+        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 434);
         lv_obj_set_style_bg_color(sep2, lv_color_hex(0x2A3A5A), 0);
         lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(sep2, 0, 0);
@@ -784,11 +811,11 @@ static void create_settings_dialog(uint16_t song_id)
         lv_label_set_text(hld_lbl, "Lamp timing");
         lv_obj_set_style_text_font(hld_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(hld_lbl, lv_color_hex(0x6d6d8a), 0);
-        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 390);
+        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 440);
     }
 
-    MAKE_DIMMER_ROW(content, 416, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
-    MAKE_DIMMER_ROW(content, 458, "Fade-in",     on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
+    MAKE_DIMMER_ROW(content, 466, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
+    MAKE_DIMMER_ROW(content, 508, "Fade-in",     on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
     update_dimmer_labels();
 
 #undef MAKE_DIMMER_ROW

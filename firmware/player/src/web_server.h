@@ -21,6 +21,7 @@ typedef void (*rescan_cb_t)(void);
  */
 typedef void (*web_song_settings_cb_t)(const char *wav_path,
                                        bool        loop,
+                                       bool        autoplay_next,
                                        float       fixed_speed,
                                        uint8_t     pitch_influence,
                                        uint8_t     dimmer_max,

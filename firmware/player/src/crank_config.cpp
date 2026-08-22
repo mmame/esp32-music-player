@@ -25,9 +25,11 @@ void crank_config_defaults(crank_config_t *c)
     c->start_thresh  = 0.700f;
     c->release_ticks = 2;
     c->vol_fade_step  = 1;
+    c->crank_dir      = -1;
     c->lo_bass_weight = 45.0f;
     c->lo_mid_weight  = 5.0f;
     c->lo_decay_rate  = 0.998f;
+    c->lo_lookahead_s = 0.0f;
     c->pot_cal_lo     = 559;
     c->pot_cal_mid    = 945;
     c->pot_cal_hi     = 3071;
@@ -89,9 +91,17 @@ void crank_config_load(void)
     read_f (root, "start_thresh",  0.200f, 1.200f, &g_crank_cfg.start_thresh);
     read_u8(root, "release_ticks", 0, 10, &g_crank_cfg.release_ticks);
     read_u8(root, "vol_fade_step",  1,   10,  &g_crank_cfg.vol_fade_step);
+    {
+        cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
+        if (cJSON_IsNumber(it)) {
+            int v = (int)it->valuedouble;
+            if (v >= -1 && v <= 1) g_crank_cfg.crank_dir = (int8_t)v;
+        }
+    }
     read_f (root, "lo_bass_weight", 1.0f, 200.0f, &g_crank_cfg.lo_bass_weight);
     read_f (root, "lo_mid_weight",  0.0f,  50.0f, &g_crank_cfg.lo_mid_weight);
     read_f (root, "lo_decay_rate",  0.990f, 0.999f, &g_crank_cfg.lo_decay_rate);
+    read_f (root, "lo_lookahead_s", -1.0f,  1.0f,   &g_crank_cfg.lo_lookahead_s);
     read_u16(root, "pot_cal_lo",    0, 4095, &g_crank_cfg.pot_cal_lo);
     read_u16(root, "pot_cal_mid",   0, 4095, &g_crank_cfg.pot_cal_mid);
     read_u16(root, "pot_cal_hi",    0, 4095, &g_crank_cfg.pot_cal_hi);
@@ -117,9 +127,11 @@ void crank_config_save(void)
     cJSON_AddNumberToObject(root, "start_thresh",  (double)g_crank_cfg.start_thresh);
     cJSON_AddNumberToObject(root, "release_ticks", (double)g_crank_cfg.release_ticks);
     cJSON_AddNumberToObject(root, "vol_fade_step",  (double)g_crank_cfg.vol_fade_step);
+    cJSON_AddNumberToObject(root, "crank_dir",       (double)g_crank_cfg.crank_dir);
     cJSON_AddNumberToObject(root, "lo_bass_weight",  (double)g_crank_cfg.lo_bass_weight);
     cJSON_AddNumberToObject(root, "lo_mid_weight",   (double)g_crank_cfg.lo_mid_weight);
     cJSON_AddNumberToObject(root, "lo_decay_rate",   (double)g_crank_cfg.lo_decay_rate);
+    cJSON_AddNumberToObject(root, "lo_lookahead_s",  (double)g_crank_cfg.lo_lookahead_s);
     cJSON_AddNumberToObject(root, "pot_cal_lo",      (double)g_crank_cfg.pot_cal_lo);
     cJSON_AddNumberToObject(root, "pot_cal_mid",     (double)g_crank_cfg.pot_cal_mid);
     cJSON_AddNumberToObject(root, "pot_cal_hi",      (double)g_crank_cfg.pot_cal_hi);
@@ -145,6 +157,6 @@ void crank_config_apply(void)
 {
     encoder2_apply_config(g_crank_cfg.ema_attack, g_crank_cfg.ema_release,
                           g_crank_cfg.stop_thresh, g_crank_cfg.start_thresh,
-                          g_crank_cfg.release_ticks);
+                          g_crank_cfg.release_ticks, g_crank_cfg.crank_dir);
     potis_set_cal(g_crank_cfg.pot_cal_lo, g_crank_cfg.pot_cal_mid, g_crank_cfg.pot_cal_hi);
 }

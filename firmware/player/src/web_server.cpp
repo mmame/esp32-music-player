@@ -511,13 +511,13 @@ static esp_err_t delete_handler(httpd_req_t *req)
 
 static esp_err_t crank_config_get_handler(httpd_req_t *req)
 {
-    char buf[400];
+    char buf[450];
     snprintf(buf, sizeof(buf),
              "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
              "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
-             "\"release_ticks\":%u,\"vol_fade_step\":%u,"
+             "\"release_ticks\":%u,\"vol_fade_step\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
-             "\"lo_decay_rate\":%.4f,"
+             "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
              "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
@@ -525,9 +525,11 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (double)g_crank_cfg.start_thresh,
              (unsigned)g_crank_cfg.release_ticks,
              (unsigned)g_crank_cfg.vol_fade_step,
+             (int)g_crank_cfg.crank_dir,
              (double)g_crank_cfg.lo_bass_weight,
              (double)g_crank_cfg.lo_mid_weight,
              (double)g_crank_cfg.lo_decay_rate,
+             (double)g_crank_cfg.lo_lookahead_s,
              (unsigned)g_crank_cfg.pot_cal_lo,
              (unsigned)g_crank_cfg.pot_cal_mid,
              (unsigned)g_crank_cfg.pot_cal_hi);
@@ -582,9 +584,17 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_f (root, "start_thresh",  0.200f, 1.200f, &nc.start_thresh);
     read_u8(root, "release_ticks", 0, 10, &nc.release_ticks);
     read_u8(root, "vol_fade_step", 1, 10, &nc.vol_fade_step);
+    {
+        cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
+        if (cJSON_IsNumber(it)) {
+            int v = (int)it->valuedouble;
+            if (v >= -1 && v <= 1) nc.crank_dir = (int8_t)v;
+        }
+    }
     read_f (root, "lo_bass_weight", 1.0f, 200.0f, &nc.lo_bass_weight);
     read_f (root, "lo_mid_weight",  0.0f,  50.0f, &nc.lo_mid_weight);
     read_f (root, "lo_decay_rate",  0.990f, 0.999f, &nc.lo_decay_rate);
+    read_f (root, "lo_lookahead_s", -1.0f,  1.0f,   &nc.lo_lookahead_s);
     cJSON_Delete(root);
 
     if (nc.start_thresh <= nc.stop_thresh) {
@@ -924,14 +934,18 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
     song_settings_t s;
     song_settings_load(wav_path, &s);
 
-    char buf[320];
+    const char *end_action = s.loop ? "loop" : (s.autoplay_next ? "next" : "none");
+
+    char buf[384];
     snprintf(buf, sizeof(buf),
-             "{\"loop\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
+             "{\"end_action\":\"%s\",\"loop\":%s,\"autoplay_next\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
              "\"pitch_influence\":%u,"
              "\"dimmer_max\":%u,\"dimmer_min\":%u,"
              "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u,\"dimmer_fadein_s\":%u,"
              "\"light_organ\":%s}",
+             end_action,
              s.loop ? "true" : "false",
+             s.autoplay_next ? "true" : "false",
              (s.fixed_speed > 0.0f) ? "true" : "false",
              (s.fixed_speed > 0.0f) ? (double)s.fixed_speed : 1.0,
              (unsigned)s.pitch_influence,
@@ -974,6 +988,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     }
 
     bool    loop      = false;
+    bool    autoplay_next = false;
     bool    fixed_en  = false;
     float   fixed_spd = 1.0f;
     uint8_t pitch     = 0;
@@ -983,8 +998,25 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     uint8_t d_hoff    = 0;
 
     cJSON *it;
-    it = cJSON_GetObjectItemCaseSensitive(root, "loop");
-    if (cJSON_IsBool(it)) loop = cJSON_IsTrue(it);
+    it = cJSON_GetObjectItemCaseSensitive(root, "end_action");
+    if (cJSON_IsString(it) && it->valuestring) {
+        if (strcmp(it->valuestring, "loop") == 0) {
+            loop = true;
+            autoplay_next = false;
+        } else if (strcmp(it->valuestring, "next") == 0) {
+            loop = false;
+            autoplay_next = true;
+        } else {
+            loop = false;
+            autoplay_next = false;
+        }
+    } else {
+        it = cJSON_GetObjectItemCaseSensitive(root, "loop");
+        if (cJSON_IsBool(it)) loop = cJSON_IsTrue(it);
+        it = cJSON_GetObjectItemCaseSensitive(root, "autoplay_next");
+        if (cJSON_IsBool(it)) autoplay_next = cJSON_IsTrue(it);
+    }
+    if (loop && autoplay_next) autoplay_next = false;
     it = cJSON_GetObjectItemCaseSensitive(root, "fixed_speed_en");
     if (cJSON_IsBool(it)) fixed_en = cJSON_IsTrue(it);
     it = cJSON_GetObjectItemCaseSensitive(root, "fixed_speed");
@@ -1013,7 +1045,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     wav_to_json_path(wav_path, json_path, sizeof(json_path));
 
     bool dimmer_default = (d_max == 100 && d_min == 0 && fabsf(d_rps - 1.4f) <= 0.05f);
-    if (!loop && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ) {
+    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ) {
         remove(json_path);
         ESP_LOGI(TAG, "Song settings cleared via web for %s", fname);
         httpd_resp_sendstr(req, "OK");
@@ -1025,7 +1057,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
         return ESP_FAIL;
     }
-    cJSON_AddBoolToObject(out, "loop", loop);
+    cJSON_AddStringToObject(out, "end_action", loop ? "loop" : (autoplay_next ? "next" : "none"));
     if (fixed_en)  cJSON_AddNumberToObject(out, "fixed_speed", (double)fixed_spd);
     if (pitch > 0) cJSON_AddNumberToObject(out, "pitch_influence", pitch);
     if (!dimmer_default) {
@@ -1058,7 +1090,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     /* Live-apply to the running song if the callback is registered */
     if (s_song_settings_cb) {
         float fixed_speed_f = fixed_en ? fixed_spd : 0.0f;
-        s_song_settings_cb(wav_path, loop, fixed_speed_f, pitch,
+        s_song_settings_cb(wav_path, loop, autoplay_next, fixed_speed_f, pitch,
                            d_max, d_min, d_rps, d_hoff, d_fadein);
         /* light_organ live-apply is handled via the same callback path: the
          * callback rereads the just-written JSON to pick up all new fields. */

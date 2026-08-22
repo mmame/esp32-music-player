@@ -24,6 +24,7 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
 {
     /* Safe defaults: no loop, follow crank speed, time-stretch mode, system dimmer. */
     out->loop             = false;
+    out->autoplay_next    = false;
     out->fixed_speed      = 0.0f;
     out->pitch_influence  = 0u;
     out->dimmer_max       = 100u;
@@ -79,10 +80,45 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         return;
     }
 
-    /* "loop": boolean */
-    const cJSON *loop_item = cJSON_GetObjectItemCaseSensitive(root, "loop");
-    if (cJSON_IsBool(loop_item)) {
-        out->loop = cJSON_IsTrue(loop_item);
+    bool have_end_action = false;
+
+    /* "end_action": string enum "none" | "next" | "loop" (preferred). */
+    const cJSON *end_action_item = cJSON_GetObjectItemCaseSensitive(root, "end_action");
+    if (cJSON_IsString(end_action_item) && end_action_item->valuestring) {
+        have_end_action = true;
+        if (strcmp(end_action_item->valuestring, "loop") == 0) {
+            out->loop = true;
+            out->autoplay_next = false;
+        } else if (strcmp(end_action_item->valuestring, "next") == 0) {
+            out->loop = false;
+            out->autoplay_next = true;
+        } else {
+            out->loop = false;
+            out->autoplay_next = false;
+        }
+    } else if (cJSON_IsNumber(end_action_item)) {
+        have_end_action = true;
+        int v = end_action_item->valueint;
+        out->loop = (v == 2);
+        out->autoplay_next = (v == 1);
+    }
+
+    /* Legacy keys: only used when end_action is absent. */
+    if (!have_end_action) {
+        const cJSON *loop_item = cJSON_GetObjectItemCaseSensitive(root, "loop");
+        if (cJSON_IsBool(loop_item)) {
+            out->loop = cJSON_IsTrue(loop_item);
+        }
+
+        const cJSON *autoplay_item = cJSON_GetObjectItemCaseSensitive(root, "autoplay_next");
+        if (cJSON_IsBool(autoplay_item)) {
+            out->autoplay_next = cJSON_IsTrue(autoplay_item);
+        }
+    }
+
+    /* Enforce exclusivity regardless of input combination. */
+    if (out->loop && out->autoplay_next) {
+        out->autoplay_next = false;
     }
 
     /* "fixed_speed": positive number (speed multiplier) */
@@ -139,10 +175,11 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
 
     cJSON_Delete(root);
 
-    ESP_LOGI(TAG, "Settings for '%s': loop=%s fixed_speed=%s(%.2f) pitch_influence=%u%% "
+    ESP_LOGI(TAG, "Settings for '%s': loop=%s autoplay_next=%s fixed_speed=%s(%.2f) pitch_influence=%u%% "
              "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us",
              json_path,
              out->loop ? "yes" : "no",
+             out->autoplay_next ? "yes" : "no",
              out->fixed_speed > 0.0f ? "" : "off ",
              (double)out->fixed_speed,
              out->pitch_influence,

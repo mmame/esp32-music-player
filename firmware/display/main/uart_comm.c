@@ -543,8 +543,8 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         /*
          * Payload layout (5 bytes):
          *   [0]  volume        : uint8_t  (0–100)
-         *   [1]  tempo         : uint8_t  (0–100, 50 = 1.0×)
-         *   [2]  expression    : uint8_t  (0–100, reserved)
+         *   [1]  tempo         : uint8_t  (0–100, effective tempo)
+         *   [2]  expression    : uint8_t  (0–100, live crank tempo)
          *   [3]  speed_min_x10 : uint8_t  (SPEED_MIN × 10)
          *   [4]  speed_max_x10 : uint8_t  (SPEED_MAX × 10)
          */
@@ -553,9 +553,10 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             break;
         }
         {
+            uint8_t live_tempo   = payload[2];
             uint8_t speed_min_x10 = (len >= 5) ? payload[3] : 4;   /* default 0.4× */
             uint8_t speed_max_x10 = (len >= 5) ? payload[4] : 20;  /* default 2.0× */
-            ui_player_update_potis_async(payload[0], payload[1], speed_min_x10, speed_max_x10);
+            ui_player_update_potis_async(payload[0], payload[1], live_tempo, speed_min_x10, speed_max_x10);
         }
         break;
 

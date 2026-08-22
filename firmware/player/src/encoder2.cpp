@@ -85,6 +85,7 @@ static float   s_cfg_ema_release   = ENC2_EMA_ALPHA_RELEASE;
 static float   s_cfg_stop_thresh   = ENC2_STOP_THRESH;
 static float   s_cfg_start_thresh  = ENC2_START_THRESH;
 static uint8_t s_cfg_release_ticks = ENC2_RELEASE_TICKS;
+static int8_t  s_cfg_crank_dir     = 0;  /* 0=any, +1=positive only, -1=negative only */
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Public API
@@ -155,6 +156,10 @@ float encoder2_update(void)
     int delta   = s_delta_acc;
     s_delta_acc = 0;
 
+    /* Ignore delta that is in the unwanted direction */
+    if (s_cfg_crank_dir > 0 && delta < 0) delta = 0;
+    if (s_cfg_crank_dir < 0 && delta > 0) delta = 0;
+
     /* Signed instant speed so direction reversals cancel in the filter. */
     float instant_rps_signed = (float)delta / (ENC2_COUNTS_PER_REV * ENC2_DT);
     /* Store raw (unsmoothed) magnitude for consumers that want instant response
@@ -208,11 +213,12 @@ float encoder2_get_instant_rps(void)
 
 void encoder2_apply_config(float ema_attack, float ema_release,
                             float stop_thresh, float start_thresh,
-                            uint8_t release_ticks)
+                            uint8_t release_ticks, int8_t crank_dir)
 {
     s_cfg_ema_attack    = ema_attack;
     s_cfg_ema_release   = ema_release;
     s_cfg_stop_thresh   = stop_thresh;
     s_cfg_start_thresh  = start_thresh;
     s_cfg_release_ticks = release_ticks;
+    s_cfg_crank_dir     = crank_dir;
 }

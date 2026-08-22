@@ -101,6 +101,7 @@ static volatile uint8_t g_locked_tempo_raw = 50; /* poti-scale 0–100 value whe
 static volatile bool     g_song_loop           = false; /* true: restart on end instead of stop */
 static volatile bool     g_song_fixed_speed_en = false; /* true: ignore crank, use fixed speed  */
 static volatile float    g_song_fixed_speed    = 1.0f;  /* speed multiplier when above is true  */
+static volatile bool     g_song_autoplay_next  = false; /* true: load+resume next track when current ends */
 static volatile uint8_t  g_song_pitch_influence = 0u;   /* 0=time-stretch, 100=full tape effect    */
 /* per-song dimmer settings (always applied; default = 100/0/1.4) */
 static volatile uint8_t  g_song_dimmer_max        = 100u; /* per-song max brightness 0-100       */
@@ -150,81 +151,76 @@ static void run_light_organ_fft(void)
 {
     if (!s_lo_file || !g_is_playing) return;
 
-    /* One-time initialisation of the FFT twiddle table and Hann window */
     if (!s_lo_fft_init) {
         dsps_fft2r_init_fc32(NULL, LO_FFT_SIZE);
         dsps_wind_hann_f32(s_lo_fft_win, LO_FFT_SIZE);
         s_lo_fft_init = true;
     }
 
-    /* Seek to current playback position + 50 ms lookahead */
     uint32_t bps_total = g_sample_rate * (uint32_t)g_channels * (uint32_t)g_bps;
-    uint32_t offset    = WAV_HDR_BYTES
-                         + (uint32_t)((g_audio_pos_s + 0.05f) * (float)bps_total);
-    /* Align to frame boundary */
+    float read_pos_s = g_audio_pos_s + g_crank_cfg.lo_lookahead_s;
+    if (read_pos_s < 0.0f) return;
+    uint32_t offset = WAV_HDR_BYTES + (uint32_t)(read_pos_s * (float)bps_total);
+    
     uint32_t frame_sz = (uint32_t)g_channels * (uint32_t)g_bps;
     if (frame_sz > 0) offset = (offset / frame_sz) * frame_sz;
 
     if (fseek(s_lo_file, (long)offset, SEEK_SET) != 0) return;
 
-    /* Read LO_FFT_SIZE samples (one channel, 16-bit) */
-    int16_t raw[LO_FFT_SIZE * 4]; /* wide enough for stereo */
-    size_t  want = (size_t)(LO_FFT_SIZE * (int)g_channels * (int)g_bps);
-    if (want > sizeof(raw)) want = sizeof(raw);
-    if (fread(raw, 1, want, s_lo_file) < (size_t)(LO_FFT_SIZE * (int)g_bps)) return;
+    /* REPARIERT: Array-Größe und Lese-Logik basierend auf int16_t Elementen */
+    int total_samples_needed = LO_FFT_SIZE * (int)g_channels;
+    int16_t raw[512]; /* Genug Platz für 256 Samples Stereo (512 Elemente) */
+    if (total_samples_needed > 512) total_samples_needed = 512;
 
-    /* Build FFT input: left-channel samples, Hann-windowed, normalised to ±1 */
+    size_t read_elements = fread(raw, sizeof(int16_t), total_samples_needed, s_lo_file);
+    if (read_elements < (size_t)total_samples_needed) return;
+
     int step = (g_channels > 1) ? (int)g_channels : 1;
     for (int i = 0; i < LO_FFT_SIZE; i++) {
         float s = ((float)raw[i * step] / 32768.0f) * s_lo_fft_win[i];
-        s_lo_fft_buf[i * 2]     = s;    /* real part  */
-        s_lo_fft_buf[i * 2 + 1] = 0.0f; /* imag part  */
+        s_lo_fft_buf[i * 2]     = s;    
+        s_lo_fft_buf[i * 2 + 1] = 0.0f; 
     }
 
-    /* Run FFT and bit-reverse the output */
     dsps_fft2r_fc32(s_lo_fft_buf, LO_FFT_SIZE);
     dsps_bit_rev_fc32(s_lo_fft_buf, LO_FFT_SIZE);
 
-    /* At 48 kHz / 256 bins, each bin spans ~187.5 Hz.
-     * Bin 1-3  : ~187-562 Hz  (bass fundamentals, kick drum)
-     * Bin 4-15 : ~750-2812 Hz (melody, harmonics) */
+    /* Optimierte Frequenzbänder (Bass fokussiert auf echte Kicks) */
     float bass = 0.0f, mid = 0.0f;
-    for (int i = 1; i <= 3; i++) {
+    for (int i = 1; i <= 2; i++) { /* Nur Bin 1 & 2 für knackigen Bass */
         float r = s_lo_fft_buf[i*2], im = s_lo_fft_buf[i*2+1];
         bass += sqrtf(r*r + im*im);
     }
-    for (int i = 4; i <= 15; i++) {
+    for (int i = 3; i <= 15; i++) { /* Bin 3 rutscht zu den Mitten */
         float r = s_lo_fft_buf[i*2], im = s_lo_fft_buf[i*2+1];
         mid += sqrtf(r*r + im*im);
     }
 
-    /* sqrtf compression maps the wide dynamic range to a useful 0-100 % window.
-     * Samples are normalised to ±1, so bin magnitudes are much smaller than in
-     * raw-int16 examples; the coefficients here are tuned for that scale.
-     * Increase the coefficients if the lamp barely reacts; decrease if it
-     * saturates too fast. */
-    float fft_raw = sqrtf(bass) * g_crank_cfg.lo_bass_weight
-                  + sqrtf(mid)  * g_crank_cfg.lo_mid_weight;
+    /* Logarithmische Kompression fühlt sich für das Auge linearer an */
+    float fft_raw = log10f(bass + 1.0f) * g_crank_cfg.lo_bass_weight
+                  + log10f(mid + 1.0f)  * g_crank_cfg.lo_mid_weight;
 
-    /* Auto-ranging: stretch the observed min→max to the full 0-100 % window.
-     * This makes the lamp use its full dynamic range regardless of the absolute
-     * signal level, so it works equally well for quiet and loud songs.
-     * Max: instant attack, slow decay (~0.2% per 50 ms frame ≈ 4%/s).
-     * Min: fast update on new minimum, same slow decay otherwise.          */
-    static float s_lo_max = 1.0f;
+    /* Auto-ranging mit angepasstem Rauschboden gegen Flackern bei Stille */
+    static float s_lo_max = 5.0f;  /* Höherer Start/Mindestwert gegen Rauschen */
     static float s_lo_min = 0.0f;
+    
     if (fft_raw > s_lo_max) s_lo_max = fft_raw;
-    else { s_lo_max *= g_crank_cfg.lo_decay_rate; if (s_lo_max < 1.0f) s_lo_max = 1.0f; }
+    else { s_lo_max *= g_crank_cfg.lo_decay_rate; if (s_lo_max < 5.0f) s_lo_max = 5.0f; }
+    
     if (fft_raw < s_lo_min) s_lo_min = fft_raw * 0.5f + s_lo_min * 0.5f;
     else { s_lo_min *= g_crank_cfg.lo_decay_rate; if (s_lo_min < 0.0f) s_lo_min = 0.0f; }
 
     float range = s_lo_max - s_lo_min;
     float level = (range > 0.5f)
                   ? (fft_raw - s_lo_min) / range * 100.0f
-                  : 50.0f;
+                  : 12.0f; /* Standard-Glimmen (Pre-Heat) wenn keine Dynamik da ist */
+                  
     if (level > 100.0f) level = 100.0f;
+    if (level < 12.0f)  level = 12.0f;  /* Konsequenter Pre-Heat Schutz für Halogen */
+
     g_fft_dimmer_pct = (uint8_t)level;
 }
+
 #endif /* HAVE_ADF */
 
 #ifdef HAVE_ADF
@@ -443,6 +439,7 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     song_settings_t settings;
     song_settings_load(path, &settings);
     g_song_loop           = settings.loop;
+    g_song_autoplay_next  = settings.autoplay_next;
     g_song_fixed_speed_en = (settings.fixed_speed > 0.0f);
     g_song_fixed_speed    = (settings.fixed_speed > 0.0f) ? settings.fixed_speed : 1.0f;
     g_song_pitch_influence = settings.pitch_influence;
@@ -517,6 +514,7 @@ static void do_stop(void)
     xSemaphoreGive(s_state_mutex);
     /* Clear per-song settings so they don't affect the idle/next-song state. */
     g_song_loop           = false;
+    g_song_autoplay_next  = false;
     g_song_fixed_speed_en = false;
     g_song_fixed_speed    = 1.0f;
     g_song_pitch_influence = 0u;
@@ -881,6 +879,12 @@ static void audio_task(void *arg)
                     ESP_LOGI(TAG, "Loop: restarting song %u", loop_idx);
                     play_song_idx(loop_idx, false); /* load at pos 0, pipeline not started */
                     do_resume();                    /* start immediately                   */
+                } else if (g_song_autoplay_next && g_current_song >= 0 && g_song_count > 0) {
+                    uint16_t next_idx = (uint16_t)g_current_song + 1u;
+                    if (next_idx >= g_song_count) next_idx = 0u;
+                    ESP_LOGI(TAG, "Autoplay-next: advancing to song %u", (unsigned)next_idx);
+                    play_song_idx(next_idx, false);
+                    do_resume();
                 } else {
                     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                     g_is_playing  = false;
@@ -985,6 +989,7 @@ static void on_song_settings_req(uint16_t song_id)
     uint8_t flags = 0;
     if (s.loop)               flags |= 0x01u;
     if (s.fixed_speed > 0.0f) flags |= 0x02u;
+    if (s.autoplay_next)      flags |= 0x04u;
     if (s.dimmer_max != 100u || s.dimmer_min != 0u ||
         s.dimmer_rps_ref < 1.35f || s.dimmer_rps_ref > 1.45f) flags |= 0x08u;
     if (s.light_organ)        flags |= 0x10u;
@@ -1036,6 +1041,7 @@ static void on_set_song_settings(uint16_t song_id,
         ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
         if ((int16_t)(song_id - 1) == g_current_song) {
             g_song_loop           = false;
+            g_song_autoplay_next  = false;
             g_song_fixed_speed_en = false;
             g_song_fixed_speed    = 1.0f;
             g_song_pitch_influence       = 0u;
@@ -1048,14 +1054,16 @@ static void on_set_song_settings(uint16_t song_id,
 
     bool  loop         = (flags & 0x01u) != 0;
     bool  fixed_en     = (flags & 0x02u) != 0;
+    bool  autoplay_next= (flags & 0x04u) != 0;
     bool  light_organ  = (flags & 0x10u) != 0;
+    if (loop && autoplay_next) autoplay_next = false;
     float spd          = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
     float d_rps_ref    = (dimmer_rps_ref_x10 > 0) ? ((float)dimmer_rps_ref_x10 / 10.0f) : 1.4f;
 
     cJSON *root = cJSON_CreateObject();
     if (!root) { ESP_LOGE("main", "OOM creating JSON for song %u", song_id); return; }
 
-    cJSON_AddBoolToObject(root, "loop", loop);
+    cJSON_AddStringToObject(root, "end_action", loop ? "loop" : (autoplay_next ? "next" : "none"));
     if (fixed_en) {
         cJSON_AddNumberToObject(root, "fixed_speed", (double)spd);
     }
@@ -1095,6 +1103,7 @@ static void on_set_song_settings(uint16_t song_id,
     /* Apply immediately if the modified song is currently active */
     if ((int16_t)(song_id - 1) == g_current_song) {
         g_song_loop           = loop;
+        g_song_autoplay_next  = autoplay_next;
         g_song_fixed_speed_en = fixed_en;
         g_song_fixed_speed    = fixed_en ? spd : 1.0f;
         g_song_pitch_influence   = pitch_influence_pct;
@@ -1114,9 +1123,9 @@ static void on_set_song_settings(uint16_t song_id,
         }
 #endif
         soundtouch_el_set_pitch_influence(g_sonic_el, (float)pitch_influence_pct / 100.0f);
-        ESP_LOGI("main", "Applied settings live: loop=%d fixed_en=%d spd=%.2f pitch_infl=%u%% "
+        ESP_LOGI("main", "Applied settings live: loop=%d autoplay_next=%d fixed_en=%d spd=%.2f pitch_infl=%u%% "
                  "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us",
-                 (int)loop, (int)fixed_en, fixed_en ? (double)spd : 1.0, pitch_influence_pct,
+                 (int)loop, (int)autoplay_next, (int)fixed_en, fixed_en ? (double)spd : 1.0, pitch_influence_pct,
                  dimmer_max, dimmer_min, (double)d_rps_ref, dimmer_holdoff_s, dimmer_fadein_s);
     }
 }
@@ -1127,6 +1136,7 @@ static void on_set_song_settings(uint16_t song_id,
 
 static void on_web_song_settings_saved(const char *wav_path,
                                         bool        loop,
+                                        bool        autoplay_next,
                                         float       fixed_speed,
                                         uint8_t     pitch_influence,
                                         uint8_t     dimmer_max,
@@ -1141,10 +1151,12 @@ static void on_web_song_settings_saved(const char *wav_path,
     snprintf(cur_path, sizeof(cur_path), "%s/%s.wav", MOUNT_POINT,
              g_song_names[(uint8_t)g_current_song]);
     if (strcmp(wav_path, cur_path) != 0) return;
+    if (loop && autoplay_next) autoplay_next = false;
 
     /* These volatile writes are safe from the HTTP task; io_task reads them
      * without the mutex (same as after UART on_set_song_settings). */
     g_song_loop            = loop;
+    g_song_autoplay_next   = autoplay_next;
     g_song_fixed_speed_en  = (fixed_speed > 0.0f);
     g_song_fixed_speed     = (fixed_speed > 0.0f) ? fixed_speed : 1.0f;
     g_song_pitch_influence = pitch_influence;
@@ -1158,8 +1170,9 @@ static void on_web_song_settings_saved(const char *wav_path,
     s_cmd_st_bypass_value   = (fixed_speed > 0.0f); /* reuse bypass flag for fixed-speed */
     /* pitch: set via existing async command path */
 #endif
-    ESP_LOGI(TAG, "Browser settings live-applied: %s  max=%u min=%u rps=%.1f holdoff=%us fadein=%us",
-             wav_path, dimmer_max, dimmer_min,
+    ESP_LOGI(TAG, "Browser settings live-applied: %s  loop=%d autoplay_next=%d max=%u min=%u rps=%.1f holdoff=%us fadein=%us",
+             wav_path, (int)loop, (int)autoplay_next,
+             dimmer_max, dimmer_min,
              (double)((dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f),
              dimmer_holdoff_s, dimmer_fadein_s);
 }
@@ -1227,6 +1240,7 @@ static void io_task(void *arg)
             static bool       s_enc2_was_moving  = false;
             static bool       s_enc2_pause_sent  = false;
             static uint8_t    s_last_tempo_sent  = 255; /* 255 = force first send */
+            static uint8_t    s_last_live_sent   = 255; /* 255 = force first send */
             static TickType_t s_last_tempo_tick  = 0;
 
             /* New song loaded (e.g. Next button) – force a rising edge so resume
@@ -1298,6 +1312,7 @@ static void io_task(void *arg)
 
                 if (holdoff_active) {
                     dpct = 0u;
+                    s_playing_pf = 0.0f; /* stale brightness must not flash when holdoff expires */
                 } else if (s_vol_fading && vol > 0) {
                     /* Fade from the last actual playing brightness, not from dmax.
                      * Avoids a jarring jump to full brightness when crank was slow. */
@@ -1430,14 +1445,21 @@ static void io_task(void *arg)
                 : (g_tempo_locked
                     ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
                     : speed_target);
+            float live_speed = enc2_spd;
+            if (live_speed < SPEED_MIN) live_speed = SPEED_MIN;
+            if (live_speed > SPEED_MAX) live_speed = SPEED_MAX;
             uint8_t tb = (uint8_t)(((disp_speed - SPEED_MIN) /
                           (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
+            uint8_t live_tb = (uint8_t)(((live_speed - SPEED_MIN) /
+                               (SPEED_MAX - SPEED_MIN)) * 100.0f + 0.5f);
             if (tb > 100) tb = 100;
-            if (tb != s_last_tempo_sent &&
+            if (live_tb > 100) live_tb = 100;
+            if ((tb != s_last_tempo_sent || live_tb != s_last_live_sent) &&
                 (now - s_last_tempo_tick) >= pdMS_TO_TICKS(100)) {
                 s_last_tempo_sent = tb;
+                s_last_live_sent  = live_tb;
                 s_last_tempo_tick = now;
-                uart_master_send_poti_update(vol, tb, 0,
+                uart_master_send_poti_update(vol, tb, live_tb,
                                              (uint8_t)(SPEED_MIN * 10.0f),
                                              (uint8_t)(SPEED_MAX * 10.0f));
             }
