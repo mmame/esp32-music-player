@@ -678,6 +678,7 @@ typedef struct {
     uint8_t  dimmer_min;
     uint8_t  dimmer_rps_ref_x10;
     uint8_t  dimmer_holdoff_s;
+    uint8_t  dimmer_fadein_s;
     uint8_t  pitch_influence_pct;
 } async_player_settings_t;
 
@@ -733,6 +734,7 @@ void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  dimmer_min,
                                    uint8_t  dimmer_rps_ref_x10,
                                    uint8_t  dimmer_holdoff_s,
+                                   uint8_t  dimmer_fadein_s,
                                    uint8_t  pitch_influence_pct)
 {
     if (!s_screen) return;
@@ -746,6 +748,7 @@ void ui_player_song_settings_async(uint16_t song_id,
     p->dimmer_min          = dimmer_min;
     p->dimmer_rps_ref_x10  = dimmer_rps_ref_x10;
     p->dimmer_holdoff_s    = dimmer_holdoff_s;
+    p->dimmer_fadein_s     = dimmer_fadein_s;
     p->pitch_influence_pct = pitch_influence_pct;
     lv_lock();
     lv_async_call(async_cb_song_settings_player, p);

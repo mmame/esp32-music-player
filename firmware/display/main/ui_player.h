@@ -88,7 +88,8 @@ void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s);
  * @param dimmer_max         Max brightness 0-100.
  * @param dimmer_min         Min brightness 0-100.
  * @param dimmer_rps_ref_x10 Full-brightness RPS × 10.
- * @param dimmer_holdoff_s   Seconds before dimmer activates.
+ * @param dimmer_holdoff_s   Song-position timestamp (s) before which dimmer is suppressed.
+ * @param dimmer_fadein_s    Fade-in duration (s) after holdoff expires.
  * @param pitch_influence_pct Pitch blend factor 0-100.
  */
 void ui_player_song_settings_async(uint16_t song_id,
@@ -98,6 +99,7 @@ void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  dimmer_min,
                                    uint8_t  dimmer_rps_ref_x10,
                                    uint8_t  dimmer_holdoff_s,
+                                   uint8_t  dimmer_fadein_s,
                                    uint8_t  pitch_influence_pct);
 
 /**

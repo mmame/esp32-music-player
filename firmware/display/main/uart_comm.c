@@ -81,7 +81,7 @@ static volatile int16_t s_touch_y      = 0;
  * written from the LVGL task (Core 1) and read from the UART task (Core 0).
  */
 #define PENDING_QUEUE_SLOTS    8   /* max simultaneous queued commands  */
-#define PENDING_CMD_MAX_PARAMS 4   /* max param bytes per command        */
+#define PENDING_CMD_MAX_PARAMS 12  /* large enough for SET_SONG_SETTINGS (10 B) */
 
 typedef struct {
     uint8_t cmd_id;
@@ -193,9 +193,10 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
                                       uint8_t  dimmer_min,
                                       uint8_t  dimmer_rps_ref_x10,
                                       uint8_t  dimmer_holdoff_s,
+                                      uint8_t  dimmer_fadein_s,
                                       uint8_t  pitch_influence_pct)
 {
-    uint8_t params[9];
+    uint8_t params[10];
     params[0] = (uint8_t)(song_id & 0xFF);
     params[1] = (uint8_t)(song_id >> 8);
     params[2] = flags;
@@ -204,10 +205,11 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
     params[5] = dimmer_min;
     params[6] = dimmer_rps_ref_x10;
     params[7] = dimmer_holdoff_s;
-    params[8] = pitch_influence_pct;
-    enqueue_pending_cmd(CMD_SET_SONG_SETTINGS, params, 9);
-    ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS queued: id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u pitch=%u",
-             song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_ref_x10, dimmer_holdoff_s, pitch_influence_pct);
+    params[8] = dimmer_fadein_s;
+    params[9] = pitch_influence_pct;
+    enqueue_pending_cmd(CMD_SET_SONG_SETTINGS, params, 10);
+    ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS queued: id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u dfad=%u pitch=%u",
+             song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_ref_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_influence_pct);
 }
 
 void uart_comm_init(void)
@@ -432,6 +434,7 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
 
         ui_player_update_speed_locked_async(!!(flags_byte & 0x01u));
         ui_songlist_update_bt_enabled_async(!!(flags_byte & 0x02u));
+        ui_songlist_update_wifi_enabled_async(!!(flags_byte & 0x04u));
 
         ESP_LOGD(TAG, "State: song='%s'  vol=%u  tempo=%u  playing=%u  pos=%u%%  dur=%us",
                  song_name_snap, g_player_state.volume, g_player_state.tempo,
@@ -580,13 +583,14 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         uint8_t  dimmer_min        = (len >= 8) ? payload[5] : 0u;
         uint8_t  dimmer_rps_x10    = (len >= 8) ? payload[6] : 14u;
         uint8_t  dimmer_holdoff_s  = (len >= 8) ? payload[7] : 0u;
-        uint8_t  pitch_infl_pct    = (len >= 9) ? payload[8] : 0u;
-        ESP_LOGI(TAG, "CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u pitch=%u",
-                 song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, pitch_infl_pct);
+        uint8_t  dimmer_fadein_s   = (len >= 9) ? payload[8] : 0u;
+        uint8_t  pitch_infl_pct    = (len >= 10) ? payload[9] : 0u;
+        ESP_LOGI(TAG, "CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u dfad=%u pitch=%u",
+                 song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct);
         ui_songlist_song_settings_async(song_id, flags, fixed_speed_x100,
-                                        dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, pitch_infl_pct);
+                                        dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct);
         ui_player_song_settings_async(song_id, flags, fixed_speed_x100,
-                                      dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, pitch_infl_pct);
+                                      dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct);
         break;
     }
 

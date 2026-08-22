@@ -67,7 +67,7 @@ tbody tr:hover td{background:#1a1f3a}
 .cfg-name{color:#d0d0e8;font-size:13px;font-weight:500}
 .cfg-val{color:#a78bfa;font-family:monospace;font-size:14px;min-width:52px;text-align:right}
 input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
-.cfg-desc{font-size:11px;color:#555;margin-top:5px;line-height:1.5}
+.cfg-desc{font-size:11px;color:#9090b4;margin-top:5px;line-height:1.5}
 .cfg-btns{display:flex;gap:8px;margin-top:24px;flex-wrap:wrap}
 /* Song settings modal */
 #ss-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.75);z-index:1000;align-items:center;justify-content:center;padding:12px}
@@ -79,7 +79,7 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
 .ss-sr{margin-bottom:10px}
 .ss-sl{display:flex;justify-content:space-between;margin-bottom:3px}
 .ss-sn{font-size:12px;color:#9090b0}.ss-sv{font-size:12px;color:#a78bfa;font-family:monospace}
-.ss-hint{font-size:11px;color:#555;margin-top:3px;line-height:1.4}
+.ss-hint{font-size:11px;color:#9090b4;margin-top:3px;line-height:1.4}
 .ss-sep{border-color:#1e2a52;margin:12px 0 10px}
 .ss-btns{display:flex;gap:8px;margin-top:16px}
 </style>
@@ -160,22 +160,23 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     <p class="cfg-desc">Volume units stepped per 10&thinsp;ms tick during fade-in/out when cranking starts or stops. 1&nbsp;=&nbsp;slow fade (~700&thinsp;ms at full volume). 10&nbsp;=&nbsp;fast fade (~70&thinsp;ms). Default: 1</p>
   </div>
   <hr style="border-color:#1e2a52;margin:20px 0 14px">
-  <h3 style="font-size:.7rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px">Dimmer</h3>
+  <h3 style="font-size:.7rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px">Light Organ (FFT)</h3>
   <div class="cfg-row">
-    <div class="cfg-label"><span class="cfg-name">Max brightness (%)</span><span class="cfg-val" id="vv-dimmer_max">100</span></div>
-    <input type="range" class="cfg-slider" id="sl-dimmer_max" min="0" max="100" step="5" value="100" oninput="document.getElementById('vv-dimmer_max').textContent=this.value">
-    <p class="cfg-desc">Maximum lamp brightness during playback. 0&thinsp;=&thinsp;dimmer always off. The lamp is off whenever no sound is playing. Default: 100</p>
+    <div class="cfg-label"><span class="cfg-name">Bass weight</span><span class="cfg-val" id="vv-lo_bass_weight">45</span></div>
+    <input type="range" class="cfg-slider" id="sl-lo_bass_weight" min="1" max="200" step="1" value="45" oninput="document.getElementById('vv-lo_bass_weight').textContent=this.value">
+    <p class="cfg-desc">Multiplier applied to the square-root of the bass energy (80&ndash;250&thinsp;Hz). Higher values make the lamp react more strongly to bass. Applied as: <code>level = sqrtf(bass) &times; bass_weight + sqrtf(mid) &times; mid_weight</code>. Default: 45</p>
   </div>
   <div class="cfg-row">
-    <div class="cfg-label"><span class="cfg-name">Min brightness (%)</span><span class="cfg-val" id="vv-dimmer_min">0</span></div>
-    <input type="range" class="cfg-slider" id="sl-dimmer_min" min="0" max="100" step="5" value="0" oninput="document.getElementById('vv-dimmer_min').textContent=this.value">
-    <p class="cfg-desc">Lamp brightness floor while playing. The lamp stays at least this bright whenever a song is active, even at low crank speed. 0&thinsp;=&thinsp;no floor. Default: 0</p>
+    <div class="cfg-label"><span class="cfg-name">Mid weight</span><span class="cfg-val" id="vv-lo_mid_weight">5.0</span></div>
+    <input type="range" class="cfg-slider" id="sl-lo_mid_weight" min="0" max="50" step="0.5" value="5" oninput="document.getElementById('vv-lo_mid_weight').textContent=parseFloat(this.value).toFixed(1)">
+    <p class="cfg-desc">Multiplier applied to the square-root of the mid-range energy (250&ndash;2000&thinsp;Hz). Raise this to add attack/snare contribution; lower it to keep the lamp purely bass-driven. Default: 5</p>
   </div>
   <div class="cfg-row">
-    <div class="cfg-label"><span class="cfg-name">Full brightness at (rev/s)</span><span class="cfg-val" id="vv-dimmer_rps_ref">1.40</span></div>
-    <input type="range" class="cfg-slider" id="sl-dimmer_rps_ref" min="0.5" max="2.5" step="0.1" value="1.4" oninput="document.getElementById('vv-dimmer_rps_ref').textContent=parseFloat(this.value).toFixed(2)">
-    <p class="cfg-desc">Crank speed at which maximum brightness is reached. At lower speeds the lamp dims proportionally; above this it stays at max. Default: 1.40&thinsp;rev/s</p>
+    <div class="cfg-label"><span class="cfg-name">Range decay rate</span><span class="cfg-val" id="vv-lo_decay_rate">0.998</span></div>
+    <input type="range" class="cfg-slider" id="sl-lo_decay_rate" min="0.990" max="0.999" step="0.001" value="0.998" oninput="document.getElementById('vv-lo_decay_rate').textContent=parseFloat(this.value).toFixed(3)">
+    <p class="cfg-desc">Per-frame (50&thinsp;ms) decay of the auto-range peak. Lower values make the auto-range adapt faster (more sensitive at low volume), higher values keep the full range for longer (smoother but slower adaptation). Range 0.990&ndash;0.999. Default: 0.998</p>
   </div>
+
   <div class="cfg-btns">
     <button class="btn btn-primary" onclick="saveConfig()">&#10003; Apply Changes</button>
     <button class="btn btn-ghost" onclick="resetConfig()">&#10226; Reset to Defaults</button>
@@ -593,9 +594,9 @@ function loadConfig(){
     setSlider('start_thresh', c.start_thresh, 2);
     setSlider('release_ticks',c.release_ticks,0);
     setSlider('vol_fade_step',c.vol_fade_step,0);
-    setSlider('dimmer_max',   c.dimmer_max,   0);
-    setSlider('dimmer_min',   c.dimmer_min,   0);
-    setSlider('dimmer_rps_ref',c.dimmer_rps_ref,2);
+    if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
+    if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
+    if(c.lo_decay_rate !==undefined)setSlider('lo_decay_rate', c.lo_decay_rate, 3);
     if(c.pot_cal_lo  !==undefined)document.getElementById('cal-show-lo') .textContent=c.pot_cal_lo;
     if(c.pot_cal_mid !==undefined)document.getElementById('cal-show-mid').textContent=c.pot_cal_mid;
     if(c.pot_cal_hi  !==undefined)document.getElementById('cal-show-hi') .textContent=c.pot_cal_hi;
@@ -608,14 +609,14 @@ function saveConfig(){
   var sta=parseFloat(document.getElementById('sl-start_thresh').value);
   var rt =parseInt(document.getElementById('sl-release_ticks').value);
   var fs =parseInt(document.getElementById('sl-vol_fade_step').value);
-  var dm =parseInt(document.getElementById('sl-dimmer_max').value);
-  var dn =parseInt(document.getElementById('sl-dimmer_min').value);
-  var dr =parseFloat(document.getElementById('sl-dimmer_rps_ref').value);
+  var lbw=parseFloat(document.getElementById('sl-lo_bass_weight').value);
+  var lmw=parseFloat(document.getElementById('sl-lo_mid_weight').value);
+  var ldr=parseFloat(document.getElementById('sl-lo_decay_rate').value);
   if(sta<=stp){toast('Resume threshold must be above pause threshold',true);return;}
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_max:dm,dimmer_min:dn,dimmer_rps_ref:dr})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -628,9 +629,9 @@ function resetConfig(){
   setSlider('start_thresh', 0.70, 2);
   setSlider('release_ticks',2,    0);
   setSlider('vol_fade_step',  1,    0);
-  setSlider('dimmer_max',     100,  0);
-  setSlider('dimmer_min',     0,    0);
-  setSlider('dimmer_rps_ref', 1.4,  2);
+  setSlider('lo_bass_weight', 45,   0);
+  setSlider('lo_mid_weight',  5,    1);
+  setSlider('lo_decay_rate',  0.998,3);
   toast('Defaults loaded \u2014 click Apply Changes to save');
 }
 window.saveConfig=saveConfig;
@@ -687,6 +688,7 @@ function openSongSettings(name){
     .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
     .then(function(s){
       document.getElementById('ss-loop').checked=!!s.loop;
+      document.getElementById('ss-light-organ').checked=!!s.light_organ;
       document.getElementById('ss-fixed-en').checked=!!s.fixed_speed_en;
       var spd=s.fixed_speed||1.0;
       document.getElementById('ss-fixed-spd').value=spd;
@@ -698,7 +700,9 @@ function openSongSettings(name){
       var ho=s.dimmer_holdoff_s||0;
       document.getElementById('ss-holdoff').value=ho;
       document.getElementById('ss-holdoff-val').textContent=ho+'s';
-      document.getElementById('ss-dimmer-ov').checked=!!s.dimmer_override;
+      var fi=s.dimmer_fadein_s||0;
+      document.getElementById('ss-fadein').value=fi;
+      document.getElementById('ss-fadein-val').textContent=fi+'s';
       var dmax=s.dimmer_max!==undefined?s.dimmer_max:100;
       document.getElementById('ss-dmax').value=dmax;
       document.getElementById('ss-dmax-val').textContent=dmax+'%';
@@ -708,22 +712,21 @@ function openSongSettings(name){
       var rps=s.dimmer_rps_ref!==undefined?s.dimmer_rps_ref:1.4;
       document.getElementById('ss-drps').value=rps;
       document.getElementById('ss-drps-val').textContent=parseFloat(rps).toFixed(2);
-      ssSyncDimmer();
       document.getElementById('ss-modal').style.display='flex';
     })
     .catch(function(e){toast('Could not load settings: '+e.message,true);});
 }
 function ssClose(){document.getElementById('ss-modal').style.display='none';}
 function ssSyncFixed(){document.getElementById('ss-fixed-sub').style.display=document.getElementById('ss-fixed-en').checked?'':'none';}
-function ssSyncDimmer(){document.getElementById('ss-dimmer-sub').style.display=document.getElementById('ss-dimmer-ov').checked?'':'none';}
 function ssSave(){
   var payload={
     loop:document.getElementById('ss-loop').checked,
+    light_organ:document.getElementById('ss-light-organ').checked,
     fixed_speed_en:document.getElementById('ss-fixed-en').checked,
     fixed_speed:parseFloat(document.getElementById('ss-fixed-spd').value),
     pitch_influence:parseInt(document.getElementById('ss-pitch').value),
     dimmer_holdoff_s:parseInt(document.getElementById('ss-holdoff').value),
-    dimmer_override:document.getElementById('ss-dimmer-ov').checked,
+    dimmer_fadein_s:parseInt(document.getElementById('ss-fadein').value),
     dimmer_max:parseInt(document.getElementById('ss-dmax').value),
     dimmer_min:parseInt(document.getElementById('ss-dmin').value),
     dimmer_rps_ref:parseFloat(document.getElementById('ss-drps').value)
@@ -741,7 +744,6 @@ function ssSave(){
 window.openSongSettings=openSongSettings;
 window.ssClose=ssClose;
 window.ssSyncFixed=ssSyncFixed;
-window.ssSyncDimmer=ssSyncDimmer;
 window.ssSave=ssSave;
 
 loadFiles();
@@ -777,18 +779,24 @@ loadFiles();
     </div>
     <hr class="ss-sep">
     <div class="ss-sr">
-      <div class="ss-sl"><span class="ss-sn">Dimmer holdoff (s)</span><span class="ss-sv" id="ss-holdoff-val">0s</span></div>
+      <div class="ss-sl"><span class="ss-sn">Dimmer holdoff (song timestamp)</span><span class="ss-sv" id="ss-holdoff-val">0s</span></div>
       <input type="range" class="cfg-slider" id="ss-holdoff" min="0" max="255" step="1" value="0"
         oninput="document.getElementById('ss-holdoff-val').textContent=this.value+'s'">
-      <p class="ss-hint">Seconds from song start before the lamp activates.</p>
+      <p class="ss-hint">Song position at which the lamp activates. E.g. 12 = lamp turns on when the audio reaches 00:00:12, regardless of playback speed. Seeking past this timestamp activates the lamp immediately.</p>
+    </div>
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Dimmer fade-in (s)</span><span class="ss-sv" id="ss-fadein-val">0s</span></div>
+      <input type="range" class="cfg-slider" id="ss-fadein" min="0" max="30" step="1" value="0"
+        oninput="document.getElementById('ss-fadein-val').textContent=this.value+'s'">
+      <p class="ss-hint">Seconds to ramp from 0 to full brightness after the holdoff timestamp is reached. 0 = instant on.</p>
     </div>
     <hr class="ss-sep">
-    <div class="ss-check-row">
-      <input type="checkbox" id="ss-dimmer-ov" onchange="ssSyncDimmer()">
-      <label for="ss-dimmer-ov">Per-song dimmer override</label>
+    <p style="margin:0 0 8px;font-size:11px;color:#8888aa;text-transform:uppercase;letter-spacing:.06em">Dimmer</p>
+    <div class="ss-check-row" style="margin-bottom:10px">
+      <input type="checkbox" id="ss-light-organ">
+      <label for="ss-light-organ">Light organ &mdash; lamp follows audio energy (FFT), not crank speed</label>
     </div>
-    <div id="ss-dimmer-sub" class="ss-sub" style="display:none">
-      <div class="ss-sr">
+    <div class="ss-sr">
         <div class="ss-sl"><span class="ss-sn">Max brightness</span><span class="ss-sv" id="ss-dmax-val">100%</span></div>
         <input type="range" class="cfg-slider" id="ss-dmax" min="0" max="100" step="5" value="100"
           oninput="document.getElementById('ss-dmax-val').textContent=this.value+'%'">
@@ -803,7 +811,6 @@ loadFiles();
         <input type="range" class="cfg-slider" id="ss-drps" min="0.5" max="3.0" step="0.1" value="1.4"
           oninput="document.getElementById('ss-drps-val').textContent=parseFloat(this.value).toFixed(2)">
       </div>
-    </div>
     <p class="ss-hint" style="margin-top:10px">Changes take effect when the song is next loaded.</p>
     <div class="ss-btns">
       <button class="btn btn-primary" onclick="ssSave()">&#10003; Save</button>

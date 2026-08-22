@@ -128,7 +128,8 @@ typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
  * @param dimmer_max         Max brightness 0-100.
  * @param dimmer_min         Min brightness 0-100.
  * @param dimmer_rps_ref_x10 Full-brightness RPS × 10 (e.g. 14 = 1.4 rps).
- * @param dimmer_holdoff_s   Seconds after song start before dimmer activates.
+ * @param dimmer_holdoff_s   Song-position timestamp (s) before which dimmer is suppressed.
+ * @param dimmer_fadein_s    Fade-in duration (s) from 0 to full brightness after holdoff.
  * @param pitch_influence_pct Pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
  */
 typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
@@ -138,6 +139,7 @@ typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  dimmer_min,
                                              uint8_t  dimmer_rps_ref_x10,
                                              uint8_t  dimmer_holdoff_s,
+                                             uint8_t  dimmer_fadein_s,
                                              uint8_t  pitch_influence_pct);
 
 /* ── Initialisation ───────────────────────────────────────────────────────── */
@@ -201,8 +203,9 @@ void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
  *   [4]    dimmer_max         : 0-100
  *   [5]    dimmer_min         : 0-100
  *   [6]    dimmer_rps_ref_x10 : full-brightness RPS × 10 (e.g. 14 = 1.4 rps)
- *   [7]    dimmer_holdoff_s   : seconds before dimmer activates (0 = immediate)
- *   [8]    pitch_influence_pct: pitch blend factor 0-100
+ *   [7]    dimmer_holdoff_s   : song-position timestamp (s) before which dimmer is suppressed
+ *   [8]    dimmer_fadein_s    : fade-in duration (s) from 0 to full brightness after holdoff
+ *   [9]    pitch_influence_pct: pitch blend factor 0-100
  */
 void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  flags,
@@ -211,6 +214,7 @@ void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  dimmer_min,
                                     uint8_t  dimmer_rps_ref_x10,
                                     uint8_t  dimmer_holdoff_s,
+                                    uint8_t  dimmer_fadein_s,
                                     uint8_t  pitch_influence_pct);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */

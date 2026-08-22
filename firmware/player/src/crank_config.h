@@ -23,9 +23,10 @@ typedef struct {
     float   start_thresh;    /**< resume threshold  [RPS]  [0.200–1.200, def 0.700] */
     uint8_t release_ticks;   /**< zero-windows before fast decay onset [0–10, def 2] */
     uint8_t vol_fade_step;   /**< volume units per 10 ms fade tick [1–10, def 1]    */
-    uint8_t dimmer_max;      /**< max lamp brightness 0–100 % (default 100)          */
-    uint8_t dimmer_min;      /**< min lamp brightness while playing 0–100 % (def 0) */
-    float   dimmer_rps_ref;  /**< RPS at which dimmer_max is reached (0.5–3.0, def 1.4) */
+    /* Light-organ (FFT) global parameters – only used when per-song light_organ is set */
+    float   lo_bass_weight;  /**< sqrtf(bass) multiplier [1–200, def 45]  */
+    float   lo_mid_weight;   /**< sqrtf(mid)  multiplier [0– 50, def  5]  */
+    float   lo_decay_rate;   /**< auto-range peak decay per 50 ms frame [0.990–0.999, def 0.998] */
     uint16_t pot_cal_lo;     /**< raw ADC at pot minimum stop  [0–4095, def 559]  */
     uint16_t pot_cal_mid;    /**< raw ADC at pot center knob   [0–4095, def 945]  */
     uint16_t pot_cal_hi;     /**< raw ADC at pot maximum stop  [0–4095, def 3071] */

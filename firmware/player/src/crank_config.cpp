@@ -25,9 +25,9 @@ void crank_config_defaults(crank_config_t *c)
     c->start_thresh  = 0.700f;
     c->release_ticks = 2;
     c->vol_fade_step  = 1;
-    c->dimmer_max     = 100;
-    c->dimmer_min     = 0;
-    c->dimmer_rps_ref = 1.4f;
+    c->lo_bass_weight = 45.0f;
+    c->lo_mid_weight  = 5.0f;
+    c->lo_decay_rate  = 0.998f;
     c->pot_cal_lo     = 559;
     c->pot_cal_mid    = 945;
     c->pot_cal_hi     = 3071;
@@ -89,9 +89,9 @@ void crank_config_load(void)
     read_f (root, "start_thresh",  0.200f, 1.200f, &g_crank_cfg.start_thresh);
     read_u8(root, "release_ticks", 0, 10, &g_crank_cfg.release_ticks);
     read_u8(root, "vol_fade_step",  1,   10,  &g_crank_cfg.vol_fade_step);
-    read_u8(root, "dimmer_max",     0,   100, &g_crank_cfg.dimmer_max);
-    read_u8(root, "dimmer_min",     0,   100, &g_crank_cfg.dimmer_min);
-    read_f (root, "dimmer_rps_ref", 0.5f, 3.0f, &g_crank_cfg.dimmer_rps_ref);
+    read_f (root, "lo_bass_weight", 1.0f, 200.0f, &g_crank_cfg.lo_bass_weight);
+    read_f (root, "lo_mid_weight",  0.0f,  50.0f, &g_crank_cfg.lo_mid_weight);
+    read_f (root, "lo_decay_rate",  0.990f, 0.999f, &g_crank_cfg.lo_decay_rate);
     read_u16(root, "pot_cal_lo",    0, 4095, &g_crank_cfg.pot_cal_lo);
     read_u16(root, "pot_cal_mid",   0, 4095, &g_crank_cfg.pot_cal_mid);
     read_u16(root, "pot_cal_hi",    0, 4095, &g_crank_cfg.pot_cal_hi);
@@ -117,9 +117,9 @@ void crank_config_save(void)
     cJSON_AddNumberToObject(root, "start_thresh",  (double)g_crank_cfg.start_thresh);
     cJSON_AddNumberToObject(root, "release_ticks", (double)g_crank_cfg.release_ticks);
     cJSON_AddNumberToObject(root, "vol_fade_step",  (double)g_crank_cfg.vol_fade_step);
-    cJSON_AddNumberToObject(root, "dimmer_max",      (double)g_crank_cfg.dimmer_max);
-    cJSON_AddNumberToObject(root, "dimmer_min",      (double)g_crank_cfg.dimmer_min);
-    cJSON_AddNumberToObject(root, "dimmer_rps_ref",  (double)g_crank_cfg.dimmer_rps_ref);
+    cJSON_AddNumberToObject(root, "lo_bass_weight",  (double)g_crank_cfg.lo_bass_weight);
+    cJSON_AddNumberToObject(root, "lo_mid_weight",   (double)g_crank_cfg.lo_mid_weight);
+    cJSON_AddNumberToObject(root, "lo_decay_rate",   (double)g_crank_cfg.lo_decay_rate);
     cJSON_AddNumberToObject(root, "pot_cal_lo",      (double)g_crank_cfg.pot_cal_lo);
     cJSON_AddNumberToObject(root, "pot_cal_mid",     (double)g_crank_cfg.pot_cal_mid);
     cJSON_AddNumberToObject(root, "pot_cal_hi",      (double)g_crank_cfg.pot_cal_hi);

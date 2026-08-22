@@ -147,9 +147,9 @@ void uart_comm_send_song_settings_req(uint16_t song_id);
  * @brief Send CMD_SET_SONG_SETTINGS to write new settings for a song to the
  *        player's SD card.
  *
- * Payload (9 bytes): song_id(2) + flags(1) + fixed_speed_x100(1) +
+ * Payload (10 bytes): song_id(2) + flags(1) + fixed_speed_x100(1) +
  *                    dimmer_max(1) + dimmer_min(1) + dimmer_rps_ref_x10(1) +
- *                    dimmer_holdoff_s(1) + pitch_influence_pct(1).
+ *                    dimmer_holdoff_s(1) + dimmer_fadein_s(1) + pitch_influence_pct(1).
  *
  * @param flags  bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override.
  */
@@ -160,6 +160,7 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
                                       uint8_t  dimmer_min,
                                       uint8_t  dimmer_rps_ref_x10,
                                       uint8_t  dimmer_holdoff_s,
+                                      uint8_t  dimmer_fadein_s,
                                       uint8_t  pitch_influence_pct);
 
 /**

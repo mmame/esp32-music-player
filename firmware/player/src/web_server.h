@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -9,6 +12,22 @@ extern "C" {
  * so the player can rescan its playlist.
  */
 typedef void (*rescan_cb_t)(void);
+
+/**
+ * Callback invoked after the browser saves song settings for a given WAV file.
+ * Called from the HTTP-server task with the parsed settings, so that the player
+ * can live-apply them to the currently running song without an SD-card re-read.
+ * @param wav_path  Full path, e.g. "/sdcard/foo.wav".
+ */
+typedef void (*web_song_settings_cb_t)(const char *wav_path,
+                                       bool        loop,
+                                       float       fixed_speed,
+                                       uint8_t     pitch_influence,
+                                       uint8_t     dimmer_max,
+                                       uint8_t     dimmer_min,
+                                       float       dimmer_rps_ref,
+                                       uint8_t     dimmer_holdoff_s,
+                                       uint8_t     dimmer_fadein_s);
 
 /**
  * Initialise the WiFi stack (netif, event loop, esp_wifi_init) and store the
@@ -22,6 +41,12 @@ typedef void (*rescan_cb_t)(void);
 void web_server_init(rescan_cb_t on_files_changed);
 
 /**
+ * Register a callback to receive live song-settings updates from the browser.
+ * Call once from app_main before web_server_enable().
+ */
+void web_server_set_song_settings_callback(web_song_settings_cb_t cb);
+
+/**
  * Start the WiFi soft-AP and the HTTP file-manager server.
  * Safe to call from any task.  No-op if already running.
  */
@@ -32,6 +57,11 @@ void web_server_enable(void);
  * Safe to call from any task.  No-op if already stopped.
  */
 void web_server_disable(void);
+
+/**
+ * Returns true if the WiFi AP and HTTP server are currently running.
+ */
+bool web_server_is_running(void);
 
 #ifdef __cplusplus
 }

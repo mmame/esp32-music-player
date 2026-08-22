@@ -26,11 +26,12 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
     out->loop             = false;
     out->fixed_speed      = 0.0f;
     out->pitch_influence  = 0u;
-    out->dimmer_override  = false;
     out->dimmer_max       = 100u;
     out->dimmer_min       = 0u;
     out->dimmer_rps_ref   = 1.4f;
     out->dimmer_holdoff_s = 0u;
+    out->dimmer_fadein_s  = 3u; /* 3-second default lamp fade-in */
+    out->light_organ      = false;
 
     if (!wav_path) return;
 
@@ -100,12 +101,6 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         if (cJSON_IsTrue(pf)) out->pitch_influence = 100u;
     }
 
-    /* "dimmer_override": boolean – use per-song dimmer values */
-    const cJSON *dov_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_override");
-    if (cJSON_IsBool(dov_item)) {
-        out->dimmer_override = cJSON_IsTrue(dov_item);
-    }
-
     /* "dimmer_max": integer 0-100 */
     const cJSON *dmax_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_max");
     if (cJSON_IsNumber(dmax_item) && dmax_item->valueint >= 0 && dmax_item->valueint <= 100) {
@@ -124,23 +119,35 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         out->dimmer_rps_ref = (float)drps_item->valuedouble;
     }
 
-    /* "dimmer_holdoff_s": integer 0-255 seconds */
+    /* "dimmer_holdoff_s": integer 0-255 seconds (song-position timestamp) */
     const cJSON *dhld_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_holdoff_s");
     if (cJSON_IsNumber(dhld_item) && dhld_item->valueint >= 0 && dhld_item->valueint <= 255) {
         out->dimmer_holdoff_s = (uint8_t)dhld_item->valueint;
     }
 
+    /* "dimmer_fadein_s": integer 0-255 seconds fade-in duration after holdoff */
+    const cJSON *dfad_item = cJSON_GetObjectItemCaseSensitive(root, "dimmer_fadein_s");
+    if (cJSON_IsNumber(dfad_item) && dfad_item->valueint >= 0 && dfad_item->valueint <= 255) {
+        out->dimmer_fadein_s = (uint8_t)dfad_item->valueint;
+    }
+
+    /* "light_organ": boolean – drive dimmer from audio FFT instead of crank speed */
+    const cJSON *lo_item = cJSON_GetObjectItemCaseSensitive(root, "light_organ");
+    if (cJSON_IsBool(lo_item)) {
+        out->light_organ = cJSON_IsTrue(lo_item);
+    }
+
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "Settings for '%s': loop=%s fixed_speed=%s(%.2f) pitch_influence=%u%% "
-             "dimmer_override=%s max=%u min=%u rps_ref=%.1f holdoff=%us",
+             "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us",
              json_path,
              out->loop ? "yes" : "no",
              out->fixed_speed > 0.0f ? "" : "off ",
              (double)out->fixed_speed,
              out->pitch_influence,
-             out->dimmer_override ? "yes" : "no",
              out->dimmer_max, out->dimmer_min,
              (double)out->dimmer_rps_ref,
-             out->dimmer_holdoff_s);
+             out->dimmer_holdoff_s,
+             out->dimmer_fadein_s);
 }

@@ -267,8 +267,21 @@ bool dimmerlink_probe(void)
 
 void dimmerlink_set_level(uint8_t pct)
 {
-    if (!s_dev) return;   /* probe failed or not called yet */
     if (pct > 100u) pct = 100u;
+
+    /* Log whenever brightness changes – gives a live trace in the monitor. */
+    /*static uint8_t s_last_pct = 0xFFu;
+    if (pct != s_last_pct) {
+        s_last_pct = pct;
+        // Build a 10-char ASCII bar for quick visual reading
+        char bar[11];
+        uint8_t filled = (uint8_t)((pct + 5u) / 10u);
+        for (uint8_t i = 0; i < 10u; i++) bar[i] = (i < filled) ? '#' : '.';
+        bar[10] = '\0';
+        ESP_LOGI(TAG, "level=%3u%% [%s]%s", pct, bar, s_dev ? "" : "  (no hw)");
+    }*/
+
+    if (!s_dev) return;
     uint8_t buf[2] = { REG_DIM0_LEVEL, pct };
     i2c_master_transmit(s_dev, buf, sizeof(buf), /*timeout_ms=*/20);
 }

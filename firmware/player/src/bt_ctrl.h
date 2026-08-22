@@ -1,9 +1,9 @@
 /**
  * @file bt_ctrl.h
- * @brief JAB5 BLE-disconnect open-collector driver (GPIO46).
+ * @brief JAB5 BLE-disconnect active push/pull driver (GPIO46).
  *
- * Disabled state: 300 ms HIGH pulse every 2 s (keeps JAB5 BLE disconnected).
- * Enabled state:  GPIO held in input/high-Z mode (JAB5 BLE free to connect).
+ * Disabled state: 600 ms OUTPUT HIGH then 1400 ms OUTPUT LOW (repeating, 2 s period).
+ * Enabled state:  OUTPUT LOW permanently.
  * Starts in disabled state at power-on.
  */
 #pragma once

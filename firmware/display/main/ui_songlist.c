@@ -39,7 +39,8 @@ typedef struct {
     uint8_t dimmer_max;          /* max brightness 0-100                          */
     uint8_t dimmer_min;          /* min brightness 0-100                          */
     uint8_t dimmer_rps_ref_x10;  /* full-brightness RPS × 10                     */
-    uint8_t dimmer_holdoff_s;    /* seconds before dimmer activates               */
+    uint8_t dimmer_holdoff_s;    /* song-position timestamp before dimmer activates */
+    uint8_t dimmer_fadein_s;     /* seconds to fade from 0 to full after holdoff  */
     uint8_t pitch_influence_pct; /* 0-100: 0=time-stretch, 100=tape effect        */
 } song_settings_cache_t;
 
@@ -59,9 +60,6 @@ static lv_obj_t  *s_wifi_btn     = NULL;   /* clickable container */
 static lv_obj_t  *s_wifi_icon    = NULL;   /* label: LV_SYMBOL_WIFI */
 static lv_obj_t  *s_wifi_slash   = NULL;   /* "\/" overlay when disabled */
 static bool       s_wifi_enabled = false;  /* starts disabled */
-static lv_timer_t *s_wifi_timer  = NULL;   /* auto-disable after 15 min */
-
-#define WIFI_TIMEOUT_MS  (15u * 60u * 1000u)
 
 /* BT enable/disable button */
 static lv_obj_t *s_bt_btn     = NULL;
@@ -73,35 +71,28 @@ static lv_obj_t  *s_settings_overlay   = NULL; /* backdrop (NULL when not open) 
 static uint16_t   s_settings_song_id   = 0;    /* song_id whose dialog is open  */
 static lv_obj_t  *s_cb_loop            = NULL; /* checkbox objects inside dialog */
 static lv_obj_t  *s_cb_fixed_speed     = NULL;
+static lv_obj_t  *s_cb_light_organ     = NULL; /* light-organ mode checkbox        */
 static lv_obj_t  *s_lbl_pitch_val      = NULL;
 static uint8_t    s_pitch_influence    = 0u;   /* dialog pitch influence 0-100   */
 static lv_obj_t  *s_lbl_speed_val      = NULL; /* speed value label               */
 static uint8_t    s_speed_x100         = 100;  /* dialog speed × 100 (70–140)    */
-/* Dimmer override dialog widgets */
-static lv_obj_t  *s_cb_dimmer_override = NULL;
 static lv_obj_t  *s_lbl_dmax_val       = NULL;
 static lv_obj_t  *s_lbl_dmin_val       = NULL;
 static lv_obj_t  *s_lbl_drps_val       = NULL;
 static lv_obj_t  *s_lbl_dhld_val       = NULL;
+static lv_obj_t  *s_lbl_dfad_val       = NULL;  /* fade-in duration label */
 static uint8_t    s_dimmer_max         = 100u;
 static uint8_t    s_dimmer_min         = 0u;
 static uint8_t    s_dimmer_rps_x10     = 14u; /* 1.4 rps default */
 static uint8_t    s_dimmer_holdoff_s   = 0u;
-/* Tab panels */
-static lv_obj_t  *s_sound_panel        = NULL;
-static lv_obj_t  *s_dimmer_panel       = NULL;
-static lv_obj_t  *s_tab_sound_btn      = NULL;
-static lv_obj_t  *s_tab_dimmer_btn     = NULL;
-
+static uint8_t    s_dimmer_fadein_s    = 0u;
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
 static void on_wifi_btn_clicked(lv_event_t *e);
 static void update_wifi_btn_style(void);
-static void wifi_timeout_cb(lv_timer_t *t);
 static void on_bt_btn_clicked(lv_event_t *e);
 static void update_bt_btn_style(void);
 static void update_dimmer_labels(void);
-static void update_tab_style(bool sound_active);
 static void send_play_song(uint16_t song_id);
 static void focus_item(int16_t idx);
 static void create_wifi_info_popup(void);
@@ -126,6 +117,7 @@ typedef struct {
     uint8_t  dimmer_min;
     uint8_t  dimmer_rps_ref_x10;
     uint8_t  dimmer_holdoff_s;
+    uint8_t  dimmer_fadein_s;
     uint8_t  pitch_influence_pct;
 } async_song_settings_t;
 
@@ -163,23 +155,8 @@ static void on_wifi_btn_clicked(lv_event_t *e)
     ESP_LOGI(TAG, "WiFi icon toggled: %s", s_wifi_enabled ? "ENABLE" : "DISABLE");
 
     if (s_wifi_enabled) {
-        if (s_wifi_timer) { lv_timer_delete(s_wifi_timer); s_wifi_timer = NULL; }
-        s_wifi_timer = lv_timer_create(wifi_timeout_cb, WIFI_TIMEOUT_MS, NULL);
-        lv_timer_set_repeat_count(s_wifi_timer, 1);
         create_wifi_info_popup();
-    } else {
-        if (s_wifi_timer) { lv_timer_delete(s_wifi_timer); s_wifi_timer = NULL; }
     }
-}
-
-static void wifi_timeout_cb(lv_timer_t *t)
-{
-    (void)t;
-    s_wifi_timer = NULL; /* auto-deleted by LVGL after repeat_count reaches 0 */
-    s_wifi_enabled = false;
-    update_wifi_btn_style();
-    uart_comm_send_wifi_ctrl(false);
-    ESP_LOGI(TAG, "WiFi auto-disabled after 15-minute timeout");
 }
 
 /* =========================================================================
@@ -512,42 +489,22 @@ static void update_dimmer_labels(void)
         snprintf(buf, sizeof(buf), "%us", s_dimmer_holdoff_s);
         lv_label_set_text(s_lbl_dhld_val, buf);
     }
+    if (s_lbl_dfad_val) {
+        snprintf(buf, sizeof(buf), "%us", s_dimmer_fadein_s);
+        lv_label_set_text(s_lbl_dfad_val, buf);
+    }
 }
 
-static void on_dmax_minus(lv_event_t *e) { (void)e; if (s_dimmer_max > 0u)   s_dimmer_max   -= 5u; if (s_dimmer_max < s_dimmer_min) s_dimmer_max = s_dimmer_min; if (s_cb_dimmer_override) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED); update_dimmer_labels(); }
-static void on_dmax_plus (lv_event_t *e) { (void)e; if (s_dimmer_max < 100u) s_dimmer_max   += 5u; if (s_dimmer_max > 100u) s_dimmer_max = 100u;             if (s_cb_dimmer_override) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED); update_dimmer_labels(); }
-static void on_dmin_minus(lv_event_t *e) { (void)e; if (s_dimmer_min > 0u)   s_dimmer_min   -= 5u;                                                            if (s_cb_dimmer_override) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED); update_dimmer_labels(); }
-static void on_dmin_plus (lv_event_t *e) { (void)e; if (s_dimmer_min < 100u) s_dimmer_min   += 5u; if (s_dimmer_min > s_dimmer_max) s_dimmer_min = s_dimmer_max; if (s_cb_dimmer_override) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED); update_dimmer_labels(); }
-static void on_drps_minus(lv_event_t *e) { (void)e; if (s_dimmer_rps_x10 > 1u) s_dimmer_rps_x10 -= 1u;                                                        if (s_cb_dimmer_override) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED); update_dimmer_labels(); }
-static void on_drps_plus (lv_event_t *e) { (void)e; if (s_dimmer_rps_x10 < 30u) s_dimmer_rps_x10 += 1u;                                                       if (s_cb_dimmer_override) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED); update_dimmer_labels(); }
+static void on_dmax_minus(lv_event_t *e) { (void)e; if (s_dimmer_max > 0u)   s_dimmer_max   -= 5u; if (s_dimmer_max < s_dimmer_min) s_dimmer_max = s_dimmer_min; update_dimmer_labels(); }
+static void on_dmax_plus (lv_event_t *e) { (void)e; if (s_dimmer_max < 100u) s_dimmer_max   += 5u; if (s_dimmer_max > 100u) s_dimmer_max = 100u;             update_dimmer_labels(); }
+static void on_dmin_minus(lv_event_t *e) { (void)e; if (s_dimmer_min > 0u)   s_dimmer_min   -= 5u;                                                            update_dimmer_labels(); }
+static void on_dmin_plus (lv_event_t *e) { (void)e; if (s_dimmer_min < 100u) s_dimmer_min   += 5u; if (s_dimmer_min > s_dimmer_max) s_dimmer_min = s_dimmer_max; update_dimmer_labels(); }
+static void on_drps_minus(lv_event_t *e) { (void)e; if (s_dimmer_rps_x10 > 1u) s_dimmer_rps_x10 -= 1u;                                                        update_dimmer_labels(); }
+static void on_drps_plus (lv_event_t *e) { (void)e; if (s_dimmer_rps_x10 < 30u) s_dimmer_rps_x10 += 1u;                                                       update_dimmer_labels(); }
 static void on_dhld_minus(lv_event_t *e) { (void)e; if (s_dimmer_holdoff_s > 0u)   s_dimmer_holdoff_s -= 1u; update_dimmer_labels(); }
 static void on_dhld_plus (lv_event_t *e) { (void)e; if (s_dimmer_holdoff_s < 255u) s_dimmer_holdoff_s += 1u; update_dimmer_labels(); }
-
-static void update_tab_style(bool sound_active)
-{
-    if (s_tab_sound_btn)
-        lv_obj_set_style_bg_color(s_tab_sound_btn,
-            sound_active ? lv_color_hex(0x1E88E5) : lv_color_hex(0x2A2A4A), 0);
-    if (s_tab_dimmer_btn)
-        lv_obj_set_style_bg_color(s_tab_dimmer_btn,
-            sound_active ? lv_color_hex(0x2A2A4A) : lv_color_hex(0x1E88E5), 0);
-}
-
-static void on_tab_sound(lv_event_t *e)
-{
-    (void)e;
-    if (s_sound_panel)  lv_obj_clear_flag(s_sound_panel,  LV_OBJ_FLAG_HIDDEN);
-    if (s_dimmer_panel) lv_obj_add_flag(s_dimmer_panel,   LV_OBJ_FLAG_HIDDEN);
-    update_tab_style(true);
-}
-
-static void on_tab_dimmer(lv_event_t *e)
-{
-    (void)e;
-    if (s_sound_panel)  lv_obj_add_flag(s_sound_panel,    LV_OBJ_FLAG_HIDDEN);
-    if (s_dimmer_panel) lv_obj_clear_flag(s_dimmer_panel, LV_OBJ_FLAG_HIDDEN);
-    update_tab_style(false);
-}
+static void on_dfad_minus(lv_event_t *e) { (void)e; if (s_dimmer_fadein_s > 0u)    s_dimmer_fadein_s  -= 1u; update_dimmer_labels(); }
+static void on_dfad_plus (lv_event_t *e) { (void)e; if (s_dimmer_fadein_s < 60u)   s_dimmer_fadein_s  += 1u; update_dimmer_labels(); }
 
 static void on_settings_cancel(lv_event_t *e)
 {
@@ -558,17 +515,13 @@ static void on_settings_cancel(lv_event_t *e)
         s_settings_song_id = 0;
         s_cb_loop          = NULL;
         s_cb_fixed_speed   = NULL;
+        s_cb_light_organ   = NULL;
         s_lbl_pitch_val    = NULL;
-        s_lbl_speed_val    = NULL;
-        s_cb_dimmer_override = NULL;
         s_lbl_dmax_val     = NULL;
         s_lbl_dmin_val     = NULL;
         s_lbl_drps_val     = NULL;
         s_lbl_dhld_val     = NULL;
-        s_sound_panel      = NULL;
-        s_dimmer_panel     = NULL;
-        s_tab_sound_btn    = NULL;
-        s_tab_dimmer_btn   = NULL;
+        s_lbl_dfad_val     = NULL;
     }
 }
 
@@ -580,21 +533,22 @@ static void on_settings_ok(lv_event_t *e)
     uint16_t song_id = s_settings_song_id;
 
     /* Collect checkbox states */
-    bool loop_en      = (lv_obj_get_state(s_cb_loop)        & LV_STATE_CHECKED) != 0;
-    bool speed_en     = (lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0;
-    bool dimmer_ov_en = s_cb_dimmer_override
-                        ? ((lv_obj_get_state(s_cb_dimmer_override) & LV_STATE_CHECKED) != 0)
-                        : false;
+    bool loop_en       = (lv_obj_get_state(s_cb_loop)        & LV_STATE_CHECKED) != 0;
+    bool speed_en      = (lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0;
+    bool light_org_en  = s_cb_light_organ
+                         ? ((lv_obj_get_state(s_cb_light_organ) & LV_STATE_CHECKED) != 0)
+                         : false;
 
     uint8_t flags = 0;
-    if (loop_en)      flags |= 0x01u;
-    if (speed_en)     flags |= 0x02u;
-    if (dimmer_ov_en) flags |= 0x08u;
+    if (loop_en)       flags |= 0x01u;
+    if (speed_en)      flags |= 0x02u;
+    if (light_org_en)  flags |= 0x10u;
     uint8_t fixed_speed_x100 = speed_en ? s_speed_x100 : 100u;
-    uint8_t d_max  = dimmer_ov_en ? s_dimmer_max       : 100u;
-    uint8_t d_min  = dimmer_ov_en ? s_dimmer_min       : 0u;
-    uint8_t d_rps  = dimmer_ov_en ? s_dimmer_rps_x10   : 14u;
+    uint8_t d_max  = s_dimmer_max;
+    uint8_t d_min  = s_dimmer_min;
+    uint8_t d_rps  = s_dimmer_rps_x10;
     uint8_t d_hld  = s_dimmer_holdoff_s;
+    uint8_t d_fad  = s_dimmer_fadein_s;
 
     /* Update local cache */
     uint8_t cache_idx = (uint8_t)(song_id - 1);
@@ -605,13 +559,14 @@ static void on_settings_ok(lv_event_t *e)
         s_settings[cache_idx].dimmer_min          = d_min;
         s_settings[cache_idx].dimmer_rps_ref_x10  = d_rps;
         s_settings[cache_idx].dimmer_holdoff_s    = d_hld;
+        s_settings[cache_idx].dimmer_fadein_s     = d_fad;
         s_settings[cache_idx].pitch_influence_pct = s_pitch_influence;
         s_settings[cache_idx].valid               = true;
     }
 
     /* Send to player and request fresh response so other views update */
     uart_comm_send_set_song_settings(song_id, flags, fixed_speed_x100,
-                                     d_max, d_min, d_rps, d_hld, s_pitch_influence);
+                                     d_max, d_min, d_rps, d_hld, d_fad, s_pitch_influence);
     uart_comm_send_song_settings_req(song_id);
     ESP_LOGI(TAG, "Settings saved: song_id=%u flags=0x%02X", song_id, flags);
 
@@ -621,17 +576,14 @@ static void on_settings_ok(lv_event_t *e)
     s_settings_song_id   = 0;
     s_cb_loop            = NULL;
     s_cb_fixed_speed     = NULL;
+    s_cb_light_organ     = NULL;
     s_lbl_pitch_val      = NULL;
     s_lbl_speed_val      = NULL;
-    s_cb_dimmer_override = NULL;
     s_lbl_dmax_val       = NULL;
     s_lbl_dmin_val       = NULL;
     s_lbl_drps_val       = NULL;
     s_lbl_dhld_val       = NULL;
-    s_sound_panel        = NULL;
-    s_dimmer_panel       = NULL;
-    s_tab_sound_btn      = NULL;
-    s_tab_dimmer_btn     = NULL;
+    s_lbl_dfad_val       = NULL;
 }
 
 static void create_settings_dialog(uint16_t song_id)
@@ -648,32 +600,31 @@ static void create_settings_dialog(uint16_t song_id)
         if (s_songs[i].id == song_id) { song_name = s_songs[i].name; break; }
     }
 
-    /* Request fresh settings from player (response updates the cache) */
-    uart_comm_send_song_settings_req(song_id);
-
-    /* Determine current values from cache (defaults until response arrives) */
+    /* Determine current values from cache (factory defaults if not yet saved). */
     uint8_t cache_idx = (uint8_t)(song_id - 1);
-    bool    cached_loop         = false;
-    bool    cached_speed        = false;
+    bool    cached_loop            = false;
+    bool    cached_speed           = false;
+    bool    cached_light_organ     = false;
     uint8_t cached_pitch_influence = 0u;
-    bool    cached_dimmer_ov    = false;
-    uint8_t cached_spd_x100     = 100u;
-    uint8_t cached_dmax         = 100u;
-    uint8_t cached_dmin         = 0u;
-    uint8_t cached_drps         = 14u;
-    uint8_t cached_dhld         = 0u;
+    uint8_t cached_spd_x100        = 100u;
+    uint8_t cached_dmax            = 100u;
+    uint8_t cached_dmin            = 0u;
+    uint8_t cached_drps            = 14u;
+    uint8_t cached_dhld            = 0u;
+    uint8_t cached_dfad            = 0u;
     if (cache_idx < SONGLIST_MAX_SONGS && s_settings[cache_idx].valid) {
-        cached_loop         = (s_settings[cache_idx].flags & 0x01u) != 0;
-        cached_speed        = (s_settings[cache_idx].flags & 0x02u) != 0;
+        cached_loop            = (s_settings[cache_idx].flags & 0x01u) != 0;
+        cached_speed           = (s_settings[cache_idx].flags & 0x02u) != 0;
+        cached_light_organ     = (s_settings[cache_idx].flags & 0x10u) != 0;
         cached_pitch_influence = s_settings[cache_idx].pitch_influence_pct;
-        cached_dimmer_ov    = (s_settings[cache_idx].flags & 0x08u) != 0;
-        cached_spd_x100     = s_settings[cache_idx].fixed_speed_x100;
+        cached_spd_x100        = s_settings[cache_idx].fixed_speed_x100;
         if (cached_spd_x100 < 70u || cached_spd_x100 > 140u) cached_spd_x100 = 100u;
         cached_dmax = s_settings[cache_idx].dimmer_max;
         cached_dmin = s_settings[cache_idx].dimmer_min;
         cached_drps = s_settings[cache_idx].dimmer_rps_ref_x10;
         if (cached_drps == 0u) cached_drps = 14u;
         cached_dhld = s_settings[cache_idx].dimmer_holdoff_s;
+        cached_dfad = s_settings[cache_idx].dimmer_fadein_s;
     }
     s_pitch_influence  = cached_pitch_influence;
     s_speed_x100       = cached_spd_x100;
@@ -681,6 +632,7 @@ static void create_settings_dialog(uint16_t song_id)
     s_dimmer_min       = cached_dmin;
     s_dimmer_rps_x10   = cached_drps;
     s_dimmer_holdoff_s = cached_dhld;
+    s_dimmer_fadein_s  = cached_dfad;
 
     s_settings_song_id = song_id;
 
@@ -692,8 +644,7 @@ static void create_settings_dialog(uint16_t song_id)
     lv_obj_set_style_border_width(s_settings_overlay, 0, 0);
     lv_obj_set_style_pad_all(s_settings_overlay, 0, 0);
     lv_obj_clear_flag(s_settings_overlay, LV_OBJ_FLAG_SCROLLABLE);
-    /* Tap on backdrop = cancel */
-    lv_obj_add_event_cb(s_settings_overlay, on_settings_cancel, LV_EVENT_CLICKED, NULL);
+    /* Backdrop blocks the songlist; only OK / Cancel buttons dismiss the dialog. */
 
     /* ── Dialog box ───────────────────────────────────────────────── */
     lv_obj_t *box = lv_obj_create(s_settings_overlay);
@@ -717,171 +668,33 @@ static void create_settings_dialog(uint16_t song_id)
     lv_obj_set_width(title, 452);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
 
-    /* ── Divider ──────────────────────────────────────────────────── */
-    lv_obj_t *line = lv_obj_create(box);
-    lv_obj_set_size(line, 452, 2);
-    lv_obj_set_style_bg_color(line, lv_color_hex(0x2A3A5A), 0);
-    lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(line, 0, 0);
-    lv_obj_set_style_radius(line, 0, 0);
-    lv_obj_align(line, LV_ALIGN_TOP_MID, 0, 36);
+    /* ── Scrollable content area (all settings in one vertical column) ── */
+    /* box inner: 452 × 402; title ~34px; buttons 44px fixed at bottom     */
+    lv_obj_t *content = lv_obj_create(box);
+    lv_obj_set_size(content, 452, 312);
+    lv_obj_align(content, LV_ALIGN_TOP_LEFT, 0, 40);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, 0, 0);
+    lv_obj_set_scroll_dir(content, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_ACTIVE);
 
-    /* ── Tab buttons: [Sound] [Dimmer] ───────────────────────────── */
-    s_tab_sound_btn = lv_button_create(box);
-    lv_obj_set_size(s_tab_sound_btn, 222, 36);
-    lv_obj_align(s_tab_sound_btn, LV_ALIGN_TOP_LEFT, 0, 44);
-    lv_obj_set_style_bg_color(s_tab_sound_btn, lv_color_hex(0x1E88E5), 0);
-    lv_obj_set_style_bg_color(s_tab_sound_btn, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(s_tab_sound_btn, 8, 0);
-    lv_obj_set_style_border_width(s_tab_sound_btn, 0, 0);
-    lv_obj_add_event_cb(s_tab_sound_btn, on_tab_sound, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_ts = lv_label_create(s_tab_sound_btn);
-    lv_label_set_text(lbl_ts, "Sound");
-    lv_obj_set_style_text_font(lbl_ts, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(lbl_ts, lv_color_white(), 0);
-    lv_obj_center(lbl_ts);
-
-    s_tab_dimmer_btn = lv_button_create(box);
-    lv_obj_set_size(s_tab_dimmer_btn, 222, 36);
-    lv_obj_align(s_tab_dimmer_btn, LV_ALIGN_TOP_RIGHT, 0, 44);
-    lv_obj_set_style_bg_color(s_tab_dimmer_btn, lv_color_hex(0x2A2A4A), 0);
-    lv_obj_set_style_bg_color(s_tab_dimmer_btn, lv_color_hex(0x3A3A5A), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(s_tab_dimmer_btn, 8, 0);
-    lv_obj_set_style_border_width(s_tab_dimmer_btn, 0, 0);
-    lv_obj_add_event_cb(s_tab_dimmer_btn, on_tab_dimmer, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_td = lv_label_create(s_tab_dimmer_btn);
-    lv_label_set_text(lbl_td, "Dimmer");
-    lv_obj_set_style_text_font(lbl_td, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(lbl_td, lv_color_white(), 0);
-    lv_obj_center(lbl_td);
-
-    /* ── Shared panel geometry: box content = 452×402, panels at y=88, h=256 ── */
-
-    /* Sound panel (visible by default) */
-    s_sound_panel = lv_obj_create(box);
-    lv_obj_set_size(s_sound_panel, 452, 256);
-    lv_obj_align(s_sound_panel, LV_ALIGN_TOP_LEFT, 0, 88);
-    lv_obj_set_style_bg_opa(s_sound_panel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_sound_panel, 0, 0);
-    lv_obj_set_style_pad_all(s_sound_panel, 0, 0);
-    lv_obj_clear_flag(s_sound_panel, LV_OBJ_FLAG_SCROLLABLE);
-
-    /* Dimmer panel (hidden by default) */
-    s_dimmer_panel = lv_obj_create(box);
-    lv_obj_set_size(s_dimmer_panel, 452, 256);
-    lv_obj_align(s_dimmer_panel, LV_ALIGN_TOP_LEFT, 0, 88);
-    lv_obj_set_style_bg_opa(s_dimmer_panel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_dimmer_panel, 0, 0);
-    lv_obj_set_style_pad_all(s_dimmer_panel, 0, 0);
-    lv_obj_clear_flag(s_dimmer_panel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_dimmer_panel, LV_OBJ_FLAG_HIDDEN);
-
-    /* ── Sound panel content ──────────────────────────────────────── */
-    s_cb_loop = lv_checkbox_create(s_sound_panel);
+    /* ── Sound controls ───────────────────────────────────────────── */
+    s_cb_loop = lv_checkbox_create(content);
     lv_checkbox_set_text(s_cb_loop, "Loop");
     if (cached_loop) lv_obj_add_state(s_cb_loop, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_loop, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_loop, lv_color_hex(0xE0E0FF), 0);
     lv_obj_align(s_cb_loop, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    s_cb_fixed_speed = lv_checkbox_create(s_sound_panel);
-    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed");
+    s_cb_fixed_speed = lv_checkbox_create(content);
+    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed (ignore crank)");
     if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 36);
+    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 38);
 
-    /* Speed row: [-] 1.00x [+] compact at y=72 */
-    {
-        /* row = 36+8+90+8+36 = 178 px, centred in 452 */
-        const int16_t SX = (452 - 178) / 2;  /* = 137 */
-        lv_obj_t *bm = lv_button_create(s_sound_panel);
-        lv_obj_set_size(bm, 36, 36);
-        lv_obj_align(bm, LV_ALIGN_TOP_LEFT, SX, 72);
-        lv_obj_set_style_bg_color(bm, lv_color_hex(0x1E88E5), 0);
-        lv_obj_set_style_bg_color(bm, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
-        lv_obj_set_style_radius(bm, 6, 0);
-        lv_obj_set_style_border_width(bm, 0, 0);
-        lv_obj_add_event_cb(bm, on_speed_minus, LV_EVENT_CLICKED, NULL);
-        lv_obj_t *lm = lv_label_create(bm);
-        lv_label_set_text(lm, "-");
-        lv_obj_set_style_text_font(lm, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(lm, lv_color_white(), 0);
-        lv_obj_center(lm);
-
-        s_lbl_speed_val = lv_label_create(s_sound_panel);
-        lv_obj_set_size(s_lbl_speed_val, 90, 36);
-        lv_obj_align(s_lbl_speed_val, LV_ALIGN_TOP_LEFT, SX + 44, 72);
-        lv_obj_set_style_text_font(s_lbl_speed_val, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(s_lbl_speed_val, lv_color_hex(0xE0E0FF), 0);
-        lv_obj_set_style_text_align(s_lbl_speed_val, LV_TEXT_ALIGN_CENTER, 0);
-        update_speed_label();
-
-        lv_obj_t *bp = lv_button_create(s_sound_panel);
-        lv_obj_set_size(bp, 36, 36);
-        lv_obj_align(bp, LV_ALIGN_TOP_LEFT, SX + 44 + 90 + 8, 72);
-        lv_obj_set_style_bg_color(bp, lv_color_hex(0x1E88E5), 0);
-        lv_obj_set_style_bg_color(bp, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
-        lv_obj_set_style_radius(bp, 6, 0);
-        lv_obj_set_style_border_width(bp, 0, 0);
-        lv_obj_add_event_cb(bp, on_speed_plus, LV_EVENT_CLICKED, NULL);
-        lv_obj_t *lp = lv_label_create(bp);
-        lv_label_set_text(lp, "+");
-        lv_obj_set_style_text_font(lp, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(lp, lv_color_white(), 0);
-        lv_obj_center(lp);
-    }
-
-    {
-        lv_obj_t *lbl_p = lv_label_create(s_sound_panel);
-        lv_label_set_text(lbl_p, "Pitch influence");
-        lv_obj_set_style_text_font(lbl_p, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(lbl_p, lv_color_hex(0xE0E0FF), 0);
-        lv_obj_align(lbl_p, LV_ALIGN_TOP_LEFT, 0, 124);
-        lv_obj_t *bm_p = lv_button_create(s_sound_panel);
-        lv_obj_set_size(bm_p, 36, 36);
-        lv_obj_align(bm_p, LV_ALIGN_TOP_LEFT, 200, 116);
-        lv_obj_set_style_bg_color(bm_p, lv_color_hex(0x1E88E5), 0);
-        lv_obj_set_style_bg_color(bm_p, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
-        lv_obj_set_style_radius(bm_p, 6, 0);
-        lv_obj_set_style_border_width(bm_p, 0, 0);
-        lv_obj_add_event_cb(bm_p, on_pitch_minus, LV_EVENT_CLICKED, NULL);
-        lv_obj_t *lm_p = lv_label_create(bm_p);
-        lv_label_set_text(lm_p, "-");
-        lv_obj_set_style_text_font(lm_p, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(lm_p, lv_color_white(), 0);
-        lv_obj_center(lm_p);
-        s_lbl_pitch_val = lv_label_create(s_sound_panel);
-        lv_obj_set_size(s_lbl_pitch_val, 72, 36);
-        lv_obj_align(s_lbl_pitch_val, LV_ALIGN_TOP_LEFT, 240, 116);
-        lv_obj_set_style_text_font(s_lbl_pitch_val, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(s_lbl_pitch_val, lv_color_hex(0xE0E0FF), 0);
-        lv_obj_set_style_text_align(s_lbl_pitch_val, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_t *bp_p = lv_button_create(s_sound_panel);
-        lv_obj_set_size(bp_p, 36, 36);
-        lv_obj_align(bp_p, LV_ALIGN_TOP_LEFT, 316, 116);
-        lv_obj_set_style_bg_color(bp_p, lv_color_hex(0x1E88E5), 0);
-        lv_obj_set_style_bg_color(bp_p, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
-        lv_obj_set_style_radius(bp_p, 6, 0);
-        lv_obj_set_style_border_width(bp_p, 0, 0);
-        lv_obj_add_event_cb(bp_p, on_pitch_plus, LV_EVENT_CLICKED, NULL);
-        lv_obj_t *lp_p = lv_label_create(bp_p);
-        lv_label_set_text(lp_p, "+");
-        lv_obj_set_style_text_font(lp_p, &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(lp_p, lv_color_white(), 0);
-        lv_obj_center(lp_p);
-        update_pitch_label();
-    }
-
-    /* ── Dimmer panel content ─────────────────────────────────────── */
-    s_cb_dimmer_override = lv_checkbox_create(s_dimmer_panel);
-    lv_checkbox_set_text(s_cb_dimmer_override, "Custom dimmer");
-    if (cached_dimmer_ov) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED);
-    lv_obj_set_style_text_font(s_cb_dimmer_override, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_cb_dimmer_override, lv_color_hex(0xFFD060), 0);
-    lv_obj_align(s_cb_dimmer_override, LV_ALIGN_TOP_LEFT, 0, 0);
-
-    /* Spinner row macro: creates label + [-] + value label + [+] inside parent */
+    /* Reuse MAKE_DIMMER_ROW for speed and pitch spinners */
 #define MAKE_DIMMER_ROW(par, ypos, lbl_txt, on_m, on_p, lbl_ref)                    \
     do {                                                                              \
         lv_obj_t *_rl = lv_label_create(par);                                        \
@@ -908,7 +721,7 @@ static void create_settings_dialog(uint16_t song_id)
         lv_obj_set_style_text_font((lbl_ref), &lv_font_montserrat_20, 0);              \
         lv_obj_set_style_text_color((lbl_ref), lv_color_hex(0xE0E0FF), 0);             \
         lv_obj_set_style_text_align((lbl_ref), LV_TEXT_ALIGN_CENTER, 0);               \
-        lv_obj_t *_rp = lv_button_create(par);                                        \
+        lv_obj_t *_rp = lv_button_create(par);                                         \
         lv_obj_set_size(_rp, 36, 36);                                                  \
         lv_obj_align(_rp, LV_ALIGN_TOP_LEFT, 316, (ypos));                             \
         lv_obj_set_style_bg_color(_rp, lv_color_hex(0x1E88E5), 0);                    \
@@ -916,17 +729,66 @@ static void create_settings_dialog(uint16_t song_id)
         lv_obj_set_style_radius(_rp, 6, 0);                                            \
         lv_obj_set_style_border_width(_rp, 0, 0);                                      \
         lv_obj_add_event_cb(_rp, on_p, LV_EVENT_CLICKED, NULL);                        \
-        lv_obj_t *_rpl = lv_label_create(_rp);                                        \
-        lv_label_set_text(_rpl, "+");                                                  \
-        lv_obj_set_style_text_font(_rpl, &lv_font_montserrat_20, 0);                  \
-        lv_obj_set_style_text_color(_rpl, lv_color_white(), 0);                        \
-        lv_obj_center(_rpl);                                                           \
+        lv_obj_t *_rpl = lv_label_create(_rp);                                         \
+        lv_label_set_text(_rpl, "+");                                                   \
+        lv_obj_set_style_text_font(_rpl, &lv_font_montserrat_20, 0);                   \
+        lv_obj_set_style_text_color(_rpl, lv_color_white(), 0);                         \
+        lv_obj_center(_rpl);                                                            \
     } while(0)
 
-    MAKE_DIMMER_ROW(s_dimmer_panel,  42, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
-    MAKE_DIMMER_ROW(s_dimmer_panel,  84, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
-    MAKE_DIMMER_ROW(s_dimmer_panel, 126, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
-    MAKE_DIMMER_ROW(s_dimmer_panel, 168, "Holdoff",     on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
+    MAKE_DIMMER_ROW(content, 76,  "Speed \xc3\x97",  on_speed_minus, on_speed_plus, s_lbl_speed_val);
+    update_speed_label();
+    MAKE_DIMMER_ROW(content, 118, "Pitch %",  on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
+    update_pitch_label();
+
+    /* ── Separator ────────────────────────────────────────────────── */
+    {
+        lv_obj_t *sep = lv_obj_create(content);
+        lv_obj_set_size(sep, 452, 1);
+        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 164);
+        lv_obj_set_style_bg_color(sep, lv_color_hex(0x2A3A5A), 0);
+        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(sep, 0, 0);
+        lv_obj_set_style_pad_all(sep, 0, 0);
+        lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *dim_lbl = lv_label_create(content);
+        lv_label_set_text(dim_lbl, "Dimmer");
+        lv_obj_set_style_text_font(dim_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(dim_lbl, lv_color_hex(0x6d6d8a), 0);
+        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 170);
+    }
+
+    /* ── Dimmer controls ──────────────────────────────────────────── */
+    s_cb_light_organ = lv_checkbox_create(content);
+    lv_checkbox_set_text(s_cb_light_organ, "Light organ (FFT)");
+    if (cached_light_organ) lv_obj_add_state(s_cb_light_organ, LV_STATE_CHECKED);
+    lv_obj_set_style_text_font(s_cb_light_organ, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_cb_light_organ, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 196);
+
+    MAKE_DIMMER_ROW(content, 234, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
+    MAKE_DIMMER_ROW(content, 276, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
+    MAKE_DIMMER_ROW(content, 318, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
+
+    /* ── Separator ────────────────────────────────────────────────── */
+    {
+        lv_obj_t *sep2 = lv_obj_create(content);
+        lv_obj_set_size(sep2, 452, 1);
+        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 384);
+        lv_obj_set_style_bg_color(sep2, lv_color_hex(0x2A3A5A), 0);
+        lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(sep2, 0, 0);
+        lv_obj_set_style_pad_all(sep2, 0, 0);
+        lv_obj_clear_flag(sep2, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *hld_lbl = lv_label_create(content);
+        lv_label_set_text(hld_lbl, "Lamp timing");
+        lv_obj_set_style_text_font(hld_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(hld_lbl, lv_color_hex(0x6d6d8a), 0);
+        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 390);
+    }
+
+    MAKE_DIMMER_ROW(content, 416, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
+    MAKE_DIMMER_ROW(content, 458, "Fade-in",     on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
     update_dimmer_labels();
 
 #undef MAKE_DIMMER_ROW
@@ -998,147 +860,20 @@ uint16_t ui_songlist_get_next_song_id(uint16_t current_id)
     if (s_song_count == 0) return 0;
     for (uint8_t i = 0; i < s_song_count; i++) {
         if (s_songs[i].id == current_id) {
-            return s_songs[(i + 1) % s_song_count].id;
+            uint8_t next = (i + 1) % s_song_count;
+            return s_songs[next].id;
         }
     }
     return s_songs[0].id;
 }
 
-static void send_play_song(uint16_t song_id)
-{
-    uart_comm_send_play_song(song_id);
-}
-
 /* =========================================================================
- * lv_async_call callbacks – executed inside the LVGL task
- * ========================================================================= */
-
-static void async_cb_update_list(void *user_data)
-{
-    async_songlist_payload_t *p = (async_songlist_payload_t *)user_data;
-
-    s_song_count = 0;
-    const uint8_t *ptr = p->data;
-    const uint8_t *end = p->data + p->len;
-
-    while (ptr + 2 <= end && s_song_count < SONGLIST_MAX_SONGS) {
-        uint16_t song_id = (uint16_t)ptr[0] | ((uint16_t)ptr[1] << 8);
-        ptr += 2;
-
-        /* End-of-list: song_id == 0 and next byte is '\0' */
-        if (song_id == 0 && ptr < end && *ptr == '\0') {
-            break;
-        }
-
-        /* Copy null-terminated name */
-        const uint8_t *name_start = ptr;
-        while (ptr < end && *ptr != '\0') ptr++;
-        if (ptr >= end) break; /* Malformed: no null terminator */
-
-        size_t name_len = (size_t)(ptr - name_start);
-        if (name_len >= MAX_SONG_NAME_LEN) name_len = MAX_SONG_NAME_LEN - 1;
-
-        s_songs[s_song_count].id = song_id;
-        memcpy(s_songs[s_song_count].name, name_start, name_len);
-        s_songs[s_song_count].name[name_len] = '\0';
-        for (char *c = s_songs[s_song_count].name; *c; c++) { if (*c == '_') *c = ' '; }
-        s_song_count++;
-        ptr++; /* skip '\0' terminator */
-    }
-
-    ESP_LOGI(TAG, "Song list updated: %u songs", s_song_count);
-    /* Invalidate the settings cache whenever the song list changes */
-    for (int i = 0; i < SONGLIST_MAX_SONGS; i++) {
-        s_settings[i].valid = false;
-    }
-    rebuild_list();
-
-    free(p->data);
-    free(p);
-}
-
-static void async_cb_encoder_move(void *user_data)
-{
-    async_encoder_move_t *p = (async_encoder_move_t *)user_data;
-    focus_item(s_focused_idx + p->steps);
-    free(p);
-}
-
-static void async_cb_encoder_btn(void *user_data)
-{
-    (void)user_data;
-    if (s_song_count == 0) return;
-
-    lv_obj_t *focused = lv_group_get_focused(s_group);
-    if (focused) {
-        uint16_t song_id = (uint16_t)(uintptr_t)lv_obj_get_user_data(focused);
-        ESP_LOGI(TAG, "Encoder button: selecting song_id=%u", song_id);
-        send_play_song(song_id);
-    }
-}
-
-/* =========================================================================
- * Public async bridges (called from UART task, Core 0)
- * ========================================================================= */
-
-void ui_songlist_update_async(const uint8_t *data, uint16_t len)
-{
-    if (!s_screen) {
-        ESP_LOGW(TAG, "update_async called before ui_songlist_create()");
-        return;
-    }
-
-    async_songlist_payload_t *p = malloc(sizeof(async_songlist_payload_t));
-    if (!p) {
-        ESP_LOGE(TAG, "OOM in update_async");
-        return;
-    }
-    p->data = malloc(len);
-    if (!p->data) {
-        ESP_LOGE(TAG, "OOM in update_async (data buffer)");
-        free(p);
-        return;
-    }
-    memcpy(p->data, data, len);
-    p->len = len;
-
-    lv_lock();
-    lv_async_call(async_cb_update_list, p);
-    lv_unlock();
-}
-
-void ui_songlist_encoder_move_async(int8_t steps)
-{
-    if (!s_screen) return;
-
-    async_encoder_move_t *p = malloc(sizeof(async_encoder_move_t));
-    if (!p) {
-        ESP_LOGE(TAG, "OOM in encoder_move_async");
-        return;
-    }
-    p->steps = steps;
-    lv_lock();
-    lv_async_call(async_cb_encoder_move, p);
-    lv_unlock();
-}
-
-void ui_songlist_encoder_btn_async(void)
-{
-    if (!s_screen) return;
-    lv_lock();
-    lv_async_call(async_cb_encoder_btn, NULL);
-    lv_unlock();
-}
-
-/* =========================================================================
- * Screen load helpers
+ * Lifecycle
  * ========================================================================= */
 
 void ui_songlist_show(void)
 {
-    if (s_screen) {
-        lv_screen_load_anim(s_screen, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 250, 0, false);
-    }
+    lv_screen_load(s_screen);
 }
 
 static void async_cb_show_songlist(void *arg)
@@ -1155,7 +890,104 @@ void ui_songlist_show_async(void)
 }
 
 /* =========================================================================
- * Song-settings async delivery (UART task → LVGL task)
+ * Song-list update (UART task → LVGL task)
+ * ========================================================================= */
+
+static void async_cb_update_songlist(void *user_data)
+{
+    async_songlist_payload_t *p = (async_songlist_payload_t *)user_data;
+
+    s_song_count = 0;
+    memset(s_settings, 0, sizeof(s_settings));
+
+    const uint8_t *ptr = p->data;
+    const uint8_t *end = p->data + p->len;
+
+    while (ptr + 2 < end) {
+        uint16_t id = (uint16_t)ptr[0] | ((uint16_t)ptr[1] << 8);
+        ptr += 2;
+        if (id == 0) break; /* end-of-list sentinel */
+
+        const uint8_t *name_start = ptr;
+        while (ptr < end && *ptr != '\0') ptr++;
+        if (ptr >= end) break;
+        ptr++; /* skip '\0' */
+
+        if (s_song_count < SONGLIST_MAX_SONGS) {
+            s_songs[s_song_count].id = id;
+            size_t name_len = (size_t)(ptr - name_start - 1);
+            if (name_len >= MAX_SONG_NAME_LEN) name_len = MAX_SONG_NAME_LEN - 1;
+            memcpy(s_songs[s_song_count].name, name_start, name_len);
+            s_songs[s_song_count].name[name_len] = '\0';
+            s_song_count++;
+        }
+    }
+
+    free(p->data);
+    free(p);
+
+    rebuild_list();
+    ESP_LOGI(TAG, "Song list updated: %u songs", s_song_count);
+}
+
+void ui_songlist_update_async(const uint8_t *data, uint16_t len)
+{
+    if (!s_screen || !data || len == 0) return;
+
+    async_songlist_payload_t *p = malloc(sizeof(async_songlist_payload_t));
+    if (!p) { ESP_LOGE(TAG, "OOM in update_async"); return; }
+
+    p->data = malloc(len);
+    if (!p->data) { free(p); ESP_LOGE(TAG, "OOM in update_async data"); return; }
+
+    memcpy(p->data, data, len);
+    p->len = len;
+
+    lv_lock();
+    lv_async_call(async_cb_update_songlist, p);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * Encoder async bridges
+ * ========================================================================= */
+
+static void async_cb_encoder_move(void *user_data)
+{
+    async_encoder_move_t *p = (async_encoder_move_t *)user_data;
+    focus_item(s_focused_idx + p->steps);
+    free(p);
+}
+
+void ui_songlist_encoder_move_async(int8_t steps)
+{
+    if (!s_screen) return;
+    async_encoder_move_t *p = malloc(sizeof(async_encoder_move_t));
+    if (!p) return;
+    p->steps = steps;
+    lv_lock();
+    lv_async_call(async_cb_encoder_move, p);
+    lv_unlock();
+}
+
+static void async_cb_encoder_btn(void *user_data)
+{
+    (void)user_data;
+    if (s_focused_idx >= 0 && s_focused_idx < (int16_t)s_song_count) {
+        send_play_song(s_songs[s_focused_idx].id);
+    }
+}
+
+void ui_songlist_encoder_btn_async(void)
+{
+    if (!s_screen) return;
+    lv_lock();
+    lv_async_call(async_cb_encoder_btn, NULL);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * Song-settings delivery (UART task → LVGL task)
  * ========================================================================= */
 
 static void async_cb_song_settings(void *user_data)
@@ -1171,40 +1003,13 @@ static void async_cb_song_settings(void *user_data)
         s_settings[idx].dimmer_min          = p->dimmer_min;
         s_settings[idx].dimmer_rps_ref_x10  = p->dimmer_rps_ref_x10;
         s_settings[idx].dimmer_holdoff_s    = p->dimmer_holdoff_s;
+        s_settings[idx].dimmer_fadein_s     = p->dimmer_fadein_s;
         s_settings[idx].pitch_influence_pct = p->pitch_influence_pct;
         s_settings[idx].valid               = true;
     }
 
-    /* If the dialog for this song is currently open, refresh the checkboxes */
-    if (s_settings_overlay && s_settings_song_id == p->song_id) {
-        if (s_cb_loop) {
-            if (p->flags & 0x01u) lv_obj_add_state(s_cb_loop, LV_STATE_CHECKED);
-            else                  lv_obj_clear_state(s_cb_loop, LV_STATE_CHECKED);
-        }
-        if (s_cb_fixed_speed) {
-            if (p->flags & 0x02u) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
-            else                  lv_obj_clear_state(s_cb_fixed_speed, LV_STATE_CHECKED);
-        }
-        if (s_lbl_pitch_val) {
-            s_pitch_influence = p->pitch_influence_pct;
-            update_pitch_label();
-        }
-        if (s_cb_dimmer_override) {
-            if (p->flags & 0x08u) lv_obj_add_state(s_cb_dimmer_override, LV_STATE_CHECKED);
-            else                  lv_obj_clear_state(s_cb_dimmer_override, LV_STATE_CHECKED);
-        }
-        if (s_lbl_speed_val) {
-            uint8_t spd = p->fixed_speed_x100;
-            if (spd < 70u || spd > 140u) spd = 100u;
-            s_speed_x100 = spd;
-            update_speed_label();
-        }
-        s_dimmer_max       = p->dimmer_max;
-        s_dimmer_min       = p->dimmer_min;
-        s_dimmer_rps_x10   = p->dimmer_rps_ref_x10 ? p->dimmer_rps_ref_x10 : 14u;
-        s_dimmer_holdoff_s = p->dimmer_holdoff_s;
-        update_dimmer_labels();
-    }
+    /* Cache-only update. Never push to the live dialog –
+     * that would race with the user's in-progress edits. */
 
     free(p);
 }
@@ -1212,7 +1017,7 @@ static void async_cb_song_settings(void *user_data)
 void ui_songlist_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fixed_speed_x100,
                                      uint8_t dimmer_max, uint8_t dimmer_min,
                                      uint8_t dimmer_rps_ref_x10, uint8_t dimmer_holdoff_s,
-                                     uint8_t pitch_influence_pct)
+                                     uint8_t dimmer_fadein_s, uint8_t pitch_influence_pct)
 {
     if (!s_screen) return;
 
@@ -1228,12 +1033,17 @@ void ui_songlist_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fi
     p->dimmer_min           = dimmer_min;
     p->dimmer_rps_ref_x10   = dimmer_rps_ref_x10;
     p->dimmer_holdoff_s     = dimmer_holdoff_s;
+    p->dimmer_fadein_s      = dimmer_fadein_s;
     p->pitch_influence_pct  = pitch_influence_pct;
 
     lv_lock();
     lv_async_call(async_cb_song_settings, p);
     lv_unlock();
 }
+
+/* =========================================================================
+ * BT / WiFi state sync
+ * ========================================================================= */
 
 static void async_cb_update_bt_enabled(void *user_data)
 {
@@ -1248,4 +1058,29 @@ void ui_songlist_update_bt_enabled_async(bool enabled)
     lv_lock();
     lv_async_call(async_cb_update_bt_enabled, (void *)(uintptr_t)enabled);
     lv_unlock();
+}
+
+static void async_cb_update_wifi_enabled(void *user_data)
+{
+    bool enabled = (bool)(uintptr_t)user_data;
+    s_wifi_enabled = enabled;
+    if (s_wifi_btn) update_wifi_btn_style();
+}
+
+void ui_songlist_update_wifi_enabled_async(bool enabled)
+{
+    if (!s_screen) return;
+    lv_lock();
+    lv_async_call(async_cb_update_wifi_enabled, (void *)(uintptr_t)enabled);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * send_play_song (internal helper used by list-item click and encoder btn)
+ * ========================================================================= */
+
+static void send_play_song(uint16_t song_id)
+{
+    ESP_LOGI(TAG, "send_play_song: id=%u", song_id);
+    uart_comm_send_play_song(song_id);
 }

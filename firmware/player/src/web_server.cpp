@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <sys/param.h>
 #include <dirent.h>
@@ -61,7 +62,8 @@ static const char *TAG = "web_server";
 #define MAX_BASENAME_LEN  44   /* max basename chars (excl. .wav extension) */
 
 /* ── State ─────────────────────────────────────────────────────────── */
-static rescan_cb_t    s_rescan_cb = nullptr;
+static rescan_cb_t           s_rescan_cb         = nullptr;
+static web_song_settings_cb_t s_song_settings_cb  = nullptr;
 static httpd_handle_t s_server    = nullptr;
 static bool           s_running   = false;
 
@@ -194,22 +196,27 @@ static esp_err_t files_get_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, "[");
 
     bool first = true;
+    int  n_total = 0, n_skipped_type = 0, n_skipped_ext = 0, n_sent = 0;
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_type != DT_REG) continue;
+        n_total++;
+        ESP_LOGI(TAG, "readdir: '%s'  d_type=%u", entry->d_name, (unsigned)entry->d_type);
+        /* Skip non-regular entries (d_type may be DT_UNKNOWN on FAT; use extension filter below) */
+        if (entry->d_type != DT_REG && entry->d_type != DT_UNKNOWN) { n_skipped_type++; continue; }
         const char *name = entry->d_name;
         size_t      nlen = strlen(name);
-        if (nlen < 5) continue;
+        if (nlen < 5) { n_skipped_ext++; continue; }
         const char *ext = name + nlen - 4;
         if (!(ext[0] == '.' &&
               (ext[1] == 'w' || ext[1] == 'W') &&
               (ext[2] == 'a' || ext[2] == 'A') &&
-              (ext[3] == 'v' || ext[3] == 'V'))) continue;
+              (ext[3] == 'v' || ext[3] == 'V'))) { n_skipped_ext++; continue; }
 
         char path[256];
         build_path(path, sizeof(path), name);
         struct stat st = {};
         long sz = (stat(path, &st) == 0) ? (long)st.st_size : 0L;
+        ESP_LOGI(TAG, "  -> WAV: '%s'  size=%ld", name, sz);
 
         /* JSON-escape the filename (handles quotes and backslashes) */
         char esc[300] = {};
@@ -226,8 +233,11 @@ static esp_err_t files_get_handler(httpd_req_t *req)
                  first ? "" : ",", esc, sz);
         httpd_resp_sendstr_chunk(req, entry_buf);
         first = false;
+        n_sent++;
     }
     closedir(dir);
+    ESP_LOGI(TAG, "files_get: total=%d skipped_type=%d skipped_ext=%d sent=%d",
+             n_total, n_skipped_type, n_skipped_ext, n_sent);
 
     httpd_resp_sendstr_chunk(req, "]");
     httpd_resp_sendstr_chunk(req, nullptr); /* terminate chunked response */
@@ -506,7 +516,8 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
              "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
              "\"release_ticks\":%u,\"vol_fade_step\":%u,"
-             "\"dimmer_max\":%u,\"dimmer_min\":%u,\"dimmer_rps_ref\":%.2f,"
+             "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
+             "\"lo_decay_rate\":%.4f,"
              "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
@@ -514,9 +525,9 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (double)g_crank_cfg.start_thresh,
              (unsigned)g_crank_cfg.release_ticks,
              (unsigned)g_crank_cfg.vol_fade_step,
-             (unsigned)g_crank_cfg.dimmer_max,
-             (unsigned)g_crank_cfg.dimmer_min,
-             (double)g_crank_cfg.dimmer_rps_ref,
+             (double)g_crank_cfg.lo_bass_weight,
+             (double)g_crank_cfg.lo_mid_weight,
+             (double)g_crank_cfg.lo_decay_rate,
              (unsigned)g_crank_cfg.pot_cal_lo,
              (unsigned)g_crank_cfg.pot_cal_mid,
              (unsigned)g_crank_cfg.pot_cal_hi);
@@ -571,9 +582,9 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_f (root, "start_thresh",  0.200f, 1.200f, &nc.start_thresh);
     read_u8(root, "release_ticks", 0, 10, &nc.release_ticks);
     read_u8(root, "vol_fade_step", 1, 10, &nc.vol_fade_step);
-    read_u8(root, "dimmer_max",    0, 100, &nc.dimmer_max);
-    read_u8(root, "dimmer_min",    0, 100, &nc.dimmer_min);
-    read_f (root, "dimmer_rps_ref", 0.5f, 3.0f, &nc.dimmer_rps_ref);
+    read_f (root, "lo_bass_weight", 1.0f, 200.0f, &nc.lo_bass_weight);
+    read_f (root, "lo_mid_weight",  0.0f,  50.0f, &nc.lo_mid_weight);
+    read_f (root, "lo_decay_rate",  0.990f, 0.999f, &nc.lo_decay_rate);
     cJSON_Delete(root);
 
     if (nc.start_thresh <= nc.stop_thresh) {
@@ -674,7 +685,9 @@ static esp_err_t pot_cal_post_handler(httpd_req_t *req)
 static esp_err_t player_update_post_handler(httpd_req_t *req)
 {
     int total = (int)req->content_len;
+    ESP_LOGI(TAG, "player_update: content_len=%d", total);
     if (total <= 0 || total > 4 * 1024 * 1024) {
+        ESP_LOGE(TAG, "player_update: bad content_len=%d (must be 1–4 MB)", total);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "Content-Length required and must be 1\xe2\x80\x93" "4 MB");
         return ESP_FAIL;
@@ -911,21 +924,23 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
     song_settings_t s;
     song_settings_load(wav_path, &s);
 
-    char buf[256];
+    char buf[320];
     snprintf(buf, sizeof(buf),
              "{\"loop\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
              "\"pitch_influence\":%u,"
-             "\"dimmer_override\":%s,\"dimmer_max\":%u,\"dimmer_min\":%u,"
-             "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u}",
+             "\"dimmer_max\":%u,\"dimmer_min\":%u,"
+             "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u,\"dimmer_fadein_s\":%u,"
+             "\"light_organ\":%s}",
              s.loop ? "true" : "false",
              (s.fixed_speed > 0.0f) ? "true" : "false",
              (s.fixed_speed > 0.0f) ? (double)s.fixed_speed : 1.0,
              (unsigned)s.pitch_influence,
-             s.dimmer_override ? "true" : "false",
              (unsigned)s.dimmer_max,
              (unsigned)s.dimmer_min,
              (double)s.dimmer_rps_ref,
-             (unsigned)s.dimmer_holdoff_s);
+             (unsigned)s.dimmer_holdoff_s,
+             (unsigned)s.dimmer_fadein_s,
+             s.light_organ ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
@@ -962,7 +977,6 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     bool    fixed_en  = false;
     float   fixed_spd = 1.0f;
     uint8_t pitch     = 0;
-    bool    dim_ov    = false;
     uint8_t d_max     = 100;
     uint8_t d_min     = 0;
     float   d_rps     = 1.4f;
@@ -977,8 +991,6 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (cJSON_IsNumber(it)) { float v = (float)it->valuedouble; if (v >= 0.5f && v <= 2.0f) fixed_spd = v; }
     it = cJSON_GetObjectItemCaseSensitive(root, "pitch_influence");
     if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; pitch = (uint8_t)(v < 0 ? 0 : v > 100 ? 100 : v); }
-    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_override");
-    if (cJSON_IsBool(it)) dim_ov = cJSON_IsTrue(it);
     it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_max");
     if (cJSON_IsNumber(it) && it->valueint >= 0 && it->valueint <= 100) d_max = (uint8_t)it->valueint;
     it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_min");
@@ -987,6 +999,12 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (cJSON_IsNumber(it)) { float v = (float)it->valuedouble; if (v >= 0.1f && v <= 5.0f) d_rps = v; }
     it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_holdoff_s");
     if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; d_hoff = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+    uint8_t d_fadein = 0;
+    it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_fadein_s");
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; d_fadein = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+    bool light_organ = false;
+    it = cJSON_GetObjectItemCaseSensitive(root, "light_organ");
+    if (cJSON_IsBool(it)) light_organ = cJSON_IsTrue(it);
     cJSON_Delete(root);
 
     char wav_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
@@ -994,8 +1012,8 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     char json_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 6];
     wav_to_json_path(wav_path, json_path, sizeof(json_path));
 
-    /* All-default → delete sidecar so the player uses built-in defaults. */
-    if (!loop && !fixed_en && pitch == 0 && !dim_ov && d_hoff == 0) {
+    bool dimmer_default = (d_max == 100 && d_min == 0 && fabsf(d_rps - 1.4f) <= 0.05f);
+    if (!loop && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ) {
         remove(json_path);
         ESP_LOGI(TAG, "Song settings cleared via web for %s", fname);
         httpd_resp_sendstr(req, "OK");
@@ -1010,13 +1028,14 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(out, "loop", loop);
     if (fixed_en)  cJSON_AddNumberToObject(out, "fixed_speed", (double)fixed_spd);
     if (pitch > 0) cJSON_AddNumberToObject(out, "pitch_influence", pitch);
-    if (dim_ov) {
-        cJSON_AddBoolToObject(out, "dimmer_override", true);
+    if (!dimmer_default) {
         cJSON_AddNumberToObject(out, "dimmer_max", d_max);
         cJSON_AddNumberToObject(out, "dimmer_min", d_min);
         cJSON_AddNumberToObject(out, "dimmer_rps_ref", (double)d_rps);
     }
     if (d_hoff > 0) cJSON_AddNumberToObject(out, "dimmer_holdoff_s", d_hoff);
+    if (d_fadein > 0) cJSON_AddNumberToObject(out, "dimmer_fadein_s", d_fadein);
+    if (light_organ) cJSON_AddBoolToObject(out, "light_organ", true);
 
     char *js = cJSON_PrintUnformatted(out);
     cJSON_Delete(out);
@@ -1035,6 +1054,16 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "Song settings saved via web for %s", fname);
+
+    /* Live-apply to the running song if the callback is registered */
+    if (s_song_settings_cb) {
+        float fixed_speed_f = fixed_en ? fixed_spd : 0.0f;
+        s_song_settings_cb(wav_path, loop, fixed_speed_f, pitch,
+                           d_max, d_min, d_rps, d_hoff, d_fadein);
+        /* light_organ live-apply is handled via the same callback path: the
+         * callback rereads the just-written JSON to pick up all new fields. */
+    }
+
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
@@ -1044,10 +1073,11 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size        = 8192;
+    cfg.stack_size        = 16384; /* OTA end/SHA256 verification needs more than default 4K */
     cfg.max_uri_handlers  = 14;
-    cfg.recv_wait_timeout = 30;  /* seconds – per individual recv call   */
-    cfg.send_wait_timeout = 30;
+    cfg.recv_wait_timeout = 60;    /* seconds – generous for large OTA uploads */
+    cfg.send_wait_timeout = 60;
+    cfg.lru_purge_enable  = true;
 
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &cfg) != ESP_OK) {
@@ -1126,6 +1156,11 @@ void web_server_init(rescan_cb_t on_files_changed)
     ESP_LOGI(TAG, "web_server_init done – WiFi disabled at boot");
 }
 
+void web_server_set_song_settings_callback(web_song_settings_cb_t cb)
+{
+    s_song_settings_cb = cb;
+}
+
 void web_server_enable(void)
 {
     if (s_running) {
@@ -1157,4 +1192,9 @@ void web_server_disable(void)
     esp_wifi_stop();
     s_running = false;
     ESP_LOGI(TAG, "WiFi + HTTP server disabled");
+}
+
+bool web_server_is_running(void)
+{
+    return s_running;
 }

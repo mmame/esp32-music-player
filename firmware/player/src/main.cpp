@@ -33,6 +33,10 @@
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
+#ifdef HAVE_ADF
+#include "dsps_fft2r.h"
+#include "dsps_wind.h"
+#endif
 
 /* Application modules (pure ESP-IDF, always compiled) */
 #include "pins.h"
@@ -98,11 +102,14 @@ static volatile bool     g_song_loop           = false; /* true: restart on end 
 static volatile bool     g_song_fixed_speed_en = false; /* true: ignore crank, use fixed speed  */
 static volatile float    g_song_fixed_speed    = 1.0f;  /* speed multiplier when above is true  */
 static volatile uint8_t  g_song_pitch_influence = 0u;   /* 0=time-stretch, 100=full tape effect    */
-static volatile bool     g_song_dimmer_override  = false; /* true: use per-song dimmer params    */
+/* per-song dimmer settings (always applied; default = 100/0/1.4) */
 static volatile uint8_t  g_song_dimmer_max        = 100u; /* per-song max brightness 0-100       */
 static volatile uint8_t  g_song_dimmer_min        = 0u;   /* per-song min brightness 0-100       */
 static volatile float    g_song_dimmer_rps_ref    = 1.4f; /* per-song full-brightness RPS        */
-static volatile uint16_t g_song_dimmer_holdoff_ticks = 0u;/* io_task 10ms ticks remaining before dimmer activates */
+static volatile float    g_song_dimmer_holdoff_s  = 0.0f; /* song-position timestamp (s) before which dimmer is suppressed */
+static volatile float    g_song_dimmer_fadein_s   = 0.0f; /* seconds to fade from 0→full after holdoff */
+static volatile bool     g_song_light_organ        = false; /* true: dimmer driven by audio FFT, not crank speed */
+static volatile uint8_t  g_fft_dimmer_pct          = 0u;   /* 0-100, updated by light-organ FFT analysis */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -125,9 +132,100 @@ static volatile bool    s_cmd_tempo_lock_value   = false;
 static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
 static volatile bool    s_cmd_wifi_enable        = false; /* set by on_wifi_ctrl(true)  */
 static volatile bool    s_cmd_wifi_disable       = false; /* set by on_wifi_ctrl(false) or on_play_song */
-static volatile bool    s_cmd_new_song_loaded    = false; /* set when play_song_idx is called; resets enc2 edge */
+static volatile bool    s_cmd_new_song_loaded    = false;
+
+static esp_timer_handle_t s_wifi_auto_off_timer  = nullptr;
 
 static sdmmc_card_t *s_sdcard = nullptr;
+
+#ifdef HAVE_ADF
+/* ── Light-organ FFT analysis state ────────────────────────────────────────── */
+#define LO_FFT_SIZE  256   /* must be a power of two */
+static float  s_lo_fft_buf[LO_FFT_SIZE * 2]; /* real/imag interleaved               */
+static float  s_lo_fft_win[LO_FFT_SIZE];     /* Hann window coefficients             */
+static FILE  *s_lo_file    = nullptr;         /* second file handle for analysis reads */
+static bool   s_lo_fft_init = false;          /* one-time DSP initialisation flag     */
+
+static void run_light_organ_fft(void)
+{
+    if (!s_lo_file || !g_is_playing) return;
+
+    /* One-time initialisation of the FFT twiddle table and Hann window */
+    if (!s_lo_fft_init) {
+        dsps_fft2r_init_fc32(NULL, LO_FFT_SIZE);
+        dsps_wind_hann_f32(s_lo_fft_win, LO_FFT_SIZE);
+        s_lo_fft_init = true;
+    }
+
+    /* Seek to current playback position + 50 ms lookahead */
+    uint32_t bps_total = g_sample_rate * (uint32_t)g_channels * (uint32_t)g_bps;
+    uint32_t offset    = WAV_HDR_BYTES
+                         + (uint32_t)((g_audio_pos_s + 0.05f) * (float)bps_total);
+    /* Align to frame boundary */
+    uint32_t frame_sz = (uint32_t)g_channels * (uint32_t)g_bps;
+    if (frame_sz > 0) offset = (offset / frame_sz) * frame_sz;
+
+    if (fseek(s_lo_file, (long)offset, SEEK_SET) != 0) return;
+
+    /* Read LO_FFT_SIZE samples (one channel, 16-bit) */
+    int16_t raw[LO_FFT_SIZE * 4]; /* wide enough for stereo */
+    size_t  want = (size_t)(LO_FFT_SIZE * (int)g_channels * (int)g_bps);
+    if (want > sizeof(raw)) want = sizeof(raw);
+    if (fread(raw, 1, want, s_lo_file) < (size_t)(LO_FFT_SIZE * (int)g_bps)) return;
+
+    /* Build FFT input: left-channel samples, Hann-windowed, normalised to ±1 */
+    int step = (g_channels > 1) ? (int)g_channels : 1;
+    for (int i = 0; i < LO_FFT_SIZE; i++) {
+        float s = ((float)raw[i * step] / 32768.0f) * s_lo_fft_win[i];
+        s_lo_fft_buf[i * 2]     = s;    /* real part  */
+        s_lo_fft_buf[i * 2 + 1] = 0.0f; /* imag part  */
+    }
+
+    /* Run FFT and bit-reverse the output */
+    dsps_fft2r_fc32(s_lo_fft_buf, LO_FFT_SIZE);
+    dsps_bit_rev_fc32(s_lo_fft_buf, LO_FFT_SIZE);
+
+    /* At 48 kHz / 256 bins, each bin spans ~187.5 Hz.
+     * Bin 1-3  : ~187-562 Hz  (bass fundamentals, kick drum)
+     * Bin 4-15 : ~750-2812 Hz (melody, harmonics) */
+    float bass = 0.0f, mid = 0.0f;
+    for (int i = 1; i <= 3; i++) {
+        float r = s_lo_fft_buf[i*2], im = s_lo_fft_buf[i*2+1];
+        bass += sqrtf(r*r + im*im);
+    }
+    for (int i = 4; i <= 15; i++) {
+        float r = s_lo_fft_buf[i*2], im = s_lo_fft_buf[i*2+1];
+        mid += sqrtf(r*r + im*im);
+    }
+
+    /* sqrtf compression maps the wide dynamic range to a useful 0-100 % window.
+     * Samples are normalised to ±1, so bin magnitudes are much smaller than in
+     * raw-int16 examples; the coefficients here are tuned for that scale.
+     * Increase the coefficients if the lamp barely reacts; decrease if it
+     * saturates too fast. */
+    float fft_raw = sqrtf(bass) * g_crank_cfg.lo_bass_weight
+                  + sqrtf(mid)  * g_crank_cfg.lo_mid_weight;
+
+    /* Auto-ranging: stretch the observed min→max to the full 0-100 % window.
+     * This makes the lamp use its full dynamic range regardless of the absolute
+     * signal level, so it works equally well for quiet and loud songs.
+     * Max: instant attack, slow decay (~0.2% per 50 ms frame ≈ 4%/s).
+     * Min: fast update on new minimum, same slow decay otherwise.          */
+    static float s_lo_max = 1.0f;
+    static float s_lo_min = 0.0f;
+    if (fft_raw > s_lo_max) s_lo_max = fft_raw;
+    else { s_lo_max *= g_crank_cfg.lo_decay_rate; if (s_lo_max < 1.0f) s_lo_max = 1.0f; }
+    if (fft_raw < s_lo_min) s_lo_min = fft_raw * 0.5f + s_lo_min * 0.5f;
+    else { s_lo_min *= g_crank_cfg.lo_decay_rate; if (s_lo_min < 0.0f) s_lo_min = 0.0f; }
+
+    float range = s_lo_max - s_lo_min;
+    float level = (range > 0.5f)
+                  ? (fft_raw - s_lo_min) / range * 100.0f
+                  : 50.0f;
+    if (level > 100.0f) level = 100.0f;
+    g_fft_dimmer_pct = (uint8_t)level;
+}
+#endif /* HAVE_ADF */
 
 #ifdef HAVE_ADF
 static audio_pipeline_handle_t    g_pipeline  = nullptr;
@@ -349,11 +447,16 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     g_song_fixed_speed    = (settings.fixed_speed > 0.0f) ? settings.fixed_speed : 1.0f;
     g_song_pitch_influence = settings.pitch_influence;
     soundtouch_el_set_pitch_influence(g_sonic_el, (float)settings.pitch_influence / 100.0f);
-    g_song_dimmer_override  = settings.dimmer_override;
     g_song_dimmer_max        = settings.dimmer_max;
     g_song_dimmer_min        = settings.dimmer_min;
     g_song_dimmer_rps_ref    = (settings.dimmer_rps_ref > 0.0f) ? settings.dimmer_rps_ref : 1.4f;
-    g_song_dimmer_holdoff_ticks = (uint16_t)settings.dimmer_holdoff_s * 100u;
+    g_song_dimmer_holdoff_s  = (float)settings.dimmer_holdoff_s;
+    g_song_dimmer_fadein_s   = (float)settings.dimmer_fadein_s;
+    g_song_light_organ       = settings.light_organ;
+#ifdef HAVE_ADF
+    if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
+    if (g_song_light_organ) s_lo_file = fopen(path, "rb");
+#endif
 
     uint32_t data_bytes = 0, sr = 44100;
     uint8_t  ch = 2, bps = 2;
@@ -418,8 +521,13 @@ static void do_stop(void)
     g_song_fixed_speed    = 1.0f;
     g_song_pitch_influence = 0u;
     soundtouch_el_set_pitch_influence(g_sonic_el, 0.0f);
-    g_song_dimmer_override       = false;
-    g_song_dimmer_holdoff_ticks  = 0u;
+    g_song_dimmer_holdoff_s      = 0.0f;
+    g_song_dimmer_fadein_s       = 0.0f;
+    g_song_light_organ           = false;
+    g_fft_dimmer_pct             = 0u;
+#ifdef HAVE_ADF
+    if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
+#endif
     ESP_LOGI(TAG, "Stopped");
 }
 
@@ -821,9 +929,23 @@ static void on_wifi_ctrl(bool enable)
     if (enable) {
         s_cmd_wifi_enable  = true;
         s_cmd_wifi_disable = false;
+        /* Start/restart 15-minute auto-off timer */
+        if (!s_wifi_auto_off_timer) {
+            const esp_timer_create_args_t ta = {
+                .callback         = [](void *) { s_cmd_wifi_disable = true; ESP_LOGI("wifi", "WiFi auto-disabled after 15 min"); },
+                .arg              = nullptr,
+                .dispatch_method  = ESP_TIMER_TASK,
+                .name             = "wifi_auto_off",
+                .skip_unhandled_events = false
+            };
+            esp_timer_create(&ta, &s_wifi_auto_off_timer);
+        }
+        esp_timer_stop(s_wifi_auto_off_timer);
+        esp_timer_start_once(s_wifi_auto_off_timer, (int64_t)15 * 60 * 1000 * 1000);
     } else {
         s_cmd_wifi_disable = true;
         s_cmd_wifi_enable  = false;
+        if (s_wifi_auto_off_timer) esp_timer_stop(s_wifi_auto_off_timer);
     }
 }
 
@@ -863,16 +985,19 @@ static void on_song_settings_req(uint16_t song_id)
     uint8_t flags = 0;
     if (s.loop)               flags |= 0x01u;
     if (s.fixed_speed > 0.0f) flags |= 0x02u;
-    if (s.dimmer_override)    flags |= 0x08u;
+    if (s.dimmer_max != 100u || s.dimmer_min != 0u ||
+        s.dimmer_rps_ref < 1.35f || s.dimmer_rps_ref > 1.45f) flags |= 0x08u;
+    if (s.light_organ)        flags |= 0x10u;
     uint8_t spd_x100      = (s.fixed_speed > 0.0f)
                             ? (uint8_t)(s.fixed_speed * 100.0f + 0.5f) : 100u;
     uint8_t d_max         = s.dimmer_max;
     uint8_t d_min         = s.dimmer_min;
     uint8_t d_rps_x10     = (uint8_t)(s.dimmer_rps_ref * 10.0f + 0.5f);
     uint8_t d_holdoff     = s.dimmer_holdoff_s;
+    uint8_t d_fadein      = s.dimmer_fadein_s;
 
     uart_master_send_song_settings(song_id, flags, spd_x100,
-                                   d_max, d_min, d_rps_x10, d_holdoff, s.pitch_influence);
+                                   d_max, d_min, d_rps_x10, d_holdoff, d_fadein, s.pitch_influence);
 }
 
 /**
@@ -887,6 +1012,7 @@ static void on_set_song_settings(uint16_t song_id,
                                  uint8_t  dimmer_min,
                                  uint8_t  dimmer_rps_ref_x10,
                                  uint8_t  dimmer_holdoff_s,
+                                 uint8_t  dimmer_fadein_s,
                                  uint8_t  pitch_influence_pct)
 {
     if (song_id == 0 || song_id > g_song_count) {
@@ -904,16 +1030,17 @@ static void on_set_song_settings(uint16_t song_id,
     memcpy(json_path + wav_len - 4, ".json", 6);
 
     /* If all settings are default: remove the sidecar file */
-    if (flags == 0 && dimmer_holdoff_s == 0 && pitch_influence_pct == 0) {
-        remove(json_path); /* ignore error if file did not exist */
+    if (flags == 0 && dimmer_holdoff_s == 0 && dimmer_fadein_s == 0 && pitch_influence_pct == 0
+        && dimmer_max == 100u && dimmer_min == 0u && dimmer_rps_ref_x10 == 14u) {
+        remove(json_path);
         ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
         if ((int16_t)(song_id - 1) == g_current_song) {
             g_song_loop           = false;
             g_song_fixed_speed_en = false;
             g_song_fixed_speed    = 1.0f;
             g_song_pitch_influence       = 0u;
-            g_song_dimmer_override       = false;
-            g_song_dimmer_holdoff_ticks  = 0u;
+            g_song_dimmer_holdoff_s      = 0.0f;
+            g_song_dimmer_fadein_s       = 0.0f;
             soundtouch_el_set_pitch_influence(g_sonic_el, 0.0f);
         }
         return;
@@ -921,7 +1048,7 @@ static void on_set_song_settings(uint16_t song_id,
 
     bool  loop         = (flags & 0x01u) != 0;
     bool  fixed_en     = (flags & 0x02u) != 0;
-    bool  dimmer_ov    = (flags & 0x08u) != 0;
+    bool  light_organ  = (flags & 0x10u) != 0;
     float spd          = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
     float d_rps_ref    = (dimmer_rps_ref_x10 > 0) ? ((float)dimmer_rps_ref_x10 / 10.0f) : 1.4f;
 
@@ -935,14 +1062,19 @@ static void on_set_song_settings(uint16_t song_id,
     if (pitch_influence_pct > 0) {
         cJSON_AddNumberToObject(root, "pitch_influence", pitch_influence_pct);
     }
-    if (dimmer_ov) {
-        cJSON_AddBoolToObject(root, "dimmer_override", true);
+    if (dimmer_max != 100u || dimmer_min != 0u || fabsf(d_rps_ref - 1.4f) > 0.05f) {
         cJSON_AddNumberToObject(root, "dimmer_max", dimmer_max);
         cJSON_AddNumberToObject(root, "dimmer_min", dimmer_min);
         cJSON_AddNumberToObject(root, "dimmer_rps_ref", (double)d_rps_ref);
     }
     if (dimmer_holdoff_s > 0) {
         cJSON_AddNumberToObject(root, "dimmer_holdoff_s", dimmer_holdoff_s);
+    }
+    if (dimmer_fadein_s > 0) {
+        cJSON_AddNumberToObject(root, "dimmer_fadein_s", dimmer_fadein_s);
+    }
+    if (light_organ) {
+        cJSON_AddBoolToObject(root, "light_organ", true);
     }
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -966,17 +1098,70 @@ static void on_set_song_settings(uint16_t song_id,
         g_song_fixed_speed_en = fixed_en;
         g_song_fixed_speed    = fixed_en ? spd : 1.0f;
         g_song_pitch_influence   = pitch_influence_pct;
-        g_song_dimmer_override   = dimmer_ov;
         g_song_dimmer_max        = dimmer_max;
         g_song_dimmer_min        = dimmer_min;
         g_song_dimmer_rps_ref    = d_rps_ref;
-        g_song_dimmer_holdoff_ticks = (uint16_t)dimmer_holdoff_s * 100u;
+        g_song_dimmer_holdoff_s  = (float)dimmer_holdoff_s;
+        g_song_dimmer_fadein_s   = (float)dimmer_fadein_s;
+        g_song_light_organ       = light_organ;
+        g_fft_dimmer_pct         = 0u;
+#ifdef HAVE_ADF
+        if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
+        if (light_organ) {
+            char wav_p[8 + UM_MAX_SONG_NAME + 5];
+            snprintf(wav_p, sizeof(wav_p), "%s/%s.wav", MOUNT_POINT, g_song_names[(uint8_t)g_current_song]);
+            s_lo_file = fopen(wav_p, "rb");
+        }
+#endif
         soundtouch_el_set_pitch_influence(g_sonic_el, (float)pitch_influence_pct / 100.0f);
         ESP_LOGI("main", "Applied settings live: loop=%d fixed_en=%d spd=%.2f pitch_infl=%u%% "
-                 "dimmer_ov=%d max=%u min=%u rps_ref=%.1f holdoff=%us",
+                 "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us",
                  (int)loop, (int)fixed_en, fixed_en ? (double)spd : 1.0, pitch_influence_pct,
-                 (int)dimmer_ov, dimmer_max, dimmer_min, (double)d_rps_ref, dimmer_holdoff_s);
+                 dimmer_max, dimmer_min, (double)d_rps_ref, dimmer_holdoff_s, dimmer_fadein_s);
     }
+}
+
+/* ======================================================================
+ * Browser song-settings live-apply callback (HTTP-server task, Core 0)
+ * ====================================================================== */
+
+static void on_web_song_settings_saved(const char *wav_path,
+                                        bool        loop,
+                                        float       fixed_speed,
+                                        uint8_t     pitch_influence,
+                                        uint8_t     dimmer_max,
+                                        uint8_t     dimmer_min,
+                                        float       dimmer_rps_ref,
+                                        uint8_t     dimmer_holdoff_s,
+                                        uint8_t     dimmer_fadein_s)
+{
+    if (g_current_song < 0) return;
+
+    char cur_path[8 + UM_MAX_SONG_NAME + 5];
+    snprintf(cur_path, sizeof(cur_path), "%s/%s.wav", MOUNT_POINT,
+             g_song_names[(uint8_t)g_current_song]);
+    if (strcmp(wav_path, cur_path) != 0) return;
+
+    /* These volatile writes are safe from the HTTP task; io_task reads them
+     * without the mutex (same as after UART on_set_song_settings). */
+    g_song_loop            = loop;
+    g_song_fixed_speed_en  = (fixed_speed > 0.0f);
+    g_song_fixed_speed     = (fixed_speed > 0.0f) ? fixed_speed : 1.0f;
+    g_song_pitch_influence = pitch_influence;
+    g_song_dimmer_max       = dimmer_max;
+    g_song_dimmer_min       = dimmer_min;
+    g_song_dimmer_rps_ref   = (dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f;
+    g_song_dimmer_holdoff_s = (float)dimmer_holdoff_s;
+    g_song_dimmer_fadein_s  = (float)dimmer_fadein_s;
+    /* Pitch influence on SoundTouch must be applied from the audio_task */
+#ifdef HAVE_ADF
+    s_cmd_st_bypass_value   = (fixed_speed > 0.0f); /* reuse bypass flag for fixed-speed */
+    /* pitch: set via existing async command path */
+#endif
+    ESP_LOGI(TAG, "Browser settings live-applied: %s  max=%u min=%u rps=%.1f holdoff=%us fadein=%us",
+             wav_path, dimmer_max, dimmer_min,
+             (double)((dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f),
+             dimmer_holdoff_s, dimmer_fadein_s);
 }
 
 /* ======================================================================
@@ -1025,6 +1210,18 @@ static void io_task(void *arg)
             }
         }
 
+        /* ── Light-organ FFT analysis (every 50 ms) ─────────────────────────── */
+#ifdef HAVE_ADF
+        {
+            static uint8_t s_lo_tick = 0;
+            if (g_song_light_organ && g_is_playing) {
+                if (++s_lo_tick >= 5) { s_lo_tick = 0; run_light_organ_fft(); }
+            } else {
+                s_lo_tick = 0;
+            }
+        }
+#endif
+
         /* ── Organ encoder 2: speed + auto-pause/resume ─────────────────── */
         {
             static bool       s_enc2_was_moving  = false;
@@ -1051,38 +1248,84 @@ static void io_task(void *arg)
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
 
-            /* ── Dimmer: no light when silent; ramp smoothly during fade ── */
+            /* ── Dimmer: off during holdoff, optional fade-in, ramp with crank ── */
             {
-                static uint8_t s_last_dimmer_pct = 255u;
+                static uint8_t  s_last_dimmer_pct    = 255u;
+                static int16_t  s_dimmer_song_id     = -2;   /* -2 = uninitialized */
+                static bool     s_holdoff_was_active = false;
+                static bool     s_dimmer_fadein_on   = false;
+                static uint32_t s_dimmer_fadein_ms   = 0u;
+                static float    s_playing_pf         = 0.0f; /* lamp level at last playing tick */
                 uint8_t dpct;
 
-                /* Holdoff tick countdown: decremented every 10ms io_task iteration */
-                if (g_song_dimmer_holdoff_ticks > 0u) {
-                    g_song_dimmer_holdoff_ticks--;
+                /* Reset fade-in state when the active song changes */
+                if (s_dimmer_song_id != g_current_song) {
+                    s_dimmer_song_id     = g_current_song;
+                    s_holdoff_was_active = (g_song_dimmer_holdoff_s > 0.0f);
+                    s_dimmer_fadein_on   = false;
+                    s_dimmer_fadein_ms   = 0u;
+                    s_playing_pf         = 0.0f;
                 }
-                bool holdoff_active = (g_song_dimmer_holdoff_ticks > 0u);
 
-                /* Use per-song dimmer params if override is set, else system config */
-                float dmax = g_song_dimmer_override
-                    ? (float)g_song_dimmer_max
-                    : (float)g_crank_cfg.dimmer_max;
+                /* compare audio position against holdoff timestamp */
+                float cur_pos_s = 0.0f;
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                cur_pos_s = get_current_pos_s_locked();
+                xSemaphoreGive(s_state_mutex);
+
+                bool holdoff_active = (g_song_dimmer_holdoff_s > 0.0f
+                                       && cur_pos_s < g_song_dimmer_holdoff_s);
+
+                /* trigger fade-in when holdoff expires */
+                if (s_holdoff_was_active && !holdoff_active
+                    && g_song_dimmer_fadein_s > 0.0f) {
+                    s_dimmer_fadein_on = true;
+                    s_dimmer_fadein_ms = 0u;
+                }
+                s_holdoff_was_active = holdoff_active;
+
+                /* Advance fade-in timer */
+                if (s_dimmer_fadein_on) {
+                    s_dimmer_fadein_ms += 10u;
+                    uint32_t total_ms = (uint32_t)(g_song_dimmer_fadein_s * 1000.0f);
+                    if (total_ms == 0u || s_dimmer_fadein_ms >= total_ms) {
+                        s_dimmer_fadein_on = false;
+                    }
+                }
+
+                /* Per-song dimmer params; defaults are 100/0/1.4 */
+                float dmax = (float)g_song_dimmer_max;
 
                 if (holdoff_active) {
-                    dpct = 0u; /* suppress light during holdoff period */
+                    dpct = 0u;
                 } else if (s_vol_fading && vol > 0) {
-                    dpct = (uint8_t)((float)s_fade_vol / (float)vol * dmax + 0.5f);
-                } else if (s_vol_fadein && vol > 0) {
-                    dpct = (uint8_t)((float)s_fadein_vol / (float)vol * dmax + 0.5f);
-                } else if (g_is_playing) {
-                    float dmin = g_song_dimmer_override
-                        ? (float)g_song_dimmer_min
-                        : (float)g_crank_cfg.dimmer_min;
-                    float ref  = g_song_dimmer_override
-                        ? g_song_dimmer_rps_ref
-                        : g_crank_cfg.dimmer_rps_ref;
-                    float t    = (ref > 0.0f) ? (encoder2_get_instant_rps() / ref) : 0.0f;
-                    if (t > 1.0f) t = 1.0f;
+                    /* Fade from the last actual playing brightness, not from dmax.
+                     * Avoids a jarring jump to full brightness when crank was slow. */
+                    float fade_scale = (float)s_fade_vol / (float)vol;
+                    dpct = (uint8_t)(s_playing_pf * fade_scale + 0.5f);
+                } else if ((g_is_playing || s_vol_fadein) && !s_enc2_pause_sent) {
+                    /* Dimmer is independent from the audio volume ramp.
+                     * s_vol_fadein included so lamp doesn't flash off during the
+                     * brief window before audio_task sets g_is_playing. */
+                    float dmin = (float)g_song_dimmer_min;
+                    float t;
+                    if (g_song_light_organ) {
+                        /* Light-organ mode: brightness from FFT audio energy */
+                        t = (float)g_fft_dimmer_pct / 100.0f;
+                    } else {
+                        float ref = g_song_dimmer_rps_ref;
+                        t = (ref > 0.0f) ? (encoder2_get_instant_rps() / ref) : 0.0f;
+                        if (t > 1.0f) t = 1.0f;
+                    }
                     float pf   = dmin + (dmax - dmin) * t;
+                    if (s_dimmer_fadein_on) {
+                        float total_ms = g_song_dimmer_fadein_s * 1000.0f;
+                        float scale    = (total_ms > 0.0f)
+                                       ? ((float)s_dimmer_fadein_ms / total_ms) : 1.0f;
+                        if (scale > 1.0f) scale = 1.0f;
+                        pf *= scale;
+                    }
+                    s_playing_pf = pf; /* remember for smooth fade-out start */
                     dpct = (uint8_t)(pf + 0.5f);
                 } else {
                     dpct = 0u;
@@ -1307,7 +1550,8 @@ static void io_task(void *arg)
                                ? g_song_names[song] : "";
 
             uint8_t  state_flags = g_tempo_locked ? 0x01u : 0x00u;
-            if (bt_ctrl_is_enabled()) state_flags |= 0x02u;
+            if (bt_ctrl_is_enabled())      state_flags |= 0x02u;
+            if (web_server_is_running())   state_flags |= 0x04u;
             uint16_t state_id    = (song >= 0) ? (uint16_t)((uint16_t)song + 1u) : 0u;
             uart_master_send_state(name, (uint8_t)(playing ? 1 : 0),
                                    cur_vol, tempo_byte, pct, dur_s, state_flags, state_id);
@@ -1351,6 +1595,7 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     web_server_init(player_rescan);
+    web_server_set_song_settings_callback(on_web_song_settings_saved);
 
 #ifdef HAVE_ADF
     create_pipeline();
