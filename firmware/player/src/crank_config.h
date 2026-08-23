@@ -23,6 +23,8 @@ typedef struct {
     float   start_thresh;    /**< resume threshold  [RPS]  [0.200–1.200, def 0.700] */
     uint8_t release_ticks;   /**< zero-windows before fast decay onset [0–10, def 2] */
     uint8_t vol_fade_step;   /**< volume units per 10 ms fade tick [1–10, def 1]    */
+    uint16_t dimmer_start_fade_ms; /**< dimmer fade-in on crank stop->start [0–5000, def 1000] */
+    uint16_t dimmer_stop_fade_ms;  /**< dimmer fade-out on crank start->stop [0–5000, def 1000] */
     int8_t  crank_dir;       /**< 0=any direction, +1=positive counts only, -1=negative counts only [def 0] */
     /* Light-organ (FFT) global parameters – only used when per-song light_organ is set */
     float   lo_bass_weight;  /**< sqrtf(bass) multiplier [1–200, def 45]  */

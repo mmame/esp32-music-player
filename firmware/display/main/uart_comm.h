@@ -75,6 +75,8 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_SONG_SETTINGS       0x11  /* Host -> Display: current settings for a song       */
 #define CMD_SET_SONG_SETTINGS   0x12  /* Display -> Host: write new settings for a song     */
 #define CMD_BT_CTRL             0x13  /* Display -> Host: enable (1) / disable (0) BLE module */
+#define CMD_PLAYLISTS           0x14  /* Host -> Display: active playlist + playlist names   */
+#define CMD_SET_ACTIVE_PLAYLIST 0x15  /* Display -> Host: set active playlist by name        */
 #define CMD_ACK                 0xFF  /* Display -> Host: sync acknowledgement              */
 
 /* ---------- Global system state ---------- */
@@ -162,6 +164,13 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
                                       uint8_t  dimmer_holdoff_s,
                                       uint8_t  dimmer_fadein_s,
                                       uint8_t  pitch_influence_pct);
+
+/**
+ * @brief Enqueue CMD_SET_ACTIVE_PLAYLIST to be sent on the next poll response.
+ *
+ * @param playlist_name  UTF-8 name. Empty string selects all songs (no active playlist).
+ */
+void uart_comm_send_set_active_playlist(const char *playlist_name);
 
 /**
  * @brief Enqueue CMD_PLAY_SONG to be sent on the next poll response.

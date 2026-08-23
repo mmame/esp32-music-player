@@ -81,7 +81,8 @@ static volatile int16_t s_touch_y      = 0;
  * written from the LVGL task (Core 1) and read from the UART task (Core 0).
  */
 #define PENDING_QUEUE_SLOTS    8   /* max simultaneous queued commands  */
-#define PENDING_CMD_MAX_PARAMS 12  /* large enough for SET_SONG_SETTINGS (10 B) */
+#define PENDING_CMD_MAX_PARAMS 96  /* includes playlist-name payloads */
+#define DISPLAY_MAX_PLAYLISTS  32
 
 typedef struct {
     uint8_t cmd_id;
@@ -92,6 +93,13 @@ typedef struct {
 static pending_cmd_t s_pending_queue[PENDING_QUEUE_SLOTS];
 static uint8_t       s_pending_count = 0;
 static portMUX_TYPE  s_queue_mux     = portMUX_INITIALIZER_UNLOCKED;
+
+/* ---------- Playlist metadata accumulation ------------------------------ */
+
+static uint8_t s_playlist_buf[1024];
+static uint16_t s_playlist_len = 0;
+static char s_playlist_names[DISPLAY_MAX_PLAYLISTS][MAX_SONG_NAME_LEN];
+static char s_active_playlist[MAX_SONG_NAME_LEN];
 
 /* ---------- Parser state machine ----------------------------------------- */
 
@@ -210,6 +218,16 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
     enqueue_pending_cmd(CMD_SET_SONG_SETTINGS, params, 10);
     ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS queued: id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u dfad=%u pitch=%u",
              song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_ref_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_influence_pct);
+}
+
+void uart_comm_send_set_active_playlist(const char *playlist_name)
+{
+    const char *name = playlist_name ? playlist_name : "";
+    uint8_t params[MAX_SONG_NAME_LEN];
+    uint8_t n = (uint8_t)strnlen(name, MAX_SONG_NAME_LEN - 1);
+    memcpy(params, name, n);
+    enqueue_pending_cmd(CMD_SET_ACTIVE_PLAYLIST, params, n);
+    ESP_LOGI(TAG, "CMD_SET_ACTIVE_PLAYLIST queued: '%s'", name);
 }
 
 void uart_comm_init(void)
@@ -592,6 +610,63 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
                                         dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct);
         ui_player_song_settings_async(song_id, flags, fixed_speed_x100,
                                       dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct);
+        break;
+    }
+
+    /* ------------------------------------------------------------------ */
+    case CMD_PLAYLISTS: {
+        if ((uint32_t)s_playlist_len + len > sizeof(s_playlist_buf)) {
+            ESP_LOGW(TAG, "CMD_PLAYLISTS: accumulation buffer overflow – discarding");
+            s_playlist_len = 0;
+        }
+        if (len > 0) {
+            memcpy(s_playlist_buf + s_playlist_len, payload, len);
+            s_playlist_len += len;
+        }
+
+        bool done = false;
+        for (uint16_t i = 1; i < s_playlist_len; ++i) {
+            if (s_playlist_buf[i - 1] == '\0' && s_playlist_buf[i] == '\0') {
+                done = true;
+                break;
+            }
+        }
+        if (!done) break;
+
+        memset(s_playlist_names, 0, sizeof(s_playlist_names));
+        memset(s_active_playlist, 0, sizeof(s_active_playlist));
+
+        uint16_t pos = 0;
+        uint8_t pl_count = 0;
+        bool first = true;
+        while (pos < s_playlist_len) {
+            const char *s = (const char *)&s_playlist_buf[pos];
+            size_t rem = (size_t)(s_playlist_len - pos);
+            size_t slen = strnlen(s, rem);
+
+            if (first) {
+                /* First token is active playlist name and may be empty
+                 * (empty means "All songs"). */
+                strncpy(s_active_playlist, s, MAX_SONG_NAME_LEN - 1);
+                s_active_playlist[MAX_SONG_NAME_LEN - 1] = '\0';
+                first = false;
+                pos = (uint16_t)(pos + slen + 1u);
+                continue;
+            }
+
+            /* Any later empty token is the transfer terminator. */
+            if (slen == 0) break;
+
+            if (pl_count < DISPLAY_MAX_PLAYLISTS) {
+                strncpy(s_playlist_names[pl_count], s, MAX_SONG_NAME_LEN - 1);
+                s_playlist_names[pl_count][MAX_SONG_NAME_LEN - 1] = '\0';
+                pl_count++;
+            }
+            pos = (uint16_t)(pos + slen + 1u);
+        }
+
+        ui_songlist_playlists_async(s_active_playlist, s_playlist_names, pl_count);
+        s_playlist_len = 0;
         break;
     }
 

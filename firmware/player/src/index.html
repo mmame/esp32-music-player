@@ -82,6 +82,22 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
 .ss-hint{font-size:11px;color:#9090b4;margin-top:3px;line-height:1.4}
 .ss-sep{border-color:#1e2a52;margin:12px 0 10px}
 .ss-btns{display:flex;gap:8px;margin-top:16px}
+/* Playlists */
+.pl-top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.pl-top select{min-width:220px;padding:5px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px}
+.pl-new{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.pl-new input{padding:6px 8px;background:#0a0a14;border:1px solid #2d3561;border-radius:4px;color:#e0e0e0;min-width:220px}
+.pl-card{border:1px solid #2d3561;border-radius:8px;padding:10px 10px 8px;margin-bottom:10px;background:#121a33}
+.pl-head{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px}
+.pl-name{font-weight:600;color:#dcdcff;word-break:break-word}
+.pl-actions{display:flex;gap:6px;flex-wrap:wrap}
+.pl-add{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.pl-add select{padding:4px 6px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px;min-width:220px}
+.pl-songs{display:flex;flex-direction:column;gap:5px}
+.pl-song{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:6px 8px;border:1px solid #243055;border-radius:6px;background:#0f1630}
+.pl-song-name{font-size:12px;color:#cbd5ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl-song-acts{display:flex;gap:5px;flex-wrap:wrap}
+.pl-empty{color:#7f89b7;font-size:12px;padding:6px 2px}
 </style>
 </head>
 <body>
@@ -124,6 +140,23 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <div class="empty" id="empty">No WAV files on SD card.</div>
   <div class="err-msg" id="load-err">Failed to load file list. Check SD card.</div>
 </section>
+
+<section>
+  <h2>Playlists</h2>
+  <div class="pl-top">
+    <label for="pl-active" style="font-size:12px;color:#9fa6d4">Active playlist</label>
+    <select id="pl-active"></select>
+    <button class="btn btn-sm btn-ghost" onclick="loadPlaylists()">Reload</button>
+    <button class="btn btn-sm btn-primary" onclick="savePlaylists()">Save Playlists</button>
+    <span id="pl-dirty" style="font-size:12px;color:#a78bfa"></span>
+  </div>
+  <div class="pl-new">
+    <input id="pl-new-name" placeholder="New playlist name (e.g. Party Set)">
+    <button class="btn btn-sm btn-ghost" onclick="createPlaylist()">Create</button>
+  </div>
+  <div id="pl-cards"></div>
+  <div id="pl-empty" class="pl-empty" style="display:none">No playlists yet. Create one and add songs from the SD card list.</div>
+</section>
 </div><!-- /tab-files -->
 
 <div id="tab-config" style="display:none">
@@ -160,11 +193,21 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     <p class="cfg-desc">Volume units stepped per 10&thinsp;ms tick during fade-in/out when cranking starts or stops. 1&nbsp;=&nbsp;slow fade (~700&thinsp;ms at full volume). 10&nbsp;=&nbsp;fast fade (~70&thinsp;ms). Default: 1</p>
   </div>
   <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Dimmer fade-in (stop&rarr;start) ms</span><span class="cfg-val" id="vv-dimmer_start_fade_ms">1000</span></div>
+    <input type="range" class="cfg-slider" id="sl-dimmer_start_fade_ms" min="0" max="5000" step="10" value="1000" oninput="document.getElementById('vv-dimmer_start_fade_ms').textContent=this.value">
+    <p class="cfg-desc">Global dimmer fade-in duration after crank restarts. Range: 0&ndash;5000&thinsp;ms. Default: 1000&thinsp;ms.</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Dimmer fade-out (start&rarr;stop) ms</span><span class="cfg-val" id="vv-dimmer_stop_fade_ms">1000</span></div>
+    <input type="range" class="cfg-slider" id="sl-dimmer_stop_fade_ms" min="0" max="5000" step="10" value="1000" oninput="document.getElementById('vv-dimmer_stop_fade_ms').textContent=this.value">
+    <p class="cfg-desc">Global dimmer fade-out duration when crank stops. Range: 0&ndash;5000&thinsp;ms. Default: 1000&thinsp;ms.</p>
+  </div>
+  <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Crank direction</span></div>
     <select class="cfg-slider" id="sl-crank_dir" style="padding:4px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
       <option value="0">Both directions</option>
-      <option value="1">Direction A only (positive counts)</option>
-      <option value="-1" selected>Direction B only (negative counts, default)</option>
+      <option value="1">Direction A only (positive counts, default)</option>
+      <option value="-1" selected>Direction B only (negative counts)</option>
     </select>
     <p class="cfg-desc">Filter out reverse cranking. &ldquo;Direction A&rdquo; and &ldquo;Direction B&rdquo; correspond to the two physical turn directions &mdash; try both to find which matches your normal cranking direction. Default: Direction B only</p>
   </div>
@@ -458,6 +501,9 @@ var tblWrap=document.getElementById('tbl-wrap');
 var emptyEl=document.getElementById('empty');
 var loadErrEl=document.getElementById('load-err');
 var fileCount=document.getElementById('file-count');
+var g_files=[];
+var g_playlists={active:'',playlists:[]};
+var g_playlistDirty=false;
 
 function loadFiles(){
   fetch('/api/files').then(function(r){
@@ -467,6 +513,8 @@ function loadFiles(){
     loadErrEl.style.display='none';
     renderFiles(files);
   }).catch(function(){
+    g_files=[];
+    renderPlaylists();
     loadErrEl.style.display='block';
     tblWrap.style.display='none';
     emptyEl.style.display='none';
@@ -476,6 +524,8 @@ function loadFiles(){
 function renderFiles(files){
   tbody.innerHTML='';
   if(!files||!files.length){
+    g_files=[];
+    renderPlaylists();
     tblWrap.style.display='none';
     emptyEl.style.display='block';
     fileCount.textContent='';
@@ -485,6 +535,8 @@ function renderFiles(files){
   emptyEl.style.display='none';
   fileCount.textContent='('+files.length+' file'+(files.length!==1?'s':'')+')';
   files.sort(function(a,b){return a.name.localeCompare(b.name);});
+  g_files=files.map(function(f){return f.name;});
+  renderPlaylists();
   files.forEach(function(f){
     var sid=safeId(f.name);
     var tr=document.createElement('tr');
@@ -580,6 +632,245 @@ function deleteFile(name){
 window.startRename=startRename;
 window.deleteFile=deleteFile;
 
+/* ── Playlists ── */
+function setPlaylistDirty(d){
+  g_playlistDirty=!!d;
+  var el=document.getElementById('pl-dirty');
+  if(el)el.textContent=g_playlistDirty?'Unsaved changes':'';
+}
+
+function playlistNameKey(name){
+  return String(name||'').trim().toLowerCase();
+}
+
+function isReservedPlaylistName(name){
+  return playlistNameKey(name)==='all songs';
+}
+
+function normalizePlaylistsData(data){
+  var out={active:'',playlists:[]};
+  var seen={};
+  var activeKey='';
+  if(!data||typeof data!=='object')return out;
+  if(typeof data.active==='string')activeKey=playlistNameKey(data.active);
+  if(Array.isArray(data.playlists)){
+    data.playlists.forEach(function(p){
+      if(!p||typeof p.name!=='string'||!p.name.trim())return;
+      var cleanName=p.name.trim();
+      var key=playlistNameKey(cleanName);
+      if(!key||isReservedPlaylistName(cleanName)||seen[key])return;
+      var songs=[];
+      if(Array.isArray(p.songs)){
+        p.songs.forEach(function(s){
+          if(typeof s==='string'&&/\.wav$/i.test(s))songs.push(s);
+        });
+      }
+      out.playlists.push({name:cleanName,songs:songs});
+      seen[key]=cleanName;
+    });
+  }
+  if(activeKey&&seen[activeKey])out.active=seen[activeKey];
+  return out;
+}
+
+function loadPlaylists(){
+  fetch('/api/playlists').then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(data){
+    g_playlists=normalizePlaylistsData(data);
+    setPlaylistDirty(false);
+    renderPlaylists();
+  }).catch(function(e){
+    toast('Could not load playlists: '+e.message,true);
+  });
+}
+
+function savePlaylists(){
+  fetch('/api/playlists',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(g_playlists)
+  }).then(function(r){
+    if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
+    setPlaylistDirty(false);
+    toast('Playlists saved and applied');
+    loadFiles();
+  }).catch(function(e){toast('Playlist save failed: '+e.message,true);});
+}
+
+function createPlaylist(){
+  var input=document.getElementById('pl-new-name');
+  var name=(input.value||'').trim();
+  if(!name){toast('Enter a playlist name',true);return;}
+  if(isReservedPlaylistName(name)){toast('"All songs" is reserved',true);return;}
+  if(g_playlists.playlists.some(function(p){return playlistNameKey(p.name)===playlistNameKey(name);})){toast('Playlist already exists',true);return;}
+  g_playlists.playlists.push({name:name,songs:[]});
+  if(!g_playlists.active)g_playlists.active=name;
+  input.value='';
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function setActivePlaylist(name){
+  g_playlists.active=name||'';
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function setActivePlaylistByIndex(idx){
+  var p=g_playlists.playlists[idx];
+  if(!p)return;
+  setActivePlaylist(p.name);
+}
+
+function renamePlaylist(idx){
+  var cur=g_playlists.playlists[idx];
+  if(!cur)return;
+  var nn=prompt('Rename playlist',cur.name);
+  if(nn===null)return;
+  nn=nn.trim();
+  if(!nn){toast('Playlist name cannot be empty',true);return;}
+  if(isReservedPlaylistName(nn)){toast('"All songs" is reserved',true);return;}
+  if(g_playlists.playlists.some(function(p,i){return i!==idx&&playlistNameKey(p.name)===playlistNameKey(nn);})){toast('Playlist name already exists',true);return;}
+  var old=cur.name;
+  cur.name=nn;
+  if(g_playlists.active===old)g_playlists.active=nn;
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function deletePlaylist(idx){
+  var cur=g_playlists.playlists[idx];
+  if(!cur)return;
+  if(!confirm('Delete playlist "'+cur.name+'"?'))return;
+  var wasActive=(g_playlists.active===cur.name);
+  g_playlists.playlists.splice(idx,1);
+  if(wasActive)g_playlists.active='';
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function addSongToPlaylist(idx){
+  var p=g_playlists.playlists[idx];
+  if(!p)return;
+  var pick=document.getElementById('pl-song-pick-'+idx);
+  if(!pick||!pick.value)return;
+  p.songs.push(pick.value);
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function moveSong(idx,sidx,dir){
+  var p=g_playlists.playlists[idx];
+  if(!p)return;
+  var ni=sidx+dir;
+  if(ni<0||ni>=p.songs.length)return;
+  var tmp=p.songs[sidx];
+  p.songs[sidx]=p.songs[ni];
+  p.songs[ni]=tmp;
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function duplicateSong(idx,sidx){
+  var p=g_playlists.playlists[idx];
+  if(!p||sidx<0||sidx>=p.songs.length)return;
+  p.songs.splice(sidx+1,0,p.songs[sidx]);
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function removeSong(idx,sidx){
+  var p=g_playlists.playlists[idx];
+  if(!p||sidx<0||sidx>=p.songs.length)return;
+  p.songs.splice(sidx,1);
+  setPlaylistDirty(true);
+  renderPlaylists();
+}
+
+function renderPlaylists(){
+  var cards=document.getElementById('pl-cards');
+  var activeSel=document.getElementById('pl-active');
+  var empty=document.getElementById('pl-empty');
+  if(!cards||!activeSel||!empty)return;
+
+  activeSel.innerHTML='';
+  var optAll=document.createElement('option');
+  optAll.value='';
+  optAll.textContent='All songs on SD (no playlist)';
+  activeSel.appendChild(optAll);
+
+  g_playlists.playlists.forEach(function(p){
+    var o=document.createElement('option');
+    o.value=p.name;
+    o.textContent=p.name;
+    activeSel.appendChild(o);
+  });
+  activeSel.value=g_playlists.active||'';
+  activeSel.onchange=function(){setActivePlaylist(this.value);};
+
+  cards.innerHTML='';
+  if(!g_playlists.playlists.length){
+    empty.style.display='block';
+    return;
+  }
+  empty.style.display='none';
+
+  g_playlists.playlists.forEach(function(p,idx){
+    var card=document.createElement('div');
+    card.className='pl-card';
+
+    var songsHtml='';
+    if(!p.songs.length){
+      songsHtml='<div class="pl-empty">No songs yet.</div>';
+    } else {
+      songsHtml='<div class="pl-songs">'+p.songs.map(function(name,sidx){
+        return '<div class="pl-song">'
+          +'<span class="pl-song-name">'+(sidx+1)+'. '+esc(name)+'</span>'
+          +'<div class="pl-song-acts">'
+          +'<button class="btn btn-sm btn-ghost" onclick="moveSong('+idx+','+sidx+',-1)">&#8593;</button>'
+          +'<button class="btn btn-sm btn-ghost" onclick="moveSong('+idx+','+sidx+',1)">&#8595;</button>'
+          +'<button class="btn btn-sm btn-ghost" onclick="duplicateSong('+idx+','+sidx+')">Dup</button>'
+          +'<button class="btn btn-sm btn-danger" onclick="removeSong('+idx+','+sidx+')">Del</button>'
+          +'</div></div>';
+      }).join('')+'</div>';
+    }
+
+    var opts=g_files.map(function(n){
+      return '<option value="'+esc(n)+'">'+esc(n)+'</option>';
+    }).join('');
+
+    card.innerHTML=''
+      +'<div class="pl-head">'
+      +'<div class="pl-name">'+esc(p.name)+(g_playlists.active===p.name?' <span style="font-size:11px;color:#9db0ff">(active)</span>':'')+'</div>'
+      +'<div class="pl-actions">'
+      +'<button class="btn btn-sm btn-ghost" onclick="setActivePlaylistByIndex('+idx+')">Set Active</button>'
+      +'<button class="btn btn-sm btn-ghost" onclick="renamePlaylist('+idx+')">Rename</button>'
+      +'<button class="btn btn-sm btn-danger" onclick="deletePlaylist('+idx+')">Delete</button>'
+      +'</div></div>'
+      +'<div class="pl-add">'
+      +'<select id="pl-song-pick-'+idx+'">'+opts+'</select>'
+      +'<button class="btn btn-sm btn-ghost" onclick="addSongToPlaylist('+idx+')">Add Song</button>'
+      +'</div>'
+      +songsHtml;
+
+    cards.appendChild(card);
+  });
+}
+
+window.loadPlaylists=loadPlaylists;
+window.savePlaylists=savePlaylists;
+window.createPlaylist=createPlaylist;
+window.renamePlaylist=renamePlaylist;
+window.deletePlaylist=deletePlaylist;
+window.addSongToPlaylist=addSongToPlaylist;
+window.moveSong=moveSong;
+window.removeSong=removeSong;
+window.duplicateSong=duplicateSong;
+window.setActivePlaylist=setActivePlaylist;
+window.setActivePlaylistByIndex=setActivePlaylistByIndex;
+
 /* ── Tabs ── */
 function switchTab(t){
   document.getElementById('tab-files').style.display=(t==='files'?'':'none');
@@ -608,6 +899,8 @@ function loadConfig(){
     setSlider('start_thresh', c.start_thresh, 2);
     setSlider('release_ticks',c.release_ticks,0);
     setSlider('vol_fade_step',c.vol_fade_step,0);
+    setSlider('dimmer_start_fade_ms',c.dimmer_start_fade_ms,0);
+    setSlider('dimmer_stop_fade_ms',c.dimmer_stop_fade_ms,0);
     if(c.crank_dir!==undefined){document.getElementById('sl-crank_dir').value=String(c.crank_dir);}
     if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
     if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
@@ -625,6 +918,8 @@ function saveConfig(){
   var sta=parseFloat(document.getElementById('sl-start_thresh').value);
   var rt =parseInt(document.getElementById('sl-release_ticks').value);
   var fs =parseInt(document.getElementById('sl-vol_fade_step').value);
+  var dsf=parseInt(document.getElementById('sl-dimmer_start_fade_ms').value);
+  var dso=parseInt(document.getElementById('sl-dimmer_stop_fade_ms').value);
   var cd =parseInt(document.getElementById('sl-crank_dir').value);
   var lbw=parseFloat(document.getElementById('sl-lo_bass_weight').value);
   var lmw=parseFloat(document.getElementById('sl-lo_mid_weight').value);
@@ -634,7 +929,7 @@ function saveConfig(){
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -647,6 +942,8 @@ function resetConfig(){
   setSlider('start_thresh', 0.70, 2);
   setSlider('release_ticks',2,    0);
   setSlider('vol_fade_step',  1,    0);
+  setSlider('dimmer_start_fade_ms', 1000, 0);
+  setSlider('dimmer_stop_fade_ms',  1000, 0);
   document.getElementById('sl-crank_dir').value='-1';
   setSlider('lo_bass_weight', 45,   0);
   setSlider('lo_mid_weight',  5,    1);
@@ -775,6 +1072,7 @@ window.ssSyncFixed=ssSyncFixed;
 window.ssSave=ssSave;
 
 loadFiles();
+loadPlaylists();
 })();
 </script>
 

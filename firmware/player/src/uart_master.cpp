@@ -37,6 +37,7 @@ static um_on_wifi_ctrl_cb_t      s_on_wifi_ctrl     = nullptr;
 static um_on_bt_ctrl_cb_t        s_on_bt_ctrl       = nullptr;
 static um_on_song_settings_req_cb_t  s_on_song_settings_req  = nullptr;
 static um_on_set_song_settings_cb_t  s_on_set_song_settings  = nullptr;
+static um_on_set_active_playlist_cb_t s_on_set_active_playlist = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem  = nullptr;
@@ -188,6 +189,48 @@ void uart_master_set_song_settings_req_callback(um_on_song_settings_req_cb_t cb)
 void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
 {
     s_on_set_song_settings = cb;
+}
+
+void uart_master_set_set_active_playlist_callback(um_on_set_active_playlist_cb_t cb)
+{
+    s_on_set_active_playlist = cb;
+}
+
+void uart_master_send_playlists(const char *active_name,
+                                const char names[][UM_MAX_SONG_NAME],
+                                uint8_t count)
+{
+    uint8_t buf[UM_MAX_PAYLOAD];
+    uint8_t pos = 0;
+
+    const char *active = (active_name != nullptr) ? active_name : "";
+    uint8_t active_len = (uint8_t)strnlen(active, UM_MAX_SONG_NAME - 1);
+
+    if (active_len + 1u > UM_MAX_PAYLOAD) active_len = (uint8_t)(UM_MAX_PAYLOAD - 1u);
+    memcpy(&buf[pos], active, active_len);
+    pos += active_len;
+    buf[pos++] = '\0';
+
+    for (uint8_t i = 0; i < count; ++i) {
+        const char *nm = names[i];
+        uint8_t nm_len = (uint8_t)strnlen(nm, UM_MAX_SONG_NAME - 1);
+        uint8_t needed = (uint8_t)(nm_len + 1u);
+        if (pos + needed > UM_MAX_PAYLOAD) {
+            send_packet(CMD_PLAYLISTS, buf, pos);
+            pos = 0;
+        }
+        memcpy(&buf[pos], nm, nm_len);
+        pos += nm_len;
+        buf[pos++] = '\0';
+    }
+
+    if (pos + 1u > UM_MAX_PAYLOAD) {
+        send_packet(CMD_PLAYLISTS, buf, pos);
+        pos = 0;
+    }
+    buf[pos++] = '\0';
+    send_packet(CMD_PLAYLISTS, buf, pos);
+    ESP_LOGI(TAG, "Sent playlists: active='%s' count=%u", active, (unsigned)count);
 }
 
 /* ── CMD_SONG_SETTINGS ───────────────────────────────────────────────────────────────────── */
@@ -553,6 +596,18 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             if (s_on_set_song_settings)
                 s_on_set_song_settings(song_id, flags, fixed_speed_x100,
                                        dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct);
+        }
+        break;
+
+    case CMD_SET_ACTIVE_PLAYLIST:
+        {
+            char name[UM_MAX_SONG_NAME] = {};
+            uint8_t n = len;
+            if (n >= UM_MAX_SONG_NAME) n = UM_MAX_SONG_NAME - 1;
+            if (n > 0) memcpy(name, payload, n);
+            name[n] = '\0';
+            ESP_LOGI(TAG, "CMD_SET_ACTIVE_PLAYLIST: '%s'", name);
+            if (s_on_set_active_playlist) s_on_set_active_playlist(name);
         }
         break;
 

@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -73,9 +74,11 @@ static const char *TAG = "musicplayer";
  * ====================================================================== */
 
 #define MAX_SONGS      64
+#define MAX_PLAYLISTS  32
 #define MAX_NAME       (UM_MAX_SONG_NAME - 1)
 #define MOUNT_POINT    "/sdcard"
 #define WAV_HDR_BYTES  44u
+#define PLAYLISTS_PATH MOUNT_POINT "/playlists.json"
 
 #define SPEED_MIN  0.7f
 #define SPEED_MAX  1.4f
@@ -86,6 +89,16 @@ static const char *TAG = "musicplayer";
 
 static char    g_song_names[MAX_SONGS][UM_MAX_SONG_NAME];
 static uint8_t g_song_count = 0;
+static char    g_playlist_names[MAX_PLAYLISTS][UM_MAX_SONG_NAME];
+static uint8_t g_playlist_count = 0;
+static char    g_active_playlist[UM_MAX_SONG_NAME] = {0};
+static char    s_scan_all_songs[MAX_SONGS][UM_MAX_SONG_NAME];
+static char    s_scan_resolved[MAX_SONGS][UM_MAX_SONG_NAME];
+static char    s_scan_playlist_names[MAX_PLAYLISTS][UM_MAX_SONG_NAME];
+static char    s_scan_active_playlist[UM_MAX_SONG_NAME];
+static char    s_tx_song_names[MAX_SONGS][UM_MAX_SONG_NAME];
+static char    s_tx_playlist_names[MAX_PLAYLISTS][UM_MAX_SONG_NAME];
+static char    s_tx_active_playlist[UM_MAX_SONG_NAME];
 
 static SemaphoreHandle_t s_state_mutex = nullptr;
 static int16_t  g_current_song = -1;
@@ -138,6 +151,53 @@ static volatile bool    s_cmd_new_song_loaded    = false;
 static esp_timer_handle_t s_wifi_auto_off_timer  = nullptr;
 
 static sdmmc_card_t *s_sdcard = nullptr;
+
+static void strip_wav_ext_copy(const char *in, char *out, size_t out_sz)
+{
+    if (!in || !out || out_sz == 0) return;
+    size_t len = strnlen(in, out_sz - 1);
+    if (len > 4 && strcasecmp(in + len - 4, ".wav") == 0) len -= 4;
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, in, len);
+    out[len] = '\0';
+}
+
+static int find_song_name(const char names[][UM_MAX_SONG_NAME], uint8_t count, const char *name)
+{
+    if (!name) return -1;
+    for (uint8_t i = 0; i < count; ++i) {
+        if (strcmp(names[i], name) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static void send_song_and_playlist_lists_to_display(void)
+{
+    uint8_t count = 0;
+    uint8_t pl_count = 0;
+
+    memset(s_tx_song_names, 0, sizeof(s_tx_song_names));
+    memset(s_tx_playlist_names, 0, sizeof(s_tx_playlist_names));
+    memset(s_tx_active_playlist, 0, sizeof(s_tx_active_playlist));
+
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    count = g_song_count;
+    for (uint8_t i = 0; i < count; ++i) {
+        strncpy(s_tx_song_names[i], g_song_names[i], UM_MAX_SONG_NAME - 1);
+        s_tx_song_names[i][UM_MAX_SONG_NAME - 1] = '\0';
+    }
+    pl_count = g_playlist_count;
+    for (uint8_t i = 0; i < pl_count; ++i) {
+        strncpy(s_tx_playlist_names[i], g_playlist_names[i], UM_MAX_SONG_NAME - 1);
+        s_tx_playlist_names[i][UM_MAX_SONG_NAME - 1] = '\0';
+    }
+    strncpy(s_tx_active_playlist, g_active_playlist, UM_MAX_SONG_NAME - 1);
+    s_tx_active_playlist[UM_MAX_SONG_NAME - 1] = '\0';
+    xSemaphoreGive(s_state_mutex);
+
+    uart_master_send_song_list(s_tx_song_names, count);
+    uart_master_send_playlists(s_tx_active_playlist, s_tx_playlist_names, pl_count);
+}
 
 #ifdef HAVE_ADF
 /* ── Light-organ FFT analysis state ────────────────────────────────────────── */
@@ -326,15 +386,25 @@ static void mount_sd(void)
 
 static void scan_playlist(void)
 {
-    g_song_count = 0;
+    uint8_t all_count = 0;
+    uint8_t playlist_count = 0;
+
+    memset(s_scan_all_songs, 0, sizeof(s_scan_all_songs));
+    memset(s_scan_resolved, 0, sizeof(s_scan_resolved));
+    memset(s_scan_playlist_names, 0, sizeof(s_scan_playlist_names));
+    memset(s_scan_active_playlist, 0, sizeof(s_scan_active_playlist));
+
     DIR *dir = opendir(MOUNT_POINT);
     if (!dir) {
         ESP_LOGE(TAG, "Cannot open " MOUNT_POINT);
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        g_song_count = 0;
+        xSemaphoreGive(s_state_mutex);
         return;
     }
 
     struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr && g_song_count < MAX_SONGS) {
+    while ((entry = readdir(dir)) != nullptr && all_count < MAX_SONGS) {
         if (entry->d_type != DT_REG) continue;
 
         const char *name = entry->d_name;
@@ -346,14 +416,106 @@ static void scan_playlist(void)
 
         size_t base_len = len - 4;
         if (base_len >= UM_MAX_SONG_NAME) base_len = UM_MAX_SONG_NAME - 1;
-        memcpy(g_song_names[g_song_count], name, base_len);
-        g_song_names[g_song_count][base_len] = '\0';
-
-        ESP_LOGI(TAG, "  [%2u] %s", g_song_count, g_song_names[g_song_count]);
-        g_song_count++;
+        memcpy(s_scan_all_songs[all_count], name, base_len);
+        s_scan_all_songs[all_count][base_len] = '\0';
+        all_count++;
     }
     closedir(dir);
-    ESP_LOGI(TAG, "Playlist: %u WAV file(s)", g_song_count);
+
+    uint8_t resolved_count = 0;
+
+    for (uint8_t i = 0; i < all_count && resolved_count < MAX_SONGS; ++i) {
+        strncpy(s_scan_resolved[resolved_count], s_scan_all_songs[i], UM_MAX_SONG_NAME - 1);
+        s_scan_resolved[resolved_count][UM_MAX_SONG_NAME - 1] = '\0';
+        resolved_count++;
+    }
+
+    struct stat pst = {};
+    if (stat(PLAYLISTS_PATH, &pst) == 0 && pst.st_size > 0 && pst.st_size <= 16384) {
+        FILE *pf = fopen(PLAYLISTS_PATH, "r");
+        if (pf) {
+            char *buf = (char *)malloc((size_t)pst.st_size + 1u);
+            if (buf) {
+                size_t n = fread(buf, 1, (size_t)pst.st_size, pf);
+                buf[n] = '\0';
+                cJSON *root = cJSON_Parse(buf);
+                if (root) {
+                    const cJSON *active_item = cJSON_GetObjectItemCaseSensitive(root, "active");
+                    const cJSON *pls_item    = cJSON_GetObjectItemCaseSensitive(root, "playlists");
+
+                    if (cJSON_IsArray(pls_item)) {
+                        const cJSON *pl = nullptr;
+                        cJSON_ArrayForEach(pl, pls_item) {
+                            if (playlist_count >= MAX_PLAYLISTS) break;
+                            const cJSON *nm = cJSON_GetObjectItemCaseSensitive(pl, "name");
+                            if (!cJSON_IsString(nm) || !nm->valuestring || nm->valuestring[0] == '\0') continue;
+                            strncpy(s_scan_playlist_names[playlist_count], nm->valuestring, UM_MAX_SONG_NAME - 1);
+                            s_scan_playlist_names[playlist_count][UM_MAX_SONG_NAME - 1] = '\0';
+                            playlist_count++;
+                        }
+                    }
+
+                    if (cJSON_IsString(active_item) && active_item->valuestring) {
+                        strncpy(s_scan_active_playlist, active_item->valuestring, UM_MAX_SONG_NAME - 1);
+                        s_scan_active_playlist[UM_MAX_SONG_NAME - 1] = '\0';
+                    }
+
+                    if (s_scan_active_playlist[0] != '\0' && cJSON_IsArray(pls_item)) {
+                        const cJSON *pl = nullptr;
+                        cJSON_ArrayForEach(pl, pls_item) {
+                            const cJSON *nm = cJSON_GetObjectItemCaseSensitive(pl, "name");
+                            if (!cJSON_IsString(nm) || !nm->valuestring) continue;
+                            if (strcmp(nm->valuestring, s_scan_active_playlist) != 0) continue;
+
+                            resolved_count = 0;
+                            const cJSON *songs = cJSON_GetObjectItemCaseSensitive(pl, "songs");
+                            if (cJSON_IsArray(songs)) {
+                                const cJSON *se = nullptr;
+                                cJSON_ArrayForEach(se, songs) {
+                                    if (!cJSON_IsString(se) || !se->valuestring) continue;
+                                    if (resolved_count >= MAX_SONGS) break;
+                                    char base[UM_MAX_SONG_NAME] = {};
+                                    strip_wav_ext_copy(se->valuestring, base, sizeof(base));
+                                    if (find_song_name(s_scan_all_songs, all_count, base) >= 0) {
+                                        strncpy(s_scan_resolved[resolved_count], base, UM_MAX_SONG_NAME - 1);
+                                        s_scan_resolved[resolved_count][UM_MAX_SONG_NAME - 1] = '\0';
+                                        resolved_count++;
+                                    }
+                                }
+                            }
+                            ESP_LOGI(TAG, "Active playlist '%s': %u item(s)",
+                                     s_scan_active_playlist, (unsigned)resolved_count);
+                            break;
+                        }
+                    }
+                    cJSON_Delete(root);
+                }
+                free(buf);
+            }
+            fclose(pf);
+        }
+    }
+
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    g_song_count = resolved_count;
+    for (uint8_t i = 0; i < g_song_count; ++i) {
+        strncpy(g_song_names[i], s_scan_resolved[i], UM_MAX_SONG_NAME - 1);
+        g_song_names[i][UM_MAX_SONG_NAME - 1] = '\0';
+    }
+    g_playlist_count = playlist_count;
+    for (uint8_t i = 0; i < g_playlist_count; ++i) {
+        strncpy(g_playlist_names[i], s_scan_playlist_names[i], UM_MAX_SONG_NAME - 1);
+        g_playlist_names[i][UM_MAX_SONG_NAME - 1] = '\0';
+    }
+    strncpy(g_active_playlist, s_scan_active_playlist, UM_MAX_SONG_NAME - 1);
+    g_active_playlist[UM_MAX_SONG_NAME - 1] = '\0';
+    xSemaphoreGive(s_state_mutex);
+
+    ESP_LOGI(TAG, "Playlist: %u active item(s), %u WAV file(s) on SD",
+             (unsigned)g_song_count, (unsigned)all_count);
+    for (uint8_t i = 0; i < g_song_count; ++i) {
+        ESP_LOGI(TAG, "  [%2u] %s", i, g_song_names[i]);
+    }
 }
 
 /**
@@ -362,8 +524,35 @@ static void scan_playlist(void)
  */
 static void player_rescan(void)
 {
+    char old_song[UM_MAX_SONG_NAME] = {};
+    bool had_current = false;
+
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (g_current_song >= 0 && (uint8_t)g_current_song < g_song_count) {
+        strncpy(old_song, g_song_names[(uint8_t)g_current_song], UM_MAX_SONG_NAME - 1);
+        old_song[UM_MAX_SONG_NAME - 1] = '\0';
+        had_current = true;
+    }
+    xSemaphoreGive(s_state_mutex);
+
     scan_playlist();
-    uart_master_send_song_list(g_song_names, g_song_count);
+
+    if (had_current) {
+        xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+        int idx = find_song_name(g_song_names, g_song_count, old_song);
+        if (idx >= 0) {
+            g_current_song = (int16_t)idx;
+        } else if ((g_is_playing || g_is_paused) && g_song_count < MAX_SONGS) {
+            strncpy(g_song_names[g_song_count], old_song, UM_MAX_SONG_NAME - 1);
+            g_song_names[g_song_count][UM_MAX_SONG_NAME - 1] = '\0';
+            g_current_song = (int16_t)g_song_count;
+            g_song_count++;
+            ESP_LOGW(TAG, "Current song '%s' not in active playlist; keeping it until playback stops", old_song);
+        }
+        xSemaphoreGive(s_state_mutex);
+    }
+
+    send_song_and_playlist_lists_to_display();
 }
 
 /* ======================================================================
@@ -822,7 +1011,7 @@ static void audio_task(void *arg)
 
         if (s_cmd_display_ready) {
             s_cmd_display_ready = false;
-            uart_master_send_song_list(g_song_names, g_song_count);
+            send_song_and_playlist_lists_to_display();
         }
 
 #ifdef HAVE_ADF
@@ -951,6 +1140,80 @@ static void on_wifi_ctrl(bool enable)
         s_cmd_wifi_enable  = false;
         if (s_wifi_auto_off_timer) esp_timer_stop(s_wifi_auto_off_timer);
     }
+}
+
+static void on_set_active_playlist(const char *playlist_name)
+{
+    const char *req = playlist_name ? playlist_name : "";
+    ESP_LOGI(TAG, "Display requested active playlist: '%s'", req);
+
+    cJSON *root = nullptr;
+    struct stat st = {};
+    if (stat(PLAYLISTS_PATH, &st) == 0 && st.st_size > 0 && st.st_size <= 16384) {
+        FILE *f = fopen(PLAYLISTS_PATH, "r");
+        if (f) {
+            char *buf = (char *)malloc((size_t)st.st_size + 1u);
+            if (buf) {
+                size_t n = fread(buf, 1, (size_t)st.st_size, f);
+                buf[n] = '\0';
+                root = cJSON_Parse(buf);
+                free(buf);
+            }
+            fclose(f);
+        }
+    }
+
+    if (!root) {
+        root = cJSON_CreateObject();
+        if (!root) return;
+        cJSON_AddStringToObject(root, "active", "");
+        cJSON_AddItemToObject(root, "playlists", cJSON_CreateArray());
+    }
+
+    cJSON *lists = cJSON_GetObjectItemCaseSensitive(root, "playlists");
+    if (!cJSON_IsArray(lists)) {
+        cJSON_DeleteItemFromObjectCaseSensitive(root, "playlists");
+        lists = cJSON_CreateArray();
+        cJSON_AddItemToObject(root, "playlists", lists);
+    }
+
+    bool found = (req[0] == '\0');
+    if (req[0] != '\0') {
+        cJSON *pl = nullptr;
+        cJSON_ArrayForEach(pl, lists) {
+            cJSON *nm = cJSON_GetObjectItemCaseSensitive(pl, "name");
+            if (cJSON_IsString(nm) && nm->valuestring && strcmp(nm->valuestring, req) == 0) {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        ESP_LOGW(TAG, "Requested playlist '%s' not found", req);
+        cJSON_Delete(root);
+        send_song_and_playlist_lists_to_display();
+        return;
+    }
+
+    cJSON_DeleteItemFromObjectCaseSensitive(root, "active");
+    cJSON_AddStringToObject(root, "active", req);
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!out) return;
+
+    FILE *wf = fopen(PLAYLISTS_PATH, "w");
+    if (!wf) {
+        ESP_LOGE(TAG, "Cannot write %s", PLAYLISTS_PATH);
+        cJSON_free(out);
+        return;
+    }
+    fputs(out, wf);
+    fclose(wf);
+    cJSON_free(out);
+
+    player_rescan();
 }
 
 static void on_bt_ctrl(bool enable)
@@ -1264,13 +1527,25 @@ static void io_task(void *arg)
 
             /* ── Dimmer: off during holdoff, optional fade-in, ramp with crank ── */
             {
-                static uint8_t  s_last_dimmer_pct    = 255u;
+                static uint8_t  s_last_dimmer_pct      = 255u; /* latest requested level */
                 static int16_t  s_dimmer_song_id     = -2;   /* -2 = uninitialized */
                 static bool     s_holdoff_was_active = false;
                 static bool     s_dimmer_fadein_on   = false;
                 static uint32_t s_dimmer_fadein_ms   = 0u;
+                static bool     s_resume_fadein_on   = false;
+                static uint32_t s_resume_fadein_ms   = 0u;
+                static bool     s_stop_fadeout_on    = false;
+                static uint32_t s_stop_fadeout_ms    = 0u;
+                static uint8_t  s_stop_fadeout_from  = 0u;
+                static uint8_t  s_stop_fadeout_reason = 0u; /* 1=pulse-loss, 2=moving-fall, 3=song-end */
+                static TickType_t s_stop_fadeout_trace_tick = 0;
                 static float    s_playing_pf         = 0.0f; /* lamp level at last playing tick */
+                static bool     s_prev_playing       = false;
+                static bool     s_prev_instant_active = false;
                 uint8_t dpct;
+
+                float inst_rps = encoder2_get_instant_rps();
+                bool  inst_active = (inst_rps > 0.01f);
 
                 /* Reset fade-in state when the active song changes */
                 if (s_dimmer_song_id != g_current_song) {
@@ -1278,8 +1553,86 @@ static void io_task(void *arg)
                     s_holdoff_was_active = (g_song_dimmer_holdoff_s > 0.0f);
                     s_dimmer_fadein_on   = false;
                     s_dimmer_fadein_ms   = 0u;
+                    s_resume_fadein_on   = false;
+                    s_resume_fadein_ms   = 0u;
+                    s_stop_fadeout_on    = false;
+                    s_stop_fadeout_ms    = 0u;
+                    s_stop_fadeout_from  = 0u;
                     s_playing_pf         = 0.0f;
+                    s_prev_playing       = false;
+                    s_prev_instant_active = false;
                 }
+
+                /* Rising edge while paused means we are about to resume playback.
+                 * Fade lamp in gently to avoid an abrupt brightness step. */
+                if (!s_enc2_was_moving && enc2_move && g_is_paused && g_current_song >= 0) {
+                    if (s_stop_fadeout_on) {
+                        ESP_LOGI("dimmer", "stop_fade cancel: restart edge from=%u elapsed=%u cfg_ms=%u",
+                                 (unsigned)s_stop_fadeout_from,
+                                 (unsigned)s_stop_fadeout_ms,
+                                 (unsigned)g_crank_cfg.dimmer_stop_fade_ms);
+                    }
+                    s_stop_fadeout_on = false;
+                    s_stop_fadeout_ms = 0u;
+                    s_stop_fadeout_reason = 0u;
+                    s_resume_fadein_on = true;
+                    s_resume_fadein_ms = 0u;
+                }
+
+                /* Pulse-loss edge while playing: start dimmer fade-out immediately.
+                 * This prevents the speed-follow branch from collapsing brightness
+                 * before encoder2_is_moving() transitions to false. */
+                if (!s_stop_fadeout_on && s_prev_instant_active && !inst_active
+                    && g_is_playing && !s_enc2_pause_sent) {
+                    s_stop_fadeout_on = true;
+                    s_stop_fadeout_ms = 0u;
+                    s_stop_fadeout_reason = 1u;
+                    s_stop_fadeout_trace_tick = now;
+                    s_stop_fadeout_from = (s_last_dimmer_pct <= 100u)
+                                         ? s_last_dimmer_pct
+                                         : (uint8_t)(s_playing_pf + 0.5f);
+                    ESP_LOGI("dimmer", "stop_fade start: reason=pulse_loss from=%u cfg_ms=%u inst_rps=%.3f moving=%d",
+                             (unsigned)s_stop_fadeout_from,
+                             (unsigned)g_crank_cfg.dimmer_stop_fade_ms,
+                             (double)inst_rps,
+                             (int)enc2_move);
+                }
+
+                /* Falling crank edge while playing: fade lamp from current output level. */
+                if (!s_stop_fadeout_on
+                    && s_enc2_was_moving && !enc2_move
+                    && g_is_playing && !s_enc2_pause_sent) {
+                    s_stop_fadeout_on = true;
+                    s_stop_fadeout_ms = 0u;
+                    s_stop_fadeout_reason = 2u;
+                    s_stop_fadeout_trace_tick = now;
+                    s_stop_fadeout_from = (s_last_dimmer_pct <= 100u)
+                                         ? s_last_dimmer_pct
+                                         : (uint8_t)(s_playing_pf + 0.5f);
+                    ESP_LOGI("dimmer", "stop_fade start: reason=moving_fall from=%u cfg_ms=%u inst_rps=%.3f moving=%d",
+                             (unsigned)s_stop_fadeout_from,
+                             (unsigned)g_crank_cfg.dimmer_stop_fade_ms,
+                             (double)inst_rps,
+                             (int)enc2_move);
+                }
+
+                /* Song reached end and entered stopped state: apply configured fade-out. */
+                if (s_prev_playing && !g_is_playing && !g_is_paused && g_current_song >= 0) {
+                    s_stop_fadeout_on = true;
+                    s_stop_fadeout_ms = 0u;
+                    s_stop_fadeout_reason = 3u;
+                    s_stop_fadeout_trace_tick = now;
+                    s_stop_fadeout_from = (s_last_dimmer_pct <= 100u)
+                                         ? s_last_dimmer_pct
+                                         : (uint8_t)(s_playing_pf + 0.5f);
+                    ESP_LOGI("dimmer", "stop_fade start: reason=song_end from=%u cfg_ms=%u inst_rps=%.3f moving=%d",
+                             (unsigned)s_stop_fadeout_from,
+                             (unsigned)g_crank_cfg.dimmer_stop_fade_ms,
+                             (double)inst_rps,
+                             (int)enc2_move);
+                }
+                /* Keep stop-fade latched once active; internal pulse jitter
+                 * during rundown must not switch back to speed-follow dimming. */
 
                 /* compare audio position against holdoff timestamp */
                 float cur_pos_s = 0.0f;
@@ -1306,6 +1659,43 @@ static void io_task(void *arg)
                         s_dimmer_fadein_on = false;
                     }
                 }
+                if (s_resume_fadein_on) {
+                    s_resume_fadein_ms += 10u;
+                    uint32_t total_ms = (uint32_t)g_crank_cfg.dimmer_start_fade_ms;
+                    if (total_ms == 0u || s_resume_fadein_ms >= total_ms) {
+                        s_resume_fadein_on = false;
+                    }
+                }
+                if (s_stop_fadeout_on) {
+                    s_stop_fadeout_ms += 10u;
+                    uint32_t total_ms = (uint32_t)g_crank_cfg.dimmer_stop_fade_ms;
+                    if ((now - s_stop_fadeout_trace_tick) >= pdMS_TO_TICKS(100)) {
+                        s_stop_fadeout_trace_tick = now;
+                        float dbg_scale = (total_ms > 0u)
+                                          ? (1.0f - ((float)s_stop_fadeout_ms / (float)total_ms))
+                                          : 0.0f;
+                        if (dbg_scale < 0.0f) dbg_scale = 0.0f;
+                        uint8_t dbg_dpct = (uint8_t)((float)s_stop_fadeout_from * dbg_scale + 0.5f);
+                        /*ESP_LOGI("dimmer", "stop_fade trace: reason=%u elapsed=%u/%u from=%u scale=%.3f out=%u inst_rps=%.3f moving=%d",
+                                 (unsigned)s_stop_fadeout_reason,
+                                 (unsigned)s_stop_fadeout_ms,
+                                 (unsigned)total_ms,
+                                 (unsigned)s_stop_fadeout_from,
+                                 (double)dbg_scale,
+                                 (unsigned)dbg_dpct,
+                                 (double)inst_rps,
+                                 (int)enc2_move); */
+                    }
+                    if (total_ms == 0u || s_stop_fadeout_ms >= total_ms) {
+                        s_stop_fadeout_on = false;
+                        /*ESP_LOGI("dimmer", "stop_fade done: reason=%u elapsed=%u cfg_ms=%u from=%u",
+                                 (unsigned)s_stop_fadeout_reason,
+                                 (unsigned)s_stop_fadeout_ms,
+                                 (unsigned)total_ms,
+                                 (unsigned)s_stop_fadeout_from); */
+                        s_stop_fadeout_reason = 0u;
+                    }
+                }
 
                 /* Per-song dimmer params; defaults are 100/0/1.4 */
                 float dmax = (float)g_song_dimmer_max;
@@ -1313,11 +1703,14 @@ static void io_task(void *arg)
                 if (holdoff_active) {
                     dpct = 0u;
                     s_playing_pf = 0.0f; /* stale brightness must not flash when holdoff expires */
-                } else if (s_vol_fading && vol > 0) {
-                    /* Fade from the last actual playing brightness, not from dmax.
-                     * Avoids a jarring jump to full brightness when crank was slow. */
-                    float fade_scale = (float)s_fade_vol / (float)vol;
-                    dpct = (uint8_t)(s_playing_pf * fade_scale + 0.5f);
+                } else if (s_stop_fadeout_on) {
+                    /* Fixed stop-fade independent from audio volume ramp speed. */
+                    uint32_t total_ms = (uint32_t)g_crank_cfg.dimmer_stop_fade_ms;
+                    float scale = (total_ms > 0u)
+                                  ? (1.0f - ((float)s_stop_fadeout_ms / (float)total_ms))
+                                  : 0.0f;
+                    if (scale < 0.0f) scale = 0.0f;
+                    dpct = (uint8_t)((float)s_stop_fadeout_from * scale + 0.5f);
                 } else if ((g_is_playing || s_vol_fadein) && !s_enc2_pause_sent) {
                     /* Dimmer is independent from the audio volume ramp.
                      * s_vol_fadein included so lamp doesn't flash off during the
@@ -1329,7 +1722,10 @@ static void io_task(void *arg)
                         t = (float)g_fft_dimmer_pct / 100.0f;
                     } else {
                         float ref = g_song_dimmer_rps_ref;
-                        t = (ref > 0.0f) ? (encoder2_get_instant_rps() / ref) : 0.0f;
+                        /* Hybrid source: snappy on acceleration (inst_rps), stable on
+                         * rundown (enc2_spd) so stop-fade starts from a useful level. */
+                        float dimmer_rps = (inst_rps > enc2_spd) ? inst_rps : enc2_spd;
+                        t = (ref > 0.0f) ? (dimmer_rps / ref) : 0.0f;
                         if (t > 1.0f) t = 1.0f;
                     }
                     float pf   = dmin + (dmax - dmin) * t;
@@ -1340,16 +1736,28 @@ static void io_task(void *arg)
                         if (scale > 1.0f) scale = 1.0f;
                         pf *= scale;
                     }
+                    if (s_resume_fadein_on) {
+                        uint32_t total_ms = (uint32_t)g_crank_cfg.dimmer_start_fade_ms;
+                        float scale = (total_ms > 0u)
+                                      ? ((float)s_resume_fadein_ms / (float)total_ms)
+                                      : 1.0f;
+                        if (scale > 1.0f) scale = 1.0f;
+                        pf *= scale;
+                    }
                     s_playing_pf = pf; /* remember for smooth fade-out start */
                     dpct = (uint8_t)(pf + 0.5f);
                 } else {
                     dpct = 0u;
                 }
                 if (dpct > 100u) dpct = 100u;
+
                 if (dpct != s_last_dimmer_pct) {
                     s_last_dimmer_pct = dpct;
                     dimmerlink_set_level(dpct);
                 }
+
+                s_prev_playing = g_is_playing;
+                s_prev_instant_active = inst_active;
             }
 
             if (enc2_move) {
@@ -1648,8 +2056,9 @@ extern "C" void app_main(void)
     uart_master_set_bt_ctrl_callback(on_bt_ctrl);
     uart_master_set_song_settings_req_callback(on_song_settings_req);
     uart_master_set_set_song_settings_callback(on_set_song_settings);
+    uart_master_set_set_active_playlist_callback(on_set_active_playlist);
 
-    uart_master_send_song_list(g_song_names, g_song_count);
+    send_song_and_playlist_lists_to_display();
 
     if (!uart_master_sync(500)) {
         /* Display did not respond – auto-enable WiFi so the user can flash it

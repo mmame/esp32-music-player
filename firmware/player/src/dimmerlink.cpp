@@ -269,9 +269,12 @@ void dimmerlink_set_level(uint8_t pct)
 {
     if (pct > 100u) pct = 100u;
 
+    /* Dimmer is unreliable in the 1..4% range: treat it as fully off. */
+    if (pct < 5u) pct = 0u;
+
     /* Log whenever brightness changes – gives a live trace in the monitor. */
-    /*static uint8_t s_last_pct = 0xFFu;
-    if (pct != s_last_pct) {
+    static uint16_t s_last_pct = 0xFFFFu;
+    //if (pct != s_last_pct) {
         s_last_pct = pct;
         // Build a 10-char ASCII bar for quick visual reading
         char bar[11];
@@ -279,11 +282,16 @@ void dimmerlink_set_level(uint8_t pct)
         for (uint8_t i = 0; i < 10u; i++) bar[i] = (i < filled) ? '#' : '.';
         bar[10] = '\0';
         ESP_LOGI(TAG, "level=%3u%% [%s]%s", pct, bar, s_dev ? "" : "  (no hw)");
-    }*/
+    //}
 
-    if (!s_dev) return;
+    if (!s_dev)
+    {
+        ESP_LOGI(TAG, "error: dimmerlink_set_level called but no device handle (not probed?)");
+        return;
+    }
+     
     uint8_t buf[2] = { REG_DIM0_LEVEL, pct };
-    i2c_master_transmit(s_dev, buf, sizeof(buf), /*timeout_ms=*/20);
+    ESP_ERROR_CHECK(i2c_master_transmit(s_dev, buf, sizeof(buf), /*timeout_ms=*/30));
 }
 
 void dimmerlink_suspend(void)

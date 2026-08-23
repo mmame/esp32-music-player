@@ -48,10 +48,15 @@ static song_entry_t         s_songs[SONGLIST_MAX_SONGS];
 static song_settings_cache_t s_settings[SONGLIST_MAX_SONGS];
 static uint8_t      s_song_count = 0;
 static int16_t      s_focused_idx = 0;  /* currently focused list-button index */
+static char         s_playlist_names[SONGLIST_MAX_PLAYLISTS][SONGLIST_PLAYLIST_NAME_LEN];
+static uint8_t      s_playlist_count = 0;
+static char         s_active_playlist[SONGLIST_PLAYLIST_NAME_LEN] = {0};
 
 /* LVGL objects */
 static lv_obj_t   *s_screen      = NULL;
 static lv_obj_t   *s_list        = NULL;
+static lv_obj_t   *s_playlist_title_label = NULL;
+static lv_obj_t   *s_playlist_overlay = NULL;
 static lv_group_t *s_group       = NULL;
 static lv_indev_t *s_enc_indev   = NULL; /* virtual encoder indev */
 
@@ -89,10 +94,14 @@ static uint8_t    s_dimmer_holdoff_s   = 0u;
 static uint8_t    s_dimmer_fadein_s    = 0u;
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
+static void on_playlist_btn_clicked(lv_event_t *e);
+static void on_playlist_pick_clicked(lv_event_t *e);
+static void on_playlist_close_clicked(lv_event_t *e);
 static void on_wifi_btn_clicked(lv_event_t *e);
 static void update_wifi_btn_style(void);
 static void on_bt_btn_clicked(lv_event_t *e);
 static void update_bt_btn_style(void);
+static void update_playlist_caption(void);
 static void update_dimmer_labels(void);
 static void send_play_song(uint16_t song_id);
 static void focus_item(int16_t idx);
@@ -126,6 +135,12 @@ typedef struct {
     int8_t steps;
 } async_encoder_move_t;
 
+typedef struct {
+    uint8_t count;
+    char active[SONGLIST_PLAYLIST_NAME_LEN];
+    char names[SONGLIST_MAX_PLAYLISTS][SONGLIST_PLAYLIST_NAME_LEN];
+} async_playlists_t;
+
 /* =========================================================================
  * WiFi button helpers
  * ========================================================================= */
@@ -158,6 +173,115 @@ static void on_wifi_btn_clicked(lv_event_t *e)
     if (s_wifi_enabled) {
         create_wifi_info_popup();
     }
+}
+
+/* =========================================================================
+ * Playlist selector
+ * ========================================================================= */
+
+static void update_playlist_caption(void)
+{
+    if (!s_playlist_title_label) return;
+    const char *nm = s_active_playlist[0] ? s_active_playlist : "All songs";
+    lv_label_set_text(s_playlist_title_label, nm);
+}
+
+static void on_playlist_pick_clicked(lv_event_t *e)
+{
+    uintptr_t pick = (uintptr_t)lv_event_get_user_data(e);
+    if (pick == 0u) {
+        uart_comm_send_set_active_playlist("");
+    } else {
+        uint8_t idx = (uint8_t)(pick - 1u);
+        if (idx < s_playlist_count) {
+            uart_comm_send_set_active_playlist(s_playlist_names[idx]);
+        }
+    }
+    if (s_playlist_overlay) {
+        lv_obj_delete(s_playlist_overlay);
+        s_playlist_overlay = NULL;
+    }
+}
+
+static void on_playlist_close_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_playlist_overlay) {
+        lv_obj_delete(s_playlist_overlay);
+        s_playlist_overlay = NULL;
+    }
+}
+
+static void on_playlist_btn_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_playlist_overlay) {
+        lv_obj_delete(s_playlist_overlay);
+        s_playlist_overlay = NULL;
+        return;
+    }
+
+    s_playlist_overlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(s_playlist_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_playlist_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_playlist_overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_playlist_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_playlist_overlay, 0, 0);
+    lv_obj_clear_flag(s_playlist_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *box = lv_obj_create(s_playlist_overlay);
+    lv_obj_set_size(box, 460, 360);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 12, 0);
+    lv_obj_set_style_pad_all(box, 14, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, "Select Playlist");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *lst = lv_list_create(box);
+    lv_obj_set_size(lst, 432, 250);
+    lv_obj_align(lst, LV_ALIGN_TOP_MID, 0, 38);
+    lv_obj_set_style_bg_color(lst, lv_color_hex(0x10223A), 0);
+    lv_obj_set_style_bg_opa(lst, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(lst, 0, 0);
+
+    lv_obj_t *btn_all = lv_list_add_button(lst, LV_SYMBOL_LIST, "All songs");
+    lv_obj_add_event_cb(btn_all, on_playlist_pick_clicked, LV_EVENT_CLICKED, (void *)0u);
+
+    for (uint8_t i = 0; i < s_playlist_count; ++i) {
+        char txt[SONGLIST_PLAYLIST_NAME_LEN + 6];
+        if (strcmp(s_playlist_names[i], s_active_playlist) == 0) {
+            snprintf(txt, sizeof(txt), "%s *", s_playlist_names[i]);
+        } else {
+            snprintf(txt, sizeof(txt), "%s", s_playlist_names[i]);
+        }
+        lv_obj_t *b = lv_list_add_button(lst, LV_SYMBOL_AUDIO, txt);
+        lv_obj_add_event_cb(b, on_playlist_pick_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1u));
+    }
+
+    lv_obj_t *close_btn = lv_obj_create(box);
+    lv_obj_set_size(close_btn, 140, 42);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x2A2A3E), 0);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(close_btn, lv_color_hex(0x505060), 0);
+    lv_obj_set_style_border_width(close_btn, 1, 0);
+    lv_obj_set_style_radius(close_btn, 8, 0);
+    lv_obj_clear_flag(close_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(close_btn, on_playlist_close_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cl = lv_label_create(close_btn);
+    lv_label_set_text(cl, "Close");
+    lv_obj_set_style_text_font(cl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(cl, lv_color_hex(0xC8C8E0), 0);
+    lv_obj_center(cl);
 }
 
 /* =========================================================================
@@ -274,12 +398,37 @@ void ui_songlist_create(void)
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_screen, 0, 0);
 
-    /* Title label */
-    lv_obj_t *title = lv_label_create(s_screen);
-    lv_label_set_text(title, "SONG LIST");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
+    /* Header title: active playlist name, tap to open playlist picker */
+    lv_obj_t *title_btn = lv_obj_create(s_screen);
+    lv_obj_set_size(title_btn, 400, 44);
+    lv_obj_align(title_btn, LV_ALIGN_TOP_MID, 0, 6);
+    lv_obj_set_style_bg_color(title_btn, lv_color_hex(0x2A2A3E), 0);
+    lv_obj_set_style_bg_opa(title_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(title_btn, lv_color_hex(0x1E88E5), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(title_btn, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(title_btn, lv_color_hex(0x505060), 0);
+    lv_obj_set_style_border_width(title_btn, 1, 0);
+    lv_obj_set_style_radius(title_btn, 10, 0);
+    lv_obj_set_style_pad_left(title_btn, 12, 0);
+    lv_obj_set_style_pad_right(title_btn, 12, 0);
+    lv_obj_set_style_pad_top(title_btn, 0, 0);
+    lv_obj_set_style_pad_bottom(title_btn, 0, 0);
+    lv_obj_clear_flag(title_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(title_btn, on_playlist_btn_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_flex_flow(title_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(title_btn, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_playlist_title_label = lv_label_create(title_btn);
+    lv_label_set_text(s_playlist_title_label, "All songs");
+    lv_obj_set_style_text_font(s_playlist_title_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_playlist_title_label, lv_color_hex(0xE0E0FF), 0);
+    lv_label_set_long_mode(s_playlist_title_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(s_playlist_title_label, 340);
+
+    lv_obj_t *title_drop_icon = lv_label_create(title_btn);
+    lv_label_set_text(title_drop_icon, LV_SYMBOL_DOWN);
+    lv_obj_set_style_text_font(title_drop_icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(title_drop_icon, lv_color_hex(0xC8C8E0), 0);
 
     /* BT toggle button – left of the WiFi button */
     s_bt_btn = lv_obj_create(s_screen);
@@ -324,9 +473,9 @@ void ui_songlist_create(void)
 
     /* List – fills remaining vertical space below the title */
     s_list = lv_list_create(s_screen);
-    lv_coord_t list_h = (lv_coord_t)lv_disp_get_ver_res(lv_disp_get_default()) - 56;
+    lv_coord_t list_h = (lv_coord_t)lv_disp_get_ver_res(lv_disp_get_default()) - 74;
     lv_obj_set_size(s_list, LV_PCT(100), list_h);
-    lv_obj_align(s_list, LV_ALIGN_TOP_MID, 0, 56);
+    lv_obj_align(s_list, LV_ALIGN_TOP_MID, 0, 74);
     lv_obj_set_style_bg_color(s_list, lv_color_hex(0x16213E), 0);
     lv_obj_set_style_bg_opa(s_list, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_list, 0, 0);
@@ -1092,6 +1241,42 @@ static void async_cb_update_wifi_enabled(void *user_data)
     bool enabled = (bool)(uintptr_t)user_data;
     s_wifi_enabled = enabled;
     if (s_wifi_btn) update_wifi_btn_style();
+}
+
+static void async_cb_playlists(void *user_data)
+{
+    async_playlists_t *p = (async_playlists_t *)user_data;
+    s_playlist_count = (p->count <= SONGLIST_MAX_PLAYLISTS) ? p->count : SONGLIST_MAX_PLAYLISTS;
+    strncpy(s_active_playlist, p->active, SONGLIST_PLAYLIST_NAME_LEN - 1);
+    s_active_playlist[SONGLIST_PLAYLIST_NAME_LEN - 1] = '\0';
+    for (uint8_t i = 0; i < s_playlist_count; ++i) {
+        strncpy(s_playlist_names[i], p->names[i], SONGLIST_PLAYLIST_NAME_LEN - 1);
+        s_playlist_names[i][SONGLIST_PLAYLIST_NAME_LEN - 1] = '\0';
+    }
+    update_playlist_caption();
+    free(p);
+}
+
+void ui_songlist_playlists_async(const char *active_name,
+                                 const char names[][SONGLIST_PLAYLIST_NAME_LEN],
+                                 uint8_t count)
+{
+    if (!s_screen) return;
+    async_playlists_t *p = (async_playlists_t *)malloc(sizeof(async_playlists_t));
+    if (!p) return;
+    memset(p, 0, sizeof(*p));
+    p->count = (count <= SONGLIST_MAX_PLAYLISTS) ? count : SONGLIST_MAX_PLAYLISTS;
+    if (active_name) {
+        strncpy(p->active, active_name, SONGLIST_PLAYLIST_NAME_LEN - 1);
+        p->active[SONGLIST_PLAYLIST_NAME_LEN - 1] = '\0';
+    }
+    for (uint8_t i = 0; i < p->count; ++i) {
+        strncpy(p->names[i], names[i], SONGLIST_PLAYLIST_NAME_LEN - 1);
+        p->names[i][SONGLIST_PLAYLIST_NAME_LEN - 1] = '\0';
+    }
+    lv_lock();
+    lv_async_call(async_cb_playlists, p);
+    lv_unlock();
 }
 
 void ui_songlist_update_wifi_enabled_async(bool enabled)

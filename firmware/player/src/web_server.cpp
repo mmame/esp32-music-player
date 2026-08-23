@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/param.h>
 #include <dirent.h>
@@ -60,6 +61,7 @@ static const char *TAG = "web_server";
 #define XFER_BUF_SIZE  16384   /* bytes per SD read/write chunk            */
 #define MAX_FNAME_LEN    128   /* max accepted filename length (bytes)     */
 #define MAX_BASENAME_LEN  44   /* max basename chars (excl. .wav extension) */
+#define PLAYLISTS_CFG_PATH MOUNT_POINT "/playlists.json"
 
 /* ── State ─────────────────────────────────────────────────────────── */
 static rescan_cb_t           s_rescan_cb         = nullptr;
@@ -113,6 +115,59 @@ static bool fname_valid(const char *name)
             (e[1] == 'w' || e[1] == 'W') &&
             (e[2] == 'a' || e[2] == 'A') &&
             (e[3] == 'v' || e[3] == 'V'));
+}
+
+static int ascii_tolower(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
+}
+
+static bool streq_ci(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (ascii_tolower((unsigned char)*a) != ascii_tolower((unsigned char)*b)) return false;
+        ++a;
+        ++b;
+    }
+    return (*a == '\0' && *b == '\0');
+}
+
+static void trim_copy(const char *src, char *dst, size_t dst_len)
+{
+    if (!dst || dst_len == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+
+    const char *beg = src;
+    while (*beg && isspace((unsigned char)*beg)) ++beg;
+
+    const char *end = src + strlen(src);
+    while (end > beg && isspace((unsigned char)end[-1])) --end;
+
+    size_t n = (size_t)(end - beg);
+    if (n >= dst_len) n = dst_len - 1;
+    memcpy(dst, beg, n);
+    dst[n] = '\0';
+}
+
+static bool playlist_name_reserved(const char *name)
+{
+    return name && streq_ci(name, "All songs");
+}
+
+static bool playlist_array_contains_name_ci(const cJSON *arr, const char *name)
+{
+    if (!cJSON_IsArray(arr) || !name) return false;
+    cJSON *it = nullptr;
+    cJSON_ArrayForEach(it, arr) {
+        cJSON *nm = cJSON_GetObjectItemCaseSensitive(it, "name");
+        if (cJSON_IsString(nm) && nm->valuestring && streq_ci(nm->valuestring, name)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /** Build an absolute SD-card path from a bare filename. */
@@ -507,6 +562,186 @@ static esp_err_t delete_handler(httpd_req_t *req)
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
+
+/* ── GET /api/playlists ─────────────────────────────────────────────── */
+
+static esp_err_t playlists_get_handler(httpd_req_t *req)
+{
+    const char *fallback = "{\"active\":\"\",\"playlists\":[]}";
+    struct stat st = {};
+    if (stat(PLAYLISTS_CFG_PATH, &st) != 0 || st.st_size <= 0 || st.st_size > 16384) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+        return httpd_resp_sendstr(req, fallback);
+    }
+
+    FILE *f = fopen(PLAYLISTS_CFG_PATH, "r");
+    if (!f) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+        return httpd_resp_sendstr(req, fallback);
+    }
+
+    char *buf = (char *)malloc((size_t)st.st_size + 1u);
+    if (!buf) {
+        fclose(f);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    size_t n = fread(buf, 1, (size_t)st.st_size, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+
+    if (!root) {
+        return httpd_resp_sendstr(req, fallback);
+    }
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!out) {
+        return httpd_resp_sendstr(req, fallback);
+    }
+
+    esp_err_t ret = httpd_resp_sendstr(req, out);
+    cJSON_free(out);
+    return ret;
+}
+
+/* ── POST /api/playlists ────────────────────────────────────────────── */
+
+static esp_err_t playlists_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > 16384) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large or empty");
+        return ESP_FAIL;
+    }
+
+    char *body = (char *)malloc((size_t)req->content_len + 1u);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    int r = httpd_req_recv(req, body, (size_t)req->content_len);
+    if (r <= 0) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    body[r] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root || !cJSON_IsObject(root)) {
+        if (root) cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *src_active = cJSON_GetObjectItemCaseSensitive(root, "active");
+    cJSON *src_lists  = cJSON_GetObjectItemCaseSensitive(root, "playlists");
+    if (!cJSON_IsArray(src_lists)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "playlists must be an array");
+        return ESP_FAIL;
+    }
+
+    cJSON *out = cJSON_CreateObject();
+    cJSON *out_lists = cJSON_CreateArray();
+    if (!out || !out_lists) {
+        cJSON_Delete(root);
+        if (out) cJSON_Delete(out);
+        if (out_lists) cJSON_Delete(out_lists);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    int list_count = 0;
+    cJSON *pl = nullptr;
+    cJSON_ArrayForEach(pl, src_lists) {
+        if (!cJSON_IsObject(pl)) continue;
+        cJSON *nm = cJSON_GetObjectItemCaseSensitive(pl, "name");
+        cJSON *sg = cJSON_GetObjectItemCaseSensitive(pl, "songs");
+        if (!cJSON_IsString(nm) || !nm->valuestring) continue;
+        if (!cJSON_IsArray(sg)) continue;
+
+        char clean_name[MAX_FNAME_LEN + 1];
+        trim_copy(nm->valuestring, clean_name, sizeof(clean_name));
+        if (clean_name[0] == '\0') continue;
+        if (playlist_name_reserved(clean_name)) continue;
+        if (playlist_array_contains_name_ci(out_lists, clean_name)) continue;
+
+        cJSON *one = cJSON_CreateObject();
+        cJSON *songs = cJSON_CreateArray();
+        if (!one || !songs) {
+            if (one) cJSON_Delete(one);
+            if (songs) cJSON_Delete(songs);
+            cJSON_Delete(root);
+            cJSON_Delete(out);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+            return ESP_FAIL;
+        }
+
+        cJSON_AddStringToObject(one, "name", clean_name);
+
+        int song_count = 0;
+        cJSON *se = nullptr;
+        cJSON_ArrayForEach(se, sg) {
+            if (song_count >= 256) break;
+            if (!cJSON_IsString(se) || !se->valuestring) continue;
+            if (!fname_valid(se->valuestring)) continue;
+            cJSON_AddItemToArray(songs, cJSON_CreateString(se->valuestring));
+            song_count++;
+        }
+
+        cJSON_AddItemToObject(one, "songs", songs);
+        cJSON_AddItemToArray(out_lists, one);
+        list_count++;
+        if (list_count >= 32) break;
+    }
+
+    char active_name[MAX_FNAME_LEN + 1] = {0};
+    if (cJSON_IsString(src_active) && src_active->valuestring) {
+        trim_copy(src_active->valuestring, active_name, sizeof(active_name));
+        if (playlist_name_reserved(active_name)) {
+            active_name[0] = '\0';
+        }
+    }
+
+    bool active_exists = (active_name[0] != '\0') && playlist_array_contains_name_ci(out_lists, active_name);
+
+    cJSON_AddStringToObject(out, "active", active_exists ? active_name : "");
+    cJSON_AddItemToObject(out, "playlists", out_lists);
+
+    char *json = cJSON_PrintUnformatted(out);
+    cJSON_Delete(out);
+    cJSON_Delete(root);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    FILE *f = fopen(PLAYLISTS_CFG_PATH, "w");
+    if (!f) {
+        cJSON_free(json);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot write playlists file");
+        return ESP_FAIL;
+    }
+    fputs(json, f);
+    fclose(f);
+    cJSON_free(json);
+
+    if (s_rescan_cb) s_rescan_cb();
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, "OK");
+}
 /* ── GET /api/crank_config ─────────────────────────────────────────── */
 
 static esp_err_t crank_config_get_handler(httpd_req_t *req)
@@ -515,7 +750,8 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
     snprintf(buf, sizeof(buf),
              "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
              "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
-             "\"release_ticks\":%u,\"vol_fade_step\":%u,\"crank_dir\":%d,"
+             "\"release_ticks\":%u,\"vol_fade_step\":%u,"
+             "\"dimmer_start_fade_ms\":%u,\"dimmer_stop_fade_ms\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
              "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
              "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u}",
@@ -525,6 +761,8 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (double)g_crank_cfg.start_thresh,
              (unsigned)g_crank_cfg.release_ticks,
              (unsigned)g_crank_cfg.vol_fade_step,
+             (unsigned)g_crank_cfg.dimmer_start_fade_ms,
+             (unsigned)g_crank_cfg.dimmer_stop_fade_ms,
              (int)g_crank_cfg.crank_dir,
              (double)g_crank_cfg.lo_bass_weight,
              (double)g_crank_cfg.lo_mid_weight,
@@ -577,6 +815,13 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
             if (v >= mn && v <= mx) *dst = (uint8_t)v;
         }
     };
+    auto read_u16 = [](cJSON *obj, const char *key, int mn, int mx, uint16_t *dst) {
+        cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+        if (cJSON_IsNumber(it)) {
+            int v = (int)it->valuedouble;
+            if (v >= mn && v <= mx) *dst = (uint16_t)v;
+        }
+    };
 
     read_f (root, "ema_attack",    0.005f, 0.500f, &nc.ema_attack);
     read_f (root, "ema_release",   0.500f, 2.000f, &nc.ema_release);
@@ -584,6 +829,8 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_f (root, "start_thresh",  0.200f, 1.200f, &nc.start_thresh);
     read_u8(root, "release_ticks", 0, 10, &nc.release_ticks);
     read_u8(root, "vol_fade_step", 1, 10, &nc.vol_fade_step);
+    read_u16(root, "dimmer_start_fade_ms", 0, 5000, &nc.dimmer_start_fade_ms);
+    read_u16(root, "dimmer_stop_fade_ms",  0, 5000, &nc.dimmer_stop_fade_ms);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
@@ -1106,7 +1353,7 @@ static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 16384; /* OTA end/SHA256 verification needs more than default 4K */
-    cfg.max_uri_handlers  = 14;
+    cfg.max_uri_handlers  = 16;
     cfg.recv_wait_timeout = 60;    /* seconds – generous for large OTA uploads */
     cfg.send_wait_timeout = 60;
     cfg.lru_purge_enable  = true;
@@ -1121,6 +1368,8 @@ static httpd_handle_t start_webserver(void)
         { "/",                   HTTP_GET,    root_get_handler,              nullptr },
         { "/update",             HTTP_GET,    update_get_handler,            nullptr },
         { "/api/files",          HTTP_GET,    files_get_handler,             nullptr },
+        { "/api/playlists",      HTTP_GET,    playlists_get_handler,         nullptr },
+        { "/api/playlists",      HTTP_POST,   playlists_post_handler,        nullptr },
         { "/api/crank_config",   HTTP_GET,    crank_config_get_handler,      nullptr },
         { "/api/crank_config",   HTTP_POST,   crank_config_post_handler,     nullptr },
         { "/api/pot_cal",        HTTP_POST,   pot_cal_post_handler,          nullptr },

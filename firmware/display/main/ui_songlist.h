@@ -23,6 +23,8 @@ extern "C" {
 
 /* Maximum songs the list can display at once */
 #define SONGLIST_MAX_SONGS  128
+#define SONGLIST_MAX_PLAYLISTS 32
+#define SONGLIST_PLAYLIST_NAME_LEN 128
 
 /* ---------- Lifecycle ----------------------------------------------------- */
 
@@ -120,6 +122,17 @@ void ui_songlist_update_bt_enabled_async(bool enabled);
  *        Safe to call from any task / core.
  */
 void ui_songlist_update_wifi_enabled_async(bool enabled);
+
+/**
+ * @brief Update playlist names and active-playlist label from UART task.
+ *
+ * @param active_name  Active playlist name, or empty for "all songs".
+ * @param names        Playlist names array.
+ * @param count        Number of entries in @p names.
+ */
+void ui_songlist_playlists_async(const char *active_name,
+                                 const char names[][SONGLIST_PLAYLIST_NAME_LEN],
+                                 uint8_t count);
 
 /**
  * @brief Open the song-settings dialog for @p song_id on whatever screen is

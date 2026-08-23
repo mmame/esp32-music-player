@@ -57,6 +57,8 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_SONG_SETTINGS       0x11  /* Host → Display: current settings for a song        */
 #define CMD_SET_SONG_SETTINGS   0x12  /* Display → Host: write new settings for a song      */
 #define CMD_BT_CTRL             0x13  /* Display → Host: enable (1) / disable (0) BLE module */
+#define CMD_PLAYLISTS           0x14  /* Host → Display: active playlist + playlist names     */
+#define CMD_SET_ACTIVE_PLAYLIST 0x15  /* Display → Host: select active playlist by name        */
 #define CMD_ACK                 0xFF  /* Display → Host: ACK with optional touch            */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -142,6 +144,13 @@ typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  dimmer_fadein_s,
                                              uint8_t  pitch_influence_pct);
 
+/**
+ * @brief Called when the display requests switching the active playlist.
+ *
+ * @param playlist_name  UTF-8 playlist name; empty string selects "all songs".
+ */
+typedef void (*um_on_set_active_playlist_cb_t)(const char *playlist_name);
+
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
 /**
@@ -192,6 +201,23 @@ void uart_master_set_song_settings_req_callback(um_on_song_settings_req_cb_t cb)
  * @brief Register the callback for CMD_SET_SONG_SETTINGS.
  */
 void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb);
+
+/**
+ * @brief Register the callback for CMD_SET_ACTIVE_PLAYLIST.
+ */
+void uart_master_set_set_active_playlist_callback(um_on_set_active_playlist_cb_t cb);
+
+/**
+ * @brief Send playlist metadata to the display.
+ *
+ * Wire format:
+ *   [active_name '\0'][playlist_0 '\0'][playlist_1 '\0'] ... ['\0']
+ * The final extra '\0' terminates the whole transfer. Empty active_name
+ * means "all songs on SD".
+ */
+void uart_master_send_playlists(const char *active_name,
+                                const char names[][UM_MAX_SONG_NAME],
+                                uint8_t count);
 
 /**
  * @brief Send CMD_SONG_SETTINGS to the display.

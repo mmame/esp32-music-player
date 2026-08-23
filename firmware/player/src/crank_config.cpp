@@ -25,6 +25,8 @@ void crank_config_defaults(crank_config_t *c)
     c->start_thresh  = 0.700f;
     c->release_ticks = 2;
     c->vol_fade_step  = 1;
+    c->dimmer_start_fade_ms = 1000;
+    c->dimmer_stop_fade_ms  = 1000;
     c->crank_dir      = -1;
     c->lo_bass_weight = 45.0f;
     c->lo_mid_weight  = 5.0f;
@@ -91,6 +93,8 @@ void crank_config_load(void)
     read_f (root, "start_thresh",  0.200f, 1.200f, &g_crank_cfg.start_thresh);
     read_u8(root, "release_ticks", 0, 10, &g_crank_cfg.release_ticks);
     read_u8(root, "vol_fade_step",  1,   10,  &g_crank_cfg.vol_fade_step);
+    read_u16(root, "dimmer_start_fade_ms", 0, 5000, &g_crank_cfg.dimmer_start_fade_ms);
+    read_u16(root, "dimmer_stop_fade_ms",  0, 5000, &g_crank_cfg.dimmer_stop_fade_ms);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
@@ -107,11 +111,13 @@ void crank_config_load(void)
     read_u16(root, "pot_cal_hi",    0, 4095, &g_crank_cfg.pot_cal_hi);
 
     cJSON_Delete(root);
-    ESP_LOGI(TAG, "Loaded: attack=%.3f rel=%.1f stop=%.2f start=%.2f rt=%u fs=%u",
+    ESP_LOGI(TAG, "Loaded: attack=%.3f rel=%.1f stop=%.2f start=%.2f rt=%u fs=%u ds=%u de=%u",
              g_crank_cfg.ema_attack, g_crank_cfg.ema_release,
              g_crank_cfg.stop_thresh, g_crank_cfg.start_thresh,
              (unsigned)g_crank_cfg.release_ticks,
-             (unsigned)g_crank_cfg.vol_fade_step);
+             (unsigned)g_crank_cfg.vol_fade_step,
+             (unsigned)g_crank_cfg.dimmer_start_fade_ms,
+             (unsigned)g_crank_cfg.dimmer_stop_fade_ms);
 }
 
 /* ── save ──────────────────────────────────────────────────────────────── */
@@ -127,6 +133,8 @@ void crank_config_save(void)
     cJSON_AddNumberToObject(root, "start_thresh",  (double)g_crank_cfg.start_thresh);
     cJSON_AddNumberToObject(root, "release_ticks", (double)g_crank_cfg.release_ticks);
     cJSON_AddNumberToObject(root, "vol_fade_step",  (double)g_crank_cfg.vol_fade_step);
+    cJSON_AddNumberToObject(root, "dimmer_start_fade_ms", (double)g_crank_cfg.dimmer_start_fade_ms);
+    cJSON_AddNumberToObject(root, "dimmer_stop_fade_ms",  (double)g_crank_cfg.dimmer_stop_fade_ms);
     cJSON_AddNumberToObject(root, "crank_dir",       (double)g_crank_cfg.crank_dir);
     cJSON_AddNumberToObject(root, "lo_bass_weight",  (double)g_crank_cfg.lo_bass_weight);
     cJSON_AddNumberToObject(root, "lo_mid_weight",   (double)g_crank_cfg.lo_mid_weight);
