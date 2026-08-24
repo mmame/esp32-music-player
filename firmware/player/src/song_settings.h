@@ -26,6 +26,8 @@ extern "C" {
  *   "dimmer_holdoff_s"  : number  – song-position timestamp (s) before which dimmer is suppressed (default 0).
  *   "dimmer_fadein_s"   : number  – seconds to fade from 0 to full brightness when holdoff expires (default 0).
  *   "light_organ"       : boolean – drive dimmer brightness from audio FFT energy instead of crank speed.
+ *   "downmix_mode"      : number  – stereo->mono mode: 0=mix, 1=CH1 only, 2=CH2 only.
+ *   "downmix_fade_s"    : number  – fade time in seconds for live downmix-mode changes (0-10).
  */
 
 typedef struct {
@@ -39,6 +41,8 @@ typedef struct {
     uint8_t dimmer_holdoff_s;/**< song-position timestamp (s) before which dimmer is suppressed */
     uint8_t dimmer_fadein_s; /**< seconds to fade from 0→full brightness after holdoff expires  */
     bool    light_organ;     /**< true: dimmer driven by FFT audio energy instead of crank speed */
+    uint8_t downmix_mode;    /**< 0=L+R mix (default), 1=CH1 only, 2=CH2 only                    */
+    uint8_t downmix_fade_s;  /**< live downmix fade duration in seconds (0-10)                    */
 } song_settings_t;
 
 /**

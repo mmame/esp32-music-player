@@ -50,10 +50,18 @@ static const char *TAG = "ui_player";
 #define NEXT_SONG_LBL_Y  (STATUS_LBL_Y + 24)  /* next-song name label              */
 #define GEAR_BTN_W       80
 #define GEAR_BTN_H       80
+#define BTN_ROW_SHIFT_X  90
 /* Centered button row [STOP][gap][NEXT][gap][GEAR] */
-#define STOP_BTN_X       ((SPLIT_X - STOP_W - BTN_GAP - NEXT_BTN_W - BTN_GAP - GEAR_BTN_W) / 2)
+#define STOP_BTN_X       (((SPLIT_X - STOP_W - BTN_GAP - NEXT_BTN_W - BTN_GAP - GEAR_BTN_W) / 2) + BTN_ROW_SHIFT_X)
 #define NEXT_BTN_X       (STOP_BTN_X + STOP_W + BTN_GAP)
 #define GEAR_BTN_X       (NEXT_BTN_X + NEXT_BTN_W + BTN_GAP)
+
+/* Left-side downmix selector (3 stacked buttons) */
+#define DOWNMIX_COL_X    34
+#define DOWNMIX_COL_Y    288
+#define DOWNMIX_COL_W    92
+#define DOWNMIX_BTN_H    50
+#define DOWNMIX_BTN_GAP  10
 
 /* Right panel – two indicator columns */
 #define COL_W            (RIGHT_W / 2)   /* 100 px per column               */
@@ -113,6 +121,8 @@ static bool      s_tempo_locked       = false;
 static uint8_t   s_locked_tempo       = 50;    /* last known / locked poti-scale value */
 static uint8_t   s_locked_spd_min_x10 = 4;    /* cached range for label computation   */
 static uint8_t   s_locked_spd_max_x10 = 20;
+static lv_obj_t *s_downmix_btns[3]    = {NULL, NULL, NULL};
+static uint8_t   s_downmix_mode       = 0u;   /* 0=MIX, 1=CH1, 2=CH2 */
 
 /* Indeterminate progress animation */
 static bool      s_prog_anim_active = false;
@@ -132,6 +142,18 @@ static void stop_progress_anim(void)
     lv_anim_delete(s_progress_bar, prog_anim_exec_cb);
     lv_bar_set_value(s_progress_bar, 0, LV_ANIM_OFF);
     s_prog_anim_active = false;
+}
+
+static void refresh_downmix_buttons(void)
+{
+    for (uint8_t i = 0; i < 3u; ++i) {
+        lv_obj_t *btn = s_downmix_btns[i];
+        if (!btn) continue;
+        bool active = (i == s_downmix_mode);
+        lv_obj_set_style_bg_color(btn, active ? lv_color_hex(0x1E88E5) : lv_color_hex(0x2A2A3E), 0);
+        lv_obj_set_style_border_color(btn, active ? lv_color_hex(0x7CC6FF) : lv_color_hex(0x505060), 0);
+        lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
+    }
 }
 
 /** Helper: create one vertical indicator column on the right panel. */
@@ -259,6 +281,15 @@ static void on_next_clicked(lv_event_t *e)
     if (next_id != 0) {
         uart_comm_send_play_song(next_id);
     }
+}
+
+static void on_downmix_clicked(lv_event_t *e)
+{
+    uint8_t mode = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    if (mode > 2u) return;
+    s_downmix_mode = mode;
+    refresh_downmix_buttons();
+    uart_comm_send_downmix_mode(s_downmix_mode);
 }
 
 /* =========================================================================
@@ -410,6 +441,30 @@ void ui_player_create(void)
     lv_obj_set_style_text_color(gear_icon, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_center(gear_icon);
 
+    /* Left-side downmix mode selector (MIX / CH1 / CH2). */
+    static const char *k_dmx_labels[3] = {"MIX", "CH1", "CH2"};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        lv_obj_t *btn = lv_button_create(left);
+        s_downmix_btns[i] = btn;
+        lv_obj_set_size(btn, DOWNMIX_COL_W, DOWNMIX_BTN_H);
+        lv_obj_set_pos(btn, DOWNMIX_COL_X,
+                       DOWNMIX_COL_Y + (lv_coord_t)i * (DOWNMIX_BTN_H + DOWNMIX_BTN_GAP));
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A2A3E), 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x505060), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_add_event_cb(btn, on_downmix_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, k_dmx_labels[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(COLOR_TEXT), 0);
+        lv_obj_center(lbl);
+    }
+    refresh_downmix_buttons();
+
     /* ---- Vertical separator between left and right panels -------------- */
     lv_obj_t *sep = lv_obj_create(s_screen);
     lv_obj_set_size(sep, 2, SCREEN_H);
@@ -505,6 +560,8 @@ static void async_cb_show(void *user_data)
     /* Reset indicators until settings response arrives */
     s_bypass_active = false;
     s_tempo_locked  = false;
+    s_downmix_mode  = 0u;
+    refresh_downmix_buttons();
     if (s_loop_lbl)   lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
     if (s_bypass_lbl) lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
     /* HOLD label: greyed (not locked) */
@@ -558,6 +615,8 @@ static void async_cb_hide(void *user_data)
     (void)user_data;
     s_bypass_active   = false;
     s_tempo_locked    = false;
+    s_downmix_mode    = 0u;
+    refresh_downmix_buttons();
     s_current_song_id = 0;
     s_current_song_name[0] = '\0';
     /* Hide song-setting indicators; reset HOLD label to greyed */
@@ -727,6 +786,7 @@ typedef struct {
     uint8_t  dimmer_holdoff_s;
     uint8_t  dimmer_fadein_s;
     uint8_t  pitch_influence_pct;
+    uint8_t  downmix_mode;
 } async_player_settings_t;
 
 static void async_cb_song_settings_player(void *user_data)
@@ -741,6 +801,8 @@ static void async_cb_song_settings_player(void *user_data)
 
     bool loop_en  = (p->flags & 0x01u) != 0;
     bool speed_en = (p->flags & 0x02u) != 0;
+    s_downmix_mode = (p->downmix_mode <= 2u) ? p->downmix_mode : 0u;
+    refresh_downmix_buttons();
 
     bool prev_bypass = s_bypass_active;
     s_bypass_active  = speed_en;
@@ -786,7 +848,8 @@ void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  dimmer_rps_ref_x10,
                                    uint8_t  dimmer_holdoff_s,
                                    uint8_t  dimmer_fadein_s,
-                                   uint8_t  pitch_influence_pct)
+                                   uint8_t  pitch_influence_pct,
+                                   uint8_t  downmix_mode)
 {
     if (!s_screen) return;
 
@@ -801,6 +864,7 @@ void ui_player_song_settings_async(uint16_t song_id,
     p->dimmer_holdoff_s    = dimmer_holdoff_s;
     p->dimmer_fadein_s     = dimmer_fadein_s;
     p->pitch_influence_pct = pitch_influence_pct;
+    p->downmix_mode        = (downmix_mode <= 2u) ? downmix_mode : 0u;
     lv_lock();
     lv_async_call(async_cb_song_settings_player, p);
     lv_unlock();

@@ -77,6 +77,7 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_BT_CTRL             0x13  /* Display -> Host: enable (1) / disable (0) BLE module */
 #define CMD_PLAYLISTS           0x14  /* Host -> Display: active playlist + playlist names   */
 #define CMD_SET_ACTIVE_PLAYLIST 0x15  /* Display -> Host: set active playlist by name        */
+#define CMD_DOWNMIX_MODE        0x16  /* Display -> Host: set stereo->mono mode (0=mix,1=ch1,2=ch2) */
 #define CMD_ACK                 0xFF  /* Display -> Host: sync acknowledgement              */
 
 /* ---------- Global system state ---------- */
@@ -149,9 +150,10 @@ void uart_comm_send_song_settings_req(uint16_t song_id);
  * @brief Send CMD_SET_SONG_SETTINGS to write new settings for a song to the
  *        player's SD card.
  *
- * Payload (10 bytes): song_id(2) + flags(1) + fixed_speed_x100(1) +
+ * Payload (12 bytes): song_id(2) + flags(1) + fixed_speed_x100(1) +
  *                    dimmer_max(1) + dimmer_min(1) + dimmer_rps_ref_x10(1) +
- *                    dimmer_holdoff_s(1) + dimmer_fadein_s(1) + pitch_influence_pct(1).
+ *                    dimmer_holdoff_s(1) + dimmer_fadein_s(1) + pitch_influence_pct(1) +
+ *                    downmix_mode(1) + downmix_fade_s(1).
  *
  * @param flags  bit0=loop, bit1=fixed_speed_en, bit3=dimmer_override.
  */
@@ -163,7 +165,9 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
                                       uint8_t  dimmer_rps_ref_x10,
                                       uint8_t  dimmer_holdoff_s,
                                       uint8_t  dimmer_fadein_s,
-                                      uint8_t  pitch_influence_pct);
+                                      uint8_t  pitch_influence_pct,
+                                      uint8_t  downmix_mode,
+                                      uint8_t  downmix_fade_s);
 
 /**
  * @brief Enqueue CMD_SET_ACTIVE_PLAYLIST to be sent on the next poll response.
@@ -171,6 +175,13 @@ void uart_comm_send_set_song_settings(uint16_t song_id,
  * @param playlist_name  UTF-8 name. Empty string selects all songs (no active playlist).
  */
 void uart_comm_send_set_active_playlist(const char *playlist_name);
+
+/**
+ * @brief Enqueue CMD_DOWNMIX_MODE to be sent on the next poll response.
+ *
+ * @param mode  0 = L+R mix (default), 1 = CH1 only, 2 = CH2 only.
+ */
+void uart_comm_send_downmix_mode(uint8_t mode);
 
 /**
  * @brief Enqueue CMD_PLAY_SONG to be sent on the next poll response.

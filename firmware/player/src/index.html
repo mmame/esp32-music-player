@@ -441,12 +441,12 @@ function uploadOne(blob, name, onProgress, replace){
 
 /**
  * Decode any browser-supported audio format and re-encode to a
- * 16-bit / 48 kHz / 2-channel (dual-mono) WAV Blob.
+ * 16-bit / 48 kHz / 2-channel WAV Blob.
  *
  * Steps:
  *   1. AudioContext.decodeAudioData  – handles WAV, MP3, FLAC, OGG, AAC …
- *   2. OfflineAudioContext(1ch, N, 48000) – resamples + mixes down to mono
- *   3. Convert Float32 → Int16, duplicate to interleaved stereo (L = R)
+ *   2. OfflineAudioContext(2ch, N, 48000) – resamples to 48 kHz
+ *   3. Convert Float32 → Int16 interleaved stereo (L/R)
  *   4. Prepend standard 44-byte WAV / PCM header
  */
 function convertToWav(file){
@@ -456,7 +456,7 @@ function convertToWav(file){
     return tmpCtx.decodeAudioData(arrayBuf).then(function(srcBuf){
       tmpCtx.close();
       var nFrames=Math.max(1,Math.ceil(srcBuf.duration*SR));
-      var offCtx=new OfflineAudioContext(1,nFrames,SR);
+      var offCtx=new OfflineAudioContext(2,nFrames,SR);
       var src=offCtx.createBufferSource();
       src.buffer=srcBuf;
       src.connect(offCtx.destination);
@@ -466,17 +466,20 @@ function convertToWav(file){
       tmpCtx.close();
       throw new Error('Decode failed – unsupported format?');
     });
-  }).then(function(mono){
-    var n=mono.length;
-    var monoData=mono.getChannelData(0);
-    /* True mono PCM – 1 channel, 16-bit signed */
-    var pcm=new Int16Array(n);
+  }).then(function(st){
+    var n=st.length;
+    var left=st.getChannelData(0);
+    var right=(st.numberOfChannels>1)?st.getChannelData(1):left;
+    var pcm=new Int16Array(n*2);
     for(var i=0;i<n;i++){
-      var s=Math.round(monoData[i]*32767);
-      if(s>32767)s=32767;else if(s<-32768)s=-32768;
-      pcm[i]=s;
+      var l=Math.round(left[i]*32767);
+      var r=Math.round(right[i]*32767);
+      if(l>32767)l=32767;else if(l<-32768)l=-32768;
+      if(r>32767)r=32767;else if(r<-32768)r=-32768;
+      pcm[i*2]=l;
+      pcm[i*2+1]=r;
     }
-    /* 44-byte WAV header – 1ch / 48000 Hz / 16-bit */
+    /* 44-byte WAV header – 2ch / 48000 Hz / 16-bit */
     var dataBytes=pcm.byteLength;
     var buf=new ArrayBuffer(44+dataBytes);
     var v=new DataView(buf);
@@ -484,10 +487,10 @@ function convertToWav(file){
     w(0,'RIFF');  v.setUint32(4,36+dataBytes,true);  w(8,'WAVE');
     w(12,'fmt '); v.setUint32(16,16,true);
     v.setUint16(20,1,true);           /* PCM             */
-    v.setUint16(22,1,true);           /* 1 channel       */
+    v.setUint16(22,2,true);           /* 2 channels      */
     v.setUint32(24,SR,true);          /* 48000 Hz        */
-    v.setUint32(28,SR*2,true);        /* ByteRate        */
-    v.setUint16(32,2,true);           /* BlockAlign      */
+    v.setUint32(28,SR*4,true);        /* ByteRate        */
+    v.setUint16(32,4,true);           /* BlockAlign      */
     v.setUint16(34,16,true);          /* BitsPerSample   */
     w(36,'data'); v.setUint32(40,dataBytes,true);
     new Uint8Array(buf,44).set(new Uint8Array(pcm.buffer));
@@ -1022,6 +1025,13 @@ function openSongSettings(name){
       var pi=s.pitch_influence||0;
       document.getElementById('ss-pitch').value=pi;
       document.getElementById('ss-pitch-val').textContent=pi+'%';
+      var dmx=(s.downmix_mode!==undefined)?parseInt(s.downmix_mode,10):0;
+      if(isNaN(dmx)||dmx<0||dmx>2)dmx=0;
+      document.getElementById('ss-downmix').value=String(dmx);
+      var dmxFade=(s.downmix_fade_s!==undefined)?parseInt(s.downmix_fade_s,10):1;
+      if(isNaN(dmxFade)||dmxFade<0||dmxFade>10)dmxFade=1;
+      document.getElementById('ss-downmix-fade').value=dmxFade;
+      document.getElementById('ss-downmix-fade-val').textContent=dmxFade+'s';
       var ho=s.dimmer_holdoff_s||0;
       document.getElementById('ss-holdoff').value=ho;
       document.getElementById('ss-holdoff-val').textContent=ho+'s';
@@ -1050,6 +1060,8 @@ function ssSave(){
     fixed_speed_en:document.getElementById('ss-fixed-en').checked,
     fixed_speed:parseFloat(document.getElementById('ss-fixed-spd').value),
     pitch_influence:parseInt(document.getElementById('ss-pitch').value),
+    downmix_mode:parseInt(document.getElementById('ss-downmix').value,10),
+    downmix_fade_s:parseInt(document.getElementById('ss-downmix-fade').value,10),
     dimmer_holdoff_s:parseInt(document.getElementById('ss-holdoff').value),
     dimmer_fadein_s:parseInt(document.getElementById('ss-fadein').value),
     dimmer_max:parseInt(document.getElementById('ss-dmax').value),
@@ -1107,6 +1119,21 @@ loadPlaylists();
       <input type="range" class="cfg-slider" id="ss-pitch" min="0" max="100" step="5" value="0"
         oninput="document.getElementById('ss-pitch-val').textContent=this.value+'%'">
       <p class="ss-hint">0% = time-stretch only (pitch unchanged at any speed).<br>100% = tape effect (pitch rises and falls with crank speed).</p>
+    </div>
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Default downmix mode</span></div>
+      <select id="ss-downmix" class="cfg-slider" style="padding:6px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
+        <option value="0">Mix CH1+CH2 (default)</option>
+        <option value="1">CH1 only</option>
+        <option value="2">CH2 only</option>
+      </select>
+      <p class="ss-hint">Applied when this song starts. While playing, DMX can still be toggled on the display.</p>
+    </div>
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Downmix change fade</span><span class="ss-sv" id="ss-downmix-fade-val">1s</span></div>
+      <input type="range" class="cfg-slider" id="ss-downmix-fade" min="0" max="10" step="1" value="1"
+        oninput="document.getElementById('ss-downmix-fade-val').textContent=this.value+'s'">
+      <p class="ss-hint">Fade time used when changing downmix while this song is playing. 0 = immediate.</p>
     </div>
     <hr class="ss-sep">
     <div class="ss-sr">

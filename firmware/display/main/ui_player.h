@@ -92,6 +92,7 @@ void ui_player_update_progress_async(uint8_t position_pct, uint16_t duration_s);
  * @param dimmer_holdoff_s   Song-position timestamp (s) before which dimmer is suppressed.
  * @param dimmer_fadein_s    Fade-in duration (s) after holdoff expires.
  * @param pitch_influence_pct Pitch blend factor 0-100.
+ * @param downmix_mode       0=L+R mix, 1=CH1 only, 2=CH2 only.
  */
 void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  flags,
@@ -101,7 +102,8 @@ void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  dimmer_rps_ref_x10,
                                    uint8_t  dimmer_holdoff_s,
                                    uint8_t  dimmer_fadein_s,
-                                   uint8_t  pitch_influence_pct);
+                                   uint8_t  pitch_influence_pct,
+                                   uint8_t  downmix_mode);
 
 /**
  * @brief Update the speed-lock ("HOLD") indicator.

@@ -170,6 +170,141 @@ static bool playlist_array_contains_name_ci(const cJSON *arr, const char *name)
     return false;
 }
 
+/* Update playlists.json song entries after a WAV rename.
+ * Best-effort only: rename succeeds even if playlist sync fails. */
+static void sync_playlists_song_rename(const char *old_name, const char *new_name)
+{
+    if (!old_name || !new_name || old_name[0] == '\0' || new_name[0] == '\0') return;
+    if (streq_ci(old_name, new_name)) return;
+
+    struct stat st = {};
+    if (stat(PLAYLISTS_CFG_PATH, &st) != 0 || st.st_size <= 0 || st.st_size > 16384) return;
+
+    FILE *f = fopen(PLAYLISTS_CFG_PATH, "r");
+    if (!f) return;
+
+    char *buf = (char *)malloc((size_t)st.st_size + 1u);
+    if (!buf) {
+        fclose(f);
+        return;
+    }
+
+    size_t n = fread(buf, 1, (size_t)st.st_size, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return;
+
+    cJSON *pls = cJSON_GetObjectItemCaseSensitive(root, "playlists");
+    if (!cJSON_IsArray(pls)) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    bool changed = false;
+    cJSON *pl = nullptr;
+    cJSON_ArrayForEach(pl, pls) {
+        if (!cJSON_IsObject(pl)) continue;
+        cJSON *songs = cJSON_GetObjectItemCaseSensitive(pl, "songs");
+        if (!cJSON_IsArray(songs)) continue;
+
+        int song_count = cJSON_GetArraySize(songs);
+        for (int i = 0; i < song_count; ++i) {
+            cJSON *se = cJSON_GetArrayItem(songs, i);
+            if (!cJSON_IsString(se) || !se->valuestring) continue;
+            if (!streq_ci(se->valuestring, old_name)) continue;
+
+            cJSON *rep = cJSON_CreateString(new_name);
+            if (!rep) continue;
+            cJSON_ReplaceItemInArray(songs, i, rep);
+            changed = true;
+        }
+    }
+
+    if (!changed) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return;
+
+    FILE *wf = fopen(PLAYLISTS_CFG_PATH, "w");
+    if (!wf) {
+        cJSON_free(json);
+        ESP_LOGW(TAG, "Could not write playlists sync after rename");
+        return;
+    }
+    fputs(json, wf);
+    fclose(wf);
+    cJSON_free(json);
+
+    ESP_LOGI(TAG, "Playlists synced for rename: %s -> %s", old_name, new_name);
+}
+
+/* Check whether a song file is referenced in any playlist. */
+static bool playlists_has_song_reference(const char *song_name,
+                                         char       *playlist_name_out,
+                                         size_t      playlist_name_out_len)
+{
+    if (playlist_name_out && playlist_name_out_len > 0) playlist_name_out[0] = '\0';
+    if (!song_name || song_name[0] == '\0') return false;
+
+    struct stat st = {};
+    if (stat(PLAYLISTS_CFG_PATH, &st) != 0 || st.st_size <= 0 || st.st_size > 16384) return false;
+
+    FILE *f = fopen(PLAYLISTS_CFG_PATH, "r");
+    if (!f) return false;
+
+    char *buf = (char *)malloc((size_t)st.st_size + 1u);
+    if (!buf) {
+        fclose(f);
+        return false;
+    }
+
+    size_t n = fread(buf, 1, (size_t)st.st_size, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return false;
+
+    bool found = false;
+    cJSON *pls = cJSON_GetObjectItemCaseSensitive(root, "playlists");
+    if (cJSON_IsArray(pls)) {
+        cJSON *pl = nullptr;
+        cJSON_ArrayForEach(pl, pls) {
+            if (!cJSON_IsObject(pl)) continue;
+            cJSON *songs = cJSON_GetObjectItemCaseSensitive(pl, "songs");
+            if (!cJSON_IsArray(songs)) continue;
+
+            cJSON *se = nullptr;
+            cJSON_ArrayForEach(se, songs) {
+                if (!cJSON_IsString(se) || !se->valuestring) continue;
+                if (!streq_ci(se->valuestring, song_name)) continue;
+
+                if (playlist_name_out && playlist_name_out_len > 0) {
+                    cJSON *nm = cJSON_GetObjectItemCaseSensitive(pl, "name");
+                    if (cJSON_IsString(nm) && nm->valuestring) {
+                        strncpy(playlist_name_out, nm->valuestring, playlist_name_out_len - 1);
+                        playlist_name_out[playlist_name_out_len - 1] = '\0';
+                    }
+                }
+                found = true;
+                break;
+            }
+            if (found) break;
+        }
+    }
+
+    cJSON_Delete(root);
+    return found;
+}
+
 /** Build an absolute SD-card path from a bare filename. */
 static void build_path(char *buf, size_t bufsz, const char *name)
 {
@@ -518,6 +653,8 @@ static esp_err_t rename_post_handler(httpd_req_t *req)
         }
     }
 
+    sync_playlists_song_rename(old_name, new_name);
+
     ESP_LOGI(TAG, "Renamed: %s -> %s", old_name, new_name);
     if (s_rescan_cb) s_rescan_cb();
     httpd_resp_sendstr(req, "OK");
@@ -531,6 +668,20 @@ static esp_err_t delete_handler(httpd_req_t *req)
     char fname[MAX_FNAME_LEN + 1] = {};
     if (!get_query_param(req, "name", fname, sizeof(fname)) || !fname_valid(fname)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing filename");
+        return ESP_FAIL;
+    }
+
+    char blocking_playlist[MAX_FNAME_LEN + 1] = {};
+    if (playlists_has_song_reference(fname, blocking_playlist, sizeof(blocking_playlist))) {
+        char msg[256];
+        if (blocking_playlist[0] != '\0') {
+            snprintf(msg, sizeof(msg), "File is used by playlist '%s'", blocking_playlist);
+        } else {
+            snprintf(msg, sizeof(msg), "File is used by at least one playlist");
+        }
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, msg);
         return ESP_FAIL;
     }
 
@@ -746,7 +897,7 @@ static esp_err_t playlists_post_handler(httpd_req_t *req)
 
 static esp_err_t crank_config_get_handler(httpd_req_t *req)
 {
-    char buf[450];
+    char buf[520];
     snprintf(buf, sizeof(buf),
              "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
              "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
@@ -1183,13 +1334,13 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
 
     const char *end_action = s.loop ? "loop" : (s.autoplay_next ? "next" : "none");
 
-    char buf[384];
+    char buf[448];
     snprintf(buf, sizeof(buf),
              "{\"end_action\":\"%s\",\"loop\":%s,\"autoplay_next\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
              "\"pitch_influence\":%u,"
              "\"dimmer_max\":%u,\"dimmer_min\":%u,"
              "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u,\"dimmer_fadein_s\":%u,"
-             "\"light_organ\":%s}",
+             "\"light_organ\":%s,\"downmix_mode\":%u,\"downmix_fade_s\":%u}",
              end_action,
              s.loop ? "true" : "false",
              s.autoplay_next ? "true" : "false",
@@ -1201,7 +1352,9 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
              (double)s.dimmer_rps_ref,
              (unsigned)s.dimmer_holdoff_s,
              (unsigned)s.dimmer_fadein_s,
-             s.light_organ ? "true" : "false");
+             s.light_organ ? "true" : "false",
+             (unsigned)s.downmix_mode,
+             (unsigned)s.downmix_fade_s);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
@@ -1243,6 +1396,8 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     uint8_t d_min     = 0;
     float   d_rps     = 1.4f;
     uint8_t d_hoff    = 0;
+    uint8_t downmix_mode = 0;
+    uint8_t downmix_fade_s = 1;
 
     cJSON *it;
     it = cJSON_GetObjectItemCaseSensitive(root, "end_action");
@@ -1284,6 +1439,10 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     bool light_organ = false;
     it = cJSON_GetObjectItemCaseSensitive(root, "light_organ");
     if (cJSON_IsBool(it)) light_organ = cJSON_IsTrue(it);
+    it = cJSON_GetObjectItemCaseSensitive(root, "downmix_mode");
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_mode = (uint8_t)(v < 0 ? 0 : v > 2 ? 2 : v); }
+    it = cJSON_GetObjectItemCaseSensitive(root, "downmix_fade_s");
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_fade_s = (uint8_t)(v < 0 ? 0 : v > 10 ? 10 : v); }
     cJSON_Delete(root);
 
     char wav_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
@@ -1292,11 +1451,13 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     wav_to_json_path(wav_path, json_path, sizeof(json_path));
 
     bool dimmer_default = (d_max == 100 && d_min == 0 && fabsf(d_rps - 1.4f) <= 0.05f);
-    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ) {
+    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ && downmix_mode == 0u) {
+        if (downmix_fade_s == 1u) {
         remove(json_path);
         ESP_LOGI(TAG, "Song settings cleared via web for %s", fname);
         httpd_resp_sendstr(req, "OK");
         return ESP_OK;
+        }
     }
 
     cJSON *out = cJSON_CreateObject();
@@ -1315,6 +1476,8 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (d_hoff > 0) cJSON_AddNumberToObject(out, "dimmer_holdoff_s", d_hoff);
     if (d_fadein > 0) cJSON_AddNumberToObject(out, "dimmer_fadein_s", d_fadein);
     if (light_organ) cJSON_AddBoolToObject(out, "light_organ", true);
+    if (downmix_mode > 0u) cJSON_AddNumberToObject(out, "downmix_mode", downmix_mode);
+    if (downmix_fade_s != 1u) cJSON_AddNumberToObject(out, "downmix_fade_s", downmix_fade_s);
 
     char *js = cJSON_PrintUnformatted(out);
     cJSON_Delete(out);
@@ -1338,7 +1501,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (s_song_settings_cb) {
         float fixed_speed_f = fixed_en ? fixed_spd : 0.0f;
         s_song_settings_cb(wav_path, loop, autoplay_next, fixed_speed_f, pitch,
-                           d_max, d_min, d_rps, d_hoff, d_fadein);
+                         d_max, d_min, d_rps, d_hoff, d_fadein, downmix_mode, downmix_fade_s);
         /* light_organ live-apply is handled via the same callback path: the
          * callback rereads the just-written JSON to pick up all new fields. */
     }

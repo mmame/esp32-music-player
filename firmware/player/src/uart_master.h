@@ -59,6 +59,7 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_BT_CTRL             0x13  /* Display → Host: enable (1) / disable (0) BLE module */
 #define CMD_PLAYLISTS           0x14  /* Host → Display: active playlist + playlist names     */
 #define CMD_SET_ACTIVE_PLAYLIST 0x15  /* Display → Host: select active playlist by name        */
+#define CMD_DOWNMIX_MODE        0x16  /* Display → Host: set stereo->mono mode (0=mix,1=ch1,2=ch2) */
 #define CMD_ACK                 0xFF  /* Display → Host: ACK with optional touch            */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -133,6 +134,8 @@ typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
  * @param dimmer_holdoff_s   Song-position timestamp (s) before which dimmer is suppressed.
  * @param dimmer_fadein_s    Fade-in duration (s) from 0 to full brightness after holdoff.
  * @param pitch_influence_pct Pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
+ * @param downmix_mode        0=L+R mix (default), 1=CH1 only, 2=CH2 only.
+ * @param downmix_fade_s      Downmix transition fade duration in seconds (0-10).
  */
 typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  flags,
@@ -142,7 +145,9 @@ typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  dimmer_rps_ref_x10,
                                              uint8_t  dimmer_holdoff_s,
                                              uint8_t  dimmer_fadein_s,
-                                             uint8_t  pitch_influence_pct);
+                                             uint8_t  pitch_influence_pct,
+                                             uint8_t  downmix_mode,
+                                             uint8_t  downmix_fade_s);
 
 /**
  * @brief Called when the display requests switching the active playlist.
@@ -150,6 +155,13 @@ typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
  * @param playlist_name  UTF-8 playlist name; empty string selects "all songs".
  */
 typedef void (*um_on_set_active_playlist_cb_t)(const char *playlist_name);
+
+/**
+ * @brief Called when the display selects stereo->mono downmix mode.
+ *
+ * @param mode  0 = L+R mix (default), 1 = CH1 only, 2 = CH2 only.
+ */
+typedef void (*um_on_downmix_mode_cb_t)(uint8_t mode);
 
 /* ── Initialisation ───────────────────────────────────────────────────────── */
 
@@ -208,6 +220,11 @@ void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
 void uart_master_set_set_active_playlist_callback(um_on_set_active_playlist_cb_t cb);
 
 /**
+ * @brief Register the callback for CMD_DOWNMIX_MODE.
+ */
+void uart_master_set_downmix_mode_callback(um_on_downmix_mode_cb_t cb);
+
+/**
  * @brief Send playlist metadata to the display.
  *
  * Wire format:
@@ -222,7 +239,7 @@ void uart_master_send_playlists(const char *active_name,
 /**
  * @brief Send CMD_SONG_SETTINGS to the display.
  *
- * Payload (8 bytes):
+ * Payload (12 bytes):
  *   [0..1] song_id            : uint16_t LE
  *   [2]    flags              : bit0=loop, bit1=fixed_speed_en, bit2=autoplay_next
  *   [3]    fixed_speed_x100   : speed × 100 (e.g. 100 = 1.0×).
@@ -232,6 +249,8 @@ void uart_master_send_playlists(const char *active_name,
  *   [7]    dimmer_holdoff_s   : song-position timestamp (s) before which dimmer is suppressed
  *   [8]    dimmer_fadein_s    : fade-in duration (s) from 0 to full brightness after holdoff
  *   [9]    pitch_influence_pct: pitch blend factor 0-100
+ *   [10]   downmix_mode       : 0=L+R mix, 1=CH1 only, 2=CH2 only
+ *   [11]   downmix_fade_s     : downmix transition fade in seconds (0-10)
  */
 void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  flags,
@@ -241,7 +260,9 @@ void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  dimmer_rps_ref_x10,
                                     uint8_t  dimmer_holdoff_s,
                                     uint8_t  dimmer_fadein_s,
-                                    uint8_t  pitch_influence_pct);
+                                    uint8_t  pitch_influence_pct,
+                                    uint8_t  downmix_mode,
+                                    uint8_t  downmix_fade_s);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

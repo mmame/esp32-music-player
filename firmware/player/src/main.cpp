@@ -3,7 +3,7 @@
  * @brief Music Player firmware – ESP-ADF pipeline implementation.
  *
  * Audio pipeline (when HAVE_ADF is defined via CMakeLists):
- *   SD card -> fatfs_stream -> wav_decoder -> audio_sonic -> alc_volume_setup -> i2s_stream -> DAC
+ *   SD card -> fatfs_stream -> wav_decoder -> downmix(2->1 selectable) -> audio_sonic -> alc_volume_setup -> i2s_stream -> DAC
  *
  * Architecture:
  *   Core 1 (audio_task, high priority) - pipeline management, event loop, command dispatch
@@ -109,6 +109,9 @@ static float    g_speed        = 1.0f;
 static volatile bool g_bypass_active = false;  /* true = SoundTouch bypassed, audio at 1.0x */
 static volatile bool g_tempo_locked  = false;  /* true = poti changes are ignored for speed  */
 static volatile uint8_t g_locked_tempo_raw = 50; /* poti-scale 0–100 value when locked         */
+static volatile uint8_t g_downmix_mode = 0u; /* 0=L+R mix (default), 1=CH1 only, 2=CH2 only */
+static volatile bool     g_downmix_fade_armed = false; /* true only for live mode changes while playing */
+static uint32_t          g_downmix_reset_seq  = 1u;    /* increment to force immediate coeff reset */
 
 /* Per-song settings loaded from an optional JSON sidecar (e.g. foo.json for foo.wav) */
 static volatile bool     g_song_loop           = false; /* true: restart on end instead of stop */
@@ -124,6 +127,7 @@ static volatile float    g_song_dimmer_holdoff_s  = 0.0f; /* song-position times
 static volatile float    g_song_dimmer_fadein_s   = 0.0f; /* seconds to fade from 0→full after holdoff */
 static volatile bool     g_song_light_organ        = false; /* true: dimmer driven by audio FFT, not crank speed */
 static volatile uint8_t  g_fft_dimmer_pct          = 0u;   /* 0-100, updated by light-organ FFT analysis */
+static volatile uint16_t g_song_downmix_fade_ms    = 1000u; /* per-song downmix fade duration for live mode changes */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -147,6 +151,8 @@ static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
 static volatile bool    s_cmd_wifi_enable        = false; /* set by on_wifi_ctrl(true)  */
 static volatile bool    s_cmd_wifi_disable       = false; /* set by on_wifi_ctrl(false) or on_play_song */
 static volatile bool    s_cmd_new_song_loaded    = false;
+static volatile bool    s_cmd_downmix_mode_pending = false;
+static volatile uint8_t s_cmd_downmix_mode_value   = 0u;
 
 static esp_timer_handle_t s_wifi_auto_off_timer  = nullptr;
 
@@ -197,6 +203,13 @@ static void send_song_and_playlist_lists_to_display(void)
 
     uart_master_send_song_list(s_tx_song_names, count);
     uart_master_send_playlists(s_tx_active_playlist, s_tx_playlist_names, pl_count);
+}
+
+static void on_downmix_mode(uint8_t mode)
+{
+    if (mode > 2u) mode = 0u;
+    s_cmd_downmix_mode_value = mode;
+    s_cmd_downmix_mode_pending = true;
 }
 
 #ifdef HAVE_ADF
@@ -287,10 +300,129 @@ static void run_light_organ_fft(void)
 static audio_pipeline_handle_t    g_pipeline  = nullptr;
 static audio_element_handle_t     g_fatfs_el  = nullptr;
 static audio_element_handle_t     g_wav_el    = nullptr;
+static audio_element_handle_t     g_downmix_el = nullptr;
 static audio_element_handle_t     g_sonic_el  = nullptr;
 static audio_element_handle_t     g_alc_el    = nullptr;
 static audio_element_handle_t     g_i2s_el    = nullptr;
 static audio_event_iface_handle_t g_evt       = nullptr;
+
+static int16_t s_downmix_tmp[4096];
+
+static inline void downmix_mode_to_coeff_q15(uint8_t mode, int32_t *cl_q15, int32_t *cr_q15)
+{
+    if (mode == 1u) {
+        *cl_q15 = 32768;
+        *cr_q15 = 0;
+    } else if (mode == 2u) {
+        *cl_q15 = 0;
+        *cr_q15 = 32768;
+    } else {
+        *cl_q15 = 16384;
+        *cr_q15 = 16384;
+    }
+}
+
+static audio_element_err_t downmix_process(audio_element_handle_t self, char *in_buffer, int in_len)
+{
+    static uint32_t s_seen_reset_seq = 0u;
+    static uint8_t  s_effective_mode = 0u;
+    static int32_t  s_cur_l_q15      = 16384;
+    static int32_t  s_cur_r_q15      = 16384;
+    static int32_t  s_from_l_q15     = 16384;
+    static int32_t  s_from_r_q15     = 16384;
+    static int32_t  s_to_l_q15       = 16384;
+    static int32_t  s_to_r_q15       = 16384;
+    static uint32_t s_fade_prog_q20  = 0u;
+    static uint32_t s_fade_step_q20  = 0u;
+    static bool     s_fading         = false;
+
+    int in_bytes = audio_element_input(self, in_buffer, in_len);
+    if (in_bytes <= 0) return (audio_element_err_t)in_bytes;
+
+    if (g_channels <= 1u || g_bps != 2u) {
+        return (audio_element_err_t)audio_element_output(self, in_buffer, in_bytes);
+    }
+
+    int frame_bytes = (int)g_channels * (int)g_bps;
+    if (frame_bytes < 4) {
+        return (audio_element_err_t)audio_element_output(self, in_buffer, in_bytes);
+    }
+
+    int frames = in_bytes / frame_bytes;
+    int max_frames = (int)(sizeof(s_downmix_tmp) / sizeof(s_downmix_tmp[0]));
+    if (frames > max_frames) frames = max_frames;
+    if (frames <= 0) return (audio_element_err_t)in_bytes;
+
+    const int16_t *src = (const int16_t *)in_buffer;
+    uint32_t reset_seq = g_downmix_reset_seq;
+    uint8_t mode = g_downmix_mode;
+    if (mode > 2u) mode = 0u;
+
+    if (s_seen_reset_seq != reset_seq) {
+        s_seen_reset_seq = reset_seq;
+        s_effective_mode = mode;
+        downmix_mode_to_coeff_q15(mode, &s_cur_l_q15, &s_cur_r_q15);
+        s_fading = false;
+        s_fade_prog_q20 = 0u;
+        s_fade_step_q20 = 0u;
+        g_downmix_fade_armed = false;
+    }
+
+    if (mode != s_effective_mode) {
+        bool can_fade = g_downmix_fade_armed && (g_song_downmix_fade_ms > 0u);
+        if (can_fade) {
+            uint32_t sr = (g_sample_rate > 0u) ? g_sample_rate : 48000u;
+            uint32_t fade_samples = ((uint32_t)g_song_downmix_fade_ms * sr) / 1000u;
+            if (fade_samples > 0u) {
+                downmix_mode_to_coeff_q15(mode, &s_to_l_q15, &s_to_r_q15);
+                s_from_l_q15 = s_cur_l_q15;
+                s_from_r_q15 = s_cur_r_q15;
+                s_fade_prog_q20 = 0u;
+                s_fade_step_q20 = (1u << 20) / fade_samples;
+                if (s_fade_step_q20 == 0u) s_fade_step_q20 = 1u;
+                s_fading = true;
+            } else {
+                can_fade = false;
+            }
+        }
+        if (!can_fade) {
+            downmix_mode_to_coeff_q15(mode, &s_cur_l_q15, &s_cur_r_q15);
+            s_fading = false;
+            s_fade_prog_q20 = 0u;
+            s_fade_step_q20 = 0u;
+        }
+        s_effective_mode = mode;
+        g_downmix_fade_armed = false;
+    }
+
+    for (int i = 0; i < frames; ++i) {
+        int16_t l = src[(i * (int)g_channels) + 0];
+        int16_t r = src[(i * (int)g_channels) + 1];
+
+        if (s_fading) {
+            s_fade_prog_q20 += s_fade_step_q20;
+            if (s_fade_prog_q20 >= (1u << 20)) {
+                s_fade_prog_q20 = (1u << 20);
+            }
+            int32_t dl = s_to_l_q15 - s_from_l_q15;
+            int32_t dr = s_to_r_q15 - s_from_r_q15;
+            s_cur_l_q15 = s_from_l_q15 + (int32_t)(((int64_t)dl * (int64_t)s_fade_prog_q20) >> 20);
+            s_cur_r_q15 = s_from_r_q15 + (int32_t)(((int64_t)dr * (int64_t)s_fade_prog_q20) >> 20);
+            if (s_fade_prog_q20 >= (1u << 20)) {
+                s_cur_l_q15 = s_to_l_q15;
+                s_cur_r_q15 = s_to_r_q15;
+                s_fading = false;
+            }
+        }
+
+        int32_t out = ((int32_t)l * s_cur_l_q15 + (int32_t)r * s_cur_r_q15) >> 15;
+        if (out > 32767) out = 32767;
+        if (out < -32768) out = -32768;
+        s_downmix_tmp[i] = (int16_t)out;
+    }
+
+    return (audio_element_err_t)audio_element_output(self, (char *)s_downmix_tmp, frames * (int)sizeof(int16_t));
+}
 #endif
 
 /* ======================================================================
@@ -361,11 +493,12 @@ static void mount_sd(void)
     host.flags        = SDMMC_HOST_FLAG_1BIT | SDMMC_HOST_FLAG_DEINIT_ARG;
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED; /* 40 MHz */
 
-    esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
-        .format_if_mount_failed = false,
-        .max_files              = 5,
-        .allocation_unit_size   = 16 * 1024,
-    };
+    esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {};
+    mount_cfg.format_if_mount_failed   = false;
+    mount_cfg.max_files                = 5;
+    mount_cfg.allocation_unit_size     = 16 * 1024;
+    mount_cfg.disk_status_check_enable = false;
+    mount_cfg.use_one_fat              = false;
 
     while (true) {
         esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_cfg,
@@ -639,6 +772,10 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     g_song_dimmer_holdoff_s  = (float)settings.dimmer_holdoff_s;
     g_song_dimmer_fadein_s   = (float)settings.dimmer_fadein_s;
     g_song_light_organ       = settings.light_organ;
+    g_downmix_mode           = (settings.downmix_mode <= 2u) ? settings.downmix_mode : 0u;
+    g_song_downmix_fade_ms   = (uint16_t)settings.downmix_fade_s * 1000u;
+    g_downmix_fade_armed     = false;
+    g_downmix_reset_seq = g_downmix_reset_seq + 1u;
 #ifdef HAVE_ADF
     if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
     if (g_song_light_organ) s_lo_file = fopen(path, "rb");
@@ -694,6 +831,8 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
 static void do_stop(void)
 {
     if (!g_is_playing && !g_is_paused) return;
+    g_downmix_fade_armed = false;
+    g_downmix_reset_seq = g_downmix_reset_seq + 1u;
     pipeline_stop_and_reset();
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     g_is_playing   = false;
@@ -710,6 +849,7 @@ static void do_stop(void)
     soundtouch_el_set_pitch_influence(g_sonic_el, 0.0f);
     g_song_dimmer_holdoff_s      = 0.0f;
     g_song_dimmer_fadein_s       = 0.0f;
+    g_song_downmix_fade_ms       = 1000u;
     g_song_light_organ           = false;
     g_fft_dimmer_pct             = 0u;
 #ifdef HAVE_ADF
@@ -906,7 +1046,7 @@ static void create_pipeline(void)
 
     soundtouch_el_cfg_t st_cfg = SOUNDTOUCH_EL_DEFAULT_CFG();
     st_cfg.samplerate  = 44100;
-    st_cfg.channels    = 2;
+    st_cfg.channels    = 1;
     st_cfg.tempo       = g_speed;
     st_cfg.out_rb_size = 16 * 1024; /* 16 KB PSRAM – absorbs bursty TDHS output          */
     st_cfg.task_stack  =  16 * 1024; /*  16 KB – TDHS uses significant stack              */
@@ -914,8 +1054,17 @@ static void create_pipeline(void)
     g_sonic_el = soundtouch_el_init(&st_cfg);
     configASSERT(g_sonic_el);
 
+    audio_element_cfg_t dm_cfg = DEFAULT_AUDIO_ELEMENT_CONFIG();
+    dm_cfg.process      = downmix_process;
+    dm_cfg.buffer_len   = 4096;
+    dm_cfg.out_rb_size  = 16 * 1024;
+    dm_cfg.task_stack   = 4096;
+    dm_cfg.task_core    = 1;
+    g_downmix_el = audio_element_init(&dm_cfg);
+    configASSERT(g_downmix_el);
+
     alc_volume_setup_cfg_t alc_cfg = DEFAULT_ALC_VOLUME_SETUP_CONFIG();
-    alc_cfg.channel     = 1;   /* all uploaded files are 1ch mono */
+    alc_cfg.channel     = 1;   /* internal stream is mono after downmix */
     alc_cfg.volume      = 0;
     alc_cfg.out_rb_size = 16 * 1024; /* 16 KB PSRAM (default 8 KB) */
     g_alc_el = alc_volume_setup_init(&alc_cfg);
@@ -946,18 +1095,19 @@ static void create_pipeline(void)
 
     audio_pipeline_register(g_pipeline, g_fatfs_el, "fatfs");
     audio_pipeline_register(g_pipeline, g_wav_el,   "wav");
+    audio_pipeline_register(g_pipeline, g_downmix_el, "downmix");
     audio_pipeline_register(g_pipeline, g_sonic_el, "sonic");
     audio_pipeline_register(g_pipeline, g_alc_el,   "alc");
     audio_pipeline_register(g_pipeline, g_i2s_el,   "i2s");
 
-    const char *link_tags[] = {"fatfs", "wav", "sonic", "alc", "i2s"};
-    audio_pipeline_link(g_pipeline, link_tags, 5);
+    const char *link_tags[] = {"fatfs", "wav", "downmix", "sonic", "alc", "i2s"};
+    audio_pipeline_link(g_pipeline, link_tags, 6);
 
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
     g_evt = audio_event_iface_init(&evt_cfg);
     audio_pipeline_set_listener(g_pipeline, g_evt);
 
-    ESP_LOGI(TAG, "Audio pipeline created: fatfs->wav->sonic->alc->i2s");
+    ESP_LOGI(TAG, "Audio pipeline created: fatfs->wav->downmix->sonic->alc->i2s");
 }
 
 /* ======================================================================
@@ -1012,6 +1162,13 @@ static void audio_task(void *arg)
         if (s_cmd_display_ready) {
             s_cmd_display_ready = false;
             send_song_and_playlist_lists_to_display();
+        }
+
+        if (s_cmd_downmix_mode_pending) {
+            s_cmd_downmix_mode_pending = false;
+            g_downmix_mode = s_cmd_downmix_mode_value;
+            g_downmix_fade_armed = (g_is_playing && !g_is_paused);
+            ESP_LOGI(TAG, "Downmix mode set: %u (0=mix,1=ch1,2=ch2)", (unsigned)g_downmix_mode);
         }
 
 #ifdef HAVE_ADF
@@ -1263,9 +1420,12 @@ static void on_song_settings_req(uint16_t song_id)
     uint8_t d_rps_x10     = (uint8_t)(s.dimmer_rps_ref * 10.0f + 0.5f);
     uint8_t d_holdoff     = s.dimmer_holdoff_s;
     uint8_t d_fadein      = s.dimmer_fadein_s;
+    uint8_t downmix_mode  = (s.downmix_mode <= 2u) ? s.downmix_mode : 0u;
+    uint8_t downmix_fade_s = (s.downmix_fade_s <= 10u) ? s.downmix_fade_s : 1u;
 
     uart_master_send_song_settings(song_id, flags, spd_x100,
-                                   d_max, d_min, d_rps_x10, d_holdoff, d_fadein, s.pitch_influence);
+                                   d_max, d_min, d_rps_x10, d_holdoff, d_fadein, s.pitch_influence,
+                                   downmix_mode, downmix_fade_s);
 }
 
 /**
@@ -1281,7 +1441,9 @@ static void on_set_song_settings(uint16_t song_id,
                                  uint8_t  dimmer_rps_ref_x10,
                                  uint8_t  dimmer_holdoff_s,
                                  uint8_t  dimmer_fadein_s,
-                                 uint8_t  pitch_influence_pct)
+                                 uint8_t  pitch_influence_pct,
+                                 uint8_t  downmix_mode,
+                                 uint8_t  downmix_fade_s)
 {
     if (song_id == 0 || song_id > g_song_count) {
         ESP_LOGW("main", "set_song_settings: id %u out of range", song_id);
@@ -1299,6 +1461,7 @@ static void on_set_song_settings(uint16_t song_id,
 
     /* If all settings are default: remove the sidecar file */
     if (flags == 0 && dimmer_holdoff_s == 0 && dimmer_fadein_s == 0 && pitch_influence_pct == 0
+        && downmix_mode == 0u && downmix_fade_s == 1u
         && dimmer_max == 100u && dimmer_min == 0u && dimmer_rps_ref_x10 == 14u) {
         remove(json_path);
         ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
@@ -1310,6 +1473,8 @@ static void on_set_song_settings(uint16_t song_id,
             g_song_pitch_influence       = 0u;
             g_song_dimmer_holdoff_s      = 0.0f;
             g_song_dimmer_fadein_s       = 0.0f;
+            g_song_downmix_fade_ms       = 1000u;
+            g_downmix_mode               = 0u;
             soundtouch_el_set_pitch_influence(g_sonic_el, 0.0f);
         }
         return;
@@ -1319,6 +1484,8 @@ static void on_set_song_settings(uint16_t song_id,
     bool  fixed_en     = (flags & 0x02u) != 0;
     bool  autoplay_next= (flags & 0x04u) != 0;
     bool  light_organ  = (flags & 0x10u) != 0;
+    if (downmix_mode > 2u) downmix_mode = 0u;
+    if (downmix_fade_s > 10u) downmix_fade_s = 10u;
     if (loop && autoplay_next) autoplay_next = false;
     float spd          = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
     float d_rps_ref    = (dimmer_rps_ref_x10 > 0) ? ((float)dimmer_rps_ref_x10 / 10.0f) : 1.4f;
@@ -1346,6 +1513,12 @@ static void on_set_song_settings(uint16_t song_id,
     }
     if (light_organ) {
         cJSON_AddBoolToObject(root, "light_organ", true);
+    }
+    if (downmix_mode > 0u) {
+        cJSON_AddNumberToObject(root, "downmix_mode", downmix_mode);
+    }
+    if (downmix_fade_s != 1u) {
+        cJSON_AddNumberToObject(root, "downmix_fade_s", downmix_fade_s);
     }
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -1376,6 +1549,9 @@ static void on_set_song_settings(uint16_t song_id,
         g_song_dimmer_holdoff_s  = (float)dimmer_holdoff_s;
         g_song_dimmer_fadein_s   = (float)dimmer_fadein_s;
         g_song_light_organ       = light_organ;
+        g_song_downmix_fade_ms   = (uint16_t)downmix_fade_s * 1000u;
+        g_downmix_mode           = downmix_mode;
+        g_downmix_fade_armed     = (g_is_playing && !g_is_paused);
         g_fft_dimmer_pct         = 0u;
 #ifdef HAVE_ADF
         if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
@@ -1387,9 +1563,10 @@ static void on_set_song_settings(uint16_t song_id,
 #endif
         soundtouch_el_set_pitch_influence(g_sonic_el, (float)pitch_influence_pct / 100.0f);
         ESP_LOGI("main", "Applied settings live: loop=%d autoplay_next=%d fixed_en=%d spd=%.2f pitch_infl=%u%% "
-                 "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us",
+                 "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us",
                  (int)loop, (int)autoplay_next, (int)fixed_en, fixed_en ? (double)spd : 1.0, pitch_influence_pct,
-                 dimmer_max, dimmer_min, (double)d_rps_ref, dimmer_holdoff_s, dimmer_fadein_s);
+                 dimmer_max, dimmer_min, (double)d_rps_ref, dimmer_holdoff_s, dimmer_fadein_s,
+                 (unsigned)downmix_mode, (unsigned)downmix_fade_s);
     }
 }
 
@@ -1406,7 +1583,9 @@ static void on_web_song_settings_saved(const char *wav_path,
                                         uint8_t     dimmer_min,
                                         float       dimmer_rps_ref,
                                         uint8_t     dimmer_holdoff_s,
-                                        uint8_t     dimmer_fadein_s)
+                                        uint8_t     dimmer_fadein_s,
+                                        uint8_t     downmix_mode,
+                                        uint8_t     downmix_fade_s)
 {
     if (g_current_song < 0) return;
 
@@ -1428,16 +1607,21 @@ static void on_web_song_settings_saved(const char *wav_path,
     g_song_dimmer_rps_ref   = (dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f;
     g_song_dimmer_holdoff_s = (float)dimmer_holdoff_s;
     g_song_dimmer_fadein_s  = (float)dimmer_fadein_s;
+    if (downmix_fade_s > 10u) downmix_fade_s = 10u;
+    g_song_downmix_fade_ms  = (uint16_t)downmix_fade_s * 1000u;
+    g_downmix_mode          = (downmix_mode <= 2u) ? downmix_mode : 0u;
+    g_downmix_fade_armed    = (g_is_playing && !g_is_paused);
     /* Pitch influence on SoundTouch must be applied from the audio_task */
 #ifdef HAVE_ADF
     s_cmd_st_bypass_value   = (fixed_speed > 0.0f); /* reuse bypass flag for fixed-speed */
     /* pitch: set via existing async command path */
 #endif
-    ESP_LOGI(TAG, "Browser settings live-applied: %s  loop=%d autoplay_next=%d max=%u min=%u rps=%.1f holdoff=%us fadein=%us",
+    ESP_LOGI(TAG, "Browser settings live-applied: %s  loop=%d autoplay_next=%d max=%u min=%u rps=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us",
              wav_path, (int)loop, (int)autoplay_next,
              dimmer_max, dimmer_min,
              (double)((dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f),
-             dimmer_holdoff_s, dimmer_fadein_s);
+             dimmer_holdoff_s, dimmer_fadein_s, (unsigned)g_downmix_mode,
+             (unsigned)downmix_fade_s);
 }
 
 /* ======================================================================
@@ -1537,7 +1721,6 @@ static void io_task(void *arg)
                 static bool     s_stop_fadeout_on    = false;
                 static uint32_t s_stop_fadeout_ms    = 0u;
                 static uint8_t  s_stop_fadeout_from  = 0u;
-                static uint8_t  s_stop_fadeout_reason = 0u; /* 1=pulse-loss, 2=moving-fall, 3=song-end */
                 static TickType_t s_stop_fadeout_trace_tick = 0;
                 static float    s_playing_pf         = 0.0f; /* lamp level at last playing tick */
                 static bool     s_prev_playing       = false;
@@ -1574,7 +1757,6 @@ static void io_task(void *arg)
                     }
                     s_stop_fadeout_on = false;
                     s_stop_fadeout_ms = 0u;
-                    s_stop_fadeout_reason = 0u;
                     s_resume_fadein_on = true;
                     s_resume_fadein_ms = 0u;
                 }
@@ -1586,7 +1768,6 @@ static void io_task(void *arg)
                     && g_is_playing && !s_enc2_pause_sent) {
                     s_stop_fadeout_on = true;
                     s_stop_fadeout_ms = 0u;
-                    s_stop_fadeout_reason = 1u;
                     s_stop_fadeout_trace_tick = now;
                     s_stop_fadeout_from = (s_last_dimmer_pct <= 100u)
                                          ? s_last_dimmer_pct
@@ -1604,7 +1785,6 @@ static void io_task(void *arg)
                     && g_is_playing && !s_enc2_pause_sent) {
                     s_stop_fadeout_on = true;
                     s_stop_fadeout_ms = 0u;
-                    s_stop_fadeout_reason = 2u;
                     s_stop_fadeout_trace_tick = now;
                     s_stop_fadeout_from = (s_last_dimmer_pct <= 100u)
                                          ? s_last_dimmer_pct
@@ -1620,7 +1800,6 @@ static void io_task(void *arg)
                 if (s_prev_playing && !g_is_playing && !g_is_paused && g_current_song >= 0) {
                     s_stop_fadeout_on = true;
                     s_stop_fadeout_ms = 0u;
-                    s_stop_fadeout_reason = 3u;
                     s_stop_fadeout_trace_tick = now;
                     s_stop_fadeout_from = (s_last_dimmer_pct <= 100u)
                                          ? s_last_dimmer_pct
@@ -1675,25 +1854,9 @@ static void io_task(void *arg)
                                           ? (1.0f - ((float)s_stop_fadeout_ms / (float)total_ms))
                                           : 0.0f;
                         if (dbg_scale < 0.0f) dbg_scale = 0.0f;
-                        uint8_t dbg_dpct = (uint8_t)((float)s_stop_fadeout_from * dbg_scale + 0.5f);
-                        /*ESP_LOGI("dimmer", "stop_fade trace: reason=%u elapsed=%u/%u from=%u scale=%.3f out=%u inst_rps=%.3f moving=%d",
-                                 (unsigned)s_stop_fadeout_reason,
-                                 (unsigned)s_stop_fadeout_ms,
-                                 (unsigned)total_ms,
-                                 (unsigned)s_stop_fadeout_from,
-                                 (double)dbg_scale,
-                                 (unsigned)dbg_dpct,
-                                 (double)inst_rps,
-                                 (int)enc2_move); */
                     }
                     if (total_ms == 0u || s_stop_fadeout_ms >= total_ms) {
                         s_stop_fadeout_on = false;
-                        /*ESP_LOGI("dimmer", "stop_fade done: reason=%u elapsed=%u cfg_ms=%u from=%u",
-                                 (unsigned)s_stop_fadeout_reason,
-                                 (unsigned)s_stop_fadeout_ms,
-                                 (unsigned)total_ms,
-                                 (unsigned)s_stop_fadeout_from); */
-                        s_stop_fadeout_reason = 0u;
                     }
                 }
 
@@ -2057,6 +2220,7 @@ extern "C" void app_main(void)
     uart_master_set_song_settings_req_callback(on_song_settings_req);
     uart_master_set_set_song_settings_callback(on_set_song_settings);
     uart_master_set_set_active_playlist_callback(on_set_active_playlist);
+    uart_master_set_downmix_mode_callback(on_downmix_mode);
 
     send_song_and_playlist_lists_to_display();
 

@@ -33,6 +33,8 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
     out->dimmer_holdoff_s = 0u;
     out->dimmer_fadein_s  = 3u; /* 3-second default lamp fade-in */
     out->light_organ      = false;
+    out->downmix_mode     = 0u;
+        out->downmix_fade_s   = 1u; /* Default downmix fade seconds */
 
     if (!wav_path) return;
 
@@ -173,10 +175,24 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         out->light_organ = cJSON_IsTrue(lo_item);
     }
 
+    /* "downmix_mode": 0=mix, 1=CH1 only, 2=CH2 only */
+    const cJSON *dmx_item = cJSON_GetObjectItemCaseSensitive(root, "downmix_mode");
+    if (cJSON_IsNumber(dmx_item)) {
+        int v = dmx_item->valueint;
+        out->downmix_mode = (uint8_t)((v < 0) ? 0 : (v > 2) ? 2 : v);
+    }
+
+        /* "downmix_fade_s": fade duration for live downmix toggles, 0-10 s */
+        const cJSON *dmx_fade_item = cJSON_GetObjectItemCaseSensitive(root, "downmix_fade_s");
+        if (cJSON_IsNumber(dmx_fade_item)) {
+            int v = dmx_fade_item->valueint;
+            out->downmix_fade_s = (uint8_t)((v < 0) ? 0 : (v > 10) ? 10 : v);
+        }
+
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "Settings for '%s': loop=%s autoplay_next=%s fixed_speed=%s(%.2f) pitch_influence=%u%% "
-             "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us",
+             "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us",
              json_path,
              out->loop ? "yes" : "no",
              out->autoplay_next ? "yes" : "no",
@@ -186,5 +202,7 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
              out->dimmer_max, out->dimmer_min,
              (double)out->dimmer_rps_ref,
              out->dimmer_holdoff_s,
-             out->dimmer_fadein_s);
+             out->dimmer_fadein_s,
+                 (unsigned)out->downmix_mode,
+                 (unsigned)out->downmix_fade_s);
 }

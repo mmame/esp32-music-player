@@ -42,6 +42,8 @@ typedef struct {
     uint8_t dimmer_holdoff_s;    /* song-position timestamp before dimmer activates */
     uint8_t dimmer_fadein_s;     /* seconds to fade from 0 to full after holdoff  */
     uint8_t pitch_influence_pct; /* 0-100: 0=time-stretch, 100=tape effect        */
+    uint8_t downmix_mode;        /* 0=mix, 1=ch1, 2=ch2                            */
+    uint8_t downmix_fade_s;      /* 0-10 s transition when downmix changes         */
 } song_settings_cache_t;
 
 static song_entry_t         s_songs[SONGLIST_MAX_SONGS];
@@ -75,7 +77,9 @@ static bool      s_bt_enabled = false; /* starts disabled */
 static lv_obj_t  *s_settings_overlay   = NULL; /* backdrop (NULL when not open) */
 static uint16_t   s_settings_song_id   = 0;    /* song_id whose dialog is open  */
 static lv_obj_t  *s_dd_end_action      = NULL; /* 0=none, 1=next, 2=loop */
+static lv_obj_t  *s_dd_downmix         = NULL; /* 0=mix, 1=ch1, 2=ch2 */
 static uint8_t    s_end_action         = 0u;
+static uint8_t    s_downmix_mode       = 0u;
 static lv_obj_t  *s_cb_fixed_speed     = NULL;
 static lv_obj_t  *s_cb_light_organ     = NULL; /* light-organ mode checkbox        */
 static lv_obj_t  *s_lbl_pitch_val      = NULL;
@@ -87,11 +91,13 @@ static lv_obj_t  *s_lbl_dmin_val       = NULL;
 static lv_obj_t  *s_lbl_drps_val       = NULL;
 static lv_obj_t  *s_lbl_dhld_val       = NULL;
 static lv_obj_t  *s_lbl_dfad_val       = NULL;  /* fade-in duration label */
+static lv_obj_t  *s_lbl_dmxfade_val    = NULL;  /* downmix fade duration label */
 static uint8_t    s_dimmer_max         = 100u;
 static uint8_t    s_dimmer_min         = 0u;
 static uint8_t    s_dimmer_rps_x10     = 14u; /* 1.4 rps default */
 static uint8_t    s_dimmer_holdoff_s   = 0u;
 static uint8_t    s_dimmer_fadein_s    = 0u;
+static uint8_t    s_downmix_fade_s     = 1u;
 /* ---------- Forward declarations ----------------------------------------- */
 static void on_list_item_clicked(lv_event_t *e);
 static void on_playlist_btn_clicked(lv_event_t *e);
@@ -129,6 +135,8 @@ typedef struct {
     uint8_t  dimmer_holdoff_s;
     uint8_t  dimmer_fadein_s;
     uint8_t  pitch_influence_pct;
+    uint8_t  downmix_mode;
+    uint8_t  downmix_fade_s;
 } async_song_settings_t;
 
 typedef struct {
@@ -655,6 +663,26 @@ static void on_dhld_minus(lv_event_t *e) { (void)e; if (s_dimmer_holdoff_s > 0u)
 static void on_dhld_plus (lv_event_t *e) { (void)e; if (s_dimmer_holdoff_s < 255u) s_dimmer_holdoff_s += 1u; update_dimmer_labels(); }
 static void on_dfad_minus(lv_event_t *e) { (void)e; if (s_dimmer_fadein_s > 0u)    s_dimmer_fadein_s  -= 1u; update_dimmer_labels(); }
 static void on_dfad_plus (lv_event_t *e) { (void)e; if (s_dimmer_fadein_s < 60u)   s_dimmer_fadein_s  += 1u; update_dimmer_labels(); }
+static void on_dmxfade_minus(lv_event_t *e)
+{
+    (void)e;
+    if (s_downmix_fade_s > 0u) s_downmix_fade_s -= 1u;
+    if (s_lbl_dmxfade_val) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%us", s_downmix_fade_s);
+        lv_label_set_text(s_lbl_dmxfade_val, buf);
+    }
+}
+static void on_dmxfade_plus(lv_event_t *e)
+{
+    (void)e;
+    if (s_downmix_fade_s < 10u) s_downmix_fade_s += 1u;
+    if (s_lbl_dmxfade_val) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%us", s_downmix_fade_s);
+        lv_label_set_text(s_lbl_dmxfade_val, buf);
+    }
+}
 
 static void on_settings_cancel(lv_event_t *e)
 {
@@ -664,6 +692,7 @@ static void on_settings_cancel(lv_event_t *e)
         s_settings_overlay = NULL;
         s_settings_song_id = 0;
         s_dd_end_action    = NULL;
+        s_dd_downmix       = NULL;
         s_cb_fixed_speed   = NULL;
         s_cb_light_organ   = NULL;
         s_lbl_pitch_val    = NULL;
@@ -672,6 +701,7 @@ static void on_settings_cancel(lv_event_t *e)
         s_lbl_drps_val     = NULL;
         s_lbl_dhld_val     = NULL;
         s_lbl_dfad_val     = NULL;
+        s_lbl_dmxfade_val  = NULL;
     }
 }
 
@@ -688,6 +718,12 @@ static void on_settings_ok(lv_event_t *e)
         if (s_end_action > 2u) s_end_action = 0u;
     } else {
         s_end_action = 0u;
+    }
+    if (s_dd_downmix) {
+        s_downmix_mode = (uint8_t)lv_dropdown_get_selected(s_dd_downmix);
+        if (s_downmix_mode > 2u) s_downmix_mode = 0u;
+    } else {
+        s_downmix_mode = 0u;
     }
     bool speed_en      = (lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0;
     bool light_org_en  = s_cb_light_organ
@@ -717,12 +753,15 @@ static void on_settings_ok(lv_event_t *e)
         s_settings[cache_idx].dimmer_holdoff_s    = d_hld;
         s_settings[cache_idx].dimmer_fadein_s     = d_fad;
         s_settings[cache_idx].pitch_influence_pct = s_pitch_influence;
+        s_settings[cache_idx].downmix_mode        = s_downmix_mode;
+        s_settings[cache_idx].downmix_fade_s      = s_downmix_fade_s;
         s_settings[cache_idx].valid               = true;
     }
 
     /* Send to player and request fresh response so other views update */
     uart_comm_send_set_song_settings(song_id, flags, fixed_speed_x100,
-                                     d_max, d_min, d_rps, d_hld, d_fad, s_pitch_influence);
+                                     d_max, d_min, d_rps, d_hld, d_fad, s_pitch_influence,
+                                     s_downmix_mode, s_downmix_fade_s);
     uart_comm_send_song_settings_req(song_id);
     ESP_LOGI(TAG, "Settings saved: song_id=%u flags=0x%02X", song_id, flags);
 
@@ -731,6 +770,7 @@ static void on_settings_ok(lv_event_t *e)
     s_settings_overlay   = NULL;
     s_settings_song_id   = 0;
     s_dd_end_action      = NULL;
+    s_dd_downmix         = NULL;
     s_cb_fixed_speed     = NULL;
     s_cb_light_organ     = NULL;
     s_lbl_pitch_val      = NULL;
@@ -740,6 +780,7 @@ static void on_settings_ok(lv_event_t *e)
     s_lbl_drps_val       = NULL;
     s_lbl_dhld_val       = NULL;
     s_lbl_dfad_val       = NULL;
+    s_lbl_dmxfade_val    = NULL;
 }
 
 static void create_settings_dialog(uint16_t song_id)
@@ -768,6 +809,8 @@ static void create_settings_dialog(uint16_t song_id)
     uint8_t cached_drps            = 14u;
     uint8_t cached_dhld            = 0u;
     uint8_t cached_dfad            = 0u;
+    uint8_t cached_downmix_mode    = 0u;
+    uint8_t cached_downmix_fade_s  = 1u;
     if (cache_idx < SONGLIST_MAX_SONGS && s_settings[cache_idx].valid) {
         bool cached_loop          = (s_settings[cache_idx].flags & 0x01u) != 0;
         bool cached_autoplay_next = (s_settings[cache_idx].flags & 0x04u) != 0;
@@ -784,6 +827,10 @@ static void create_settings_dialog(uint16_t song_id)
         if (cached_drps == 0u) cached_drps = 14u;
         cached_dhld = s_settings[cache_idx].dimmer_holdoff_s;
         cached_dfad = s_settings[cache_idx].dimmer_fadein_s;
+        cached_downmix_mode = s_settings[cache_idx].downmix_mode;
+        if (cached_downmix_mode > 2u) cached_downmix_mode = 0u;
+        cached_downmix_fade_s = s_settings[cache_idx].downmix_fade_s;
+        if (cached_downmix_fade_s > 10u) cached_downmix_fade_s = 1u;
     }
     s_pitch_influence  = cached_pitch_influence;
     s_end_action       = cached_end_action;
@@ -793,6 +840,8 @@ static void create_settings_dialog(uint16_t song_id)
     s_dimmer_rps_x10   = cached_drps;
     s_dimmer_holdoff_s = cached_dhld;
     s_dimmer_fadein_s  = cached_dfad;
+    s_downmix_mode     = cached_downmix_mode;
+    s_downmix_fade_s   = cached_downmix_fade_s;
 
     s_settings_song_id = song_id;
 
@@ -863,12 +912,35 @@ static void create_settings_dialog(uint16_t song_id)
         lv_obj_align(s_dd_end_action, LV_ALIGN_TOP_LEFT, 0, 36);
     }
 
+    {
+        lv_obj_t *dmx_lbl = lv_label_create(content);
+        lv_label_set_text(dmx_lbl, "Default downmix");
+        lv_obj_set_style_text_font(dmx_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(dmx_lbl, lv_color_hex(0xA0A0C0), 0);
+        lv_obj_align(dmx_lbl, LV_ALIGN_TOP_LEFT, 0, 88);
+
+        s_dd_downmix = lv_dropdown_create(content);
+        lv_dropdown_set_options(s_dd_downmix,
+                                "Mix CH1+CH2\n"
+                                "CH1 only\n"
+                                "CH2 only");
+        lv_dropdown_set_selected(s_dd_downmix, s_downmix_mode);
+        lv_obj_set_style_text_font(s_dd_downmix, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(s_dd_downmix, lv_color_hex(0xE0E0FF), 0);
+        lv_obj_set_style_bg_color(s_dd_downmix, lv_color_hex(0x10223A), 0);
+        lv_obj_set_style_border_color(s_dd_downmix, lv_color_hex(0x1E88E5), 0);
+        lv_obj_set_style_border_width(s_dd_downmix, 1, 0);
+        lv_obj_set_style_radius(s_dd_downmix, 6, 0);
+        lv_obj_set_width(s_dd_downmix, 340);
+        lv_obj_align(s_dd_downmix, LV_ALIGN_TOP_LEFT, 0, 116);
+    }
+
     s_cb_fixed_speed = lv_checkbox_create(content);
     lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed (ignore crank)");
     if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 88);
+    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 252);
 
     /* Reuse MAKE_DIMMER_ROW for speed and pitch spinners */
 #define MAKE_DIMMER_ROW(par, ypos, lbl_txt, on_m, on_p, lbl_ref)                    \
@@ -912,16 +984,22 @@ static void create_settings_dialog(uint16_t song_id)
         lv_obj_center(_rpl);                                                            \
     } while(0)
 
-    MAKE_DIMMER_ROW(content, 126,  "Speed \xc3\x97",  on_speed_minus, on_speed_plus, s_lbl_speed_val);
+    MAKE_DIMMER_ROW(content, 168, "Downmix fade", on_dmxfade_minus, on_dmxfade_plus, s_lbl_dmxfade_val);
+    if (s_lbl_dmxfade_val) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%us", s_downmix_fade_s);
+        lv_label_set_text(s_lbl_dmxfade_val, buf);
+    }
+    MAKE_DIMMER_ROW(content, 290,  "Speed \xc3\x97",  on_speed_minus, on_speed_plus, s_lbl_speed_val);
     update_speed_label();
-    MAKE_DIMMER_ROW(content, 168, "Pitch %",  on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
+    MAKE_DIMMER_ROW(content, 332, "Pitch %",  on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
     update_pitch_label();
 
     /* ── Separator ────────────────────────────────────────────────── */
     {
         lv_obj_t *sep = lv_obj_create(content);
         lv_obj_set_size(sep, 452, 1);
-        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 214);
+        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 378);
         lv_obj_set_style_bg_color(sep, lv_color_hex(0x2A3A5A), 0);
         lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(sep, 0, 0);
@@ -931,7 +1009,7 @@ static void create_settings_dialog(uint16_t song_id)
         lv_label_set_text(dim_lbl, "Dimmer");
         lv_obj_set_style_text_font(dim_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(dim_lbl, lv_color_hex(0x6d6d8a), 0);
-        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 220);
+        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 384);
     }
 
     /* ── Dimmer controls ──────────────────────────────────────────── */
@@ -940,17 +1018,17 @@ static void create_settings_dialog(uint16_t song_id)
     if (cached_light_organ) lv_obj_add_state(s_cb_light_organ, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_light_organ, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_light_organ, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 246);
+    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 410);
 
-    MAKE_DIMMER_ROW(content, 284, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
-    MAKE_DIMMER_ROW(content, 326, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
-    MAKE_DIMMER_ROW(content, 368, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
+    MAKE_DIMMER_ROW(content, 448, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
+    MAKE_DIMMER_ROW(content, 490, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
+    MAKE_DIMMER_ROW(content, 532, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
 
     /* ── Separator ────────────────────────────────────────────────── */
     {
         lv_obj_t *sep2 = lv_obj_create(content);
         lv_obj_set_size(sep2, 452, 1);
-        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 434);
+        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 598);
         lv_obj_set_style_bg_color(sep2, lv_color_hex(0x2A3A5A), 0);
         lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(sep2, 0, 0);
@@ -960,11 +1038,11 @@ static void create_settings_dialog(uint16_t song_id)
         lv_label_set_text(hld_lbl, "Lamp timing");
         lv_obj_set_style_text_font(hld_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(hld_lbl, lv_color_hex(0x6d6d8a), 0);
-        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 440);
+        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 604);
     }
 
-    MAKE_DIMMER_ROW(content, 466, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
-    MAKE_DIMMER_ROW(content, 508, "Fade-in",     on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
+    MAKE_DIMMER_ROW(content, 630, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
+    MAKE_DIMMER_ROW(content, 672, "Fade-in",  on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
     update_dimmer_labels();
 
 #undef MAKE_DIMMER_ROW
@@ -1181,6 +1259,8 @@ static void async_cb_song_settings(void *user_data)
         s_settings[idx].dimmer_holdoff_s    = p->dimmer_holdoff_s;
         s_settings[idx].dimmer_fadein_s     = p->dimmer_fadein_s;
         s_settings[idx].pitch_influence_pct = p->pitch_influence_pct;
+        s_settings[idx].downmix_mode        = p->downmix_mode;
+        s_settings[idx].downmix_fade_s      = p->downmix_fade_s;
         s_settings[idx].valid               = true;
     }
 
@@ -1193,7 +1273,9 @@ static void async_cb_song_settings(void *user_data)
 void ui_songlist_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fixed_speed_x100,
                                      uint8_t dimmer_max, uint8_t dimmer_min,
                                      uint8_t dimmer_rps_ref_x10, uint8_t dimmer_holdoff_s,
-                                     uint8_t dimmer_fadein_s, uint8_t pitch_influence_pct)
+                                     uint8_t dimmer_fadein_s, uint8_t pitch_influence_pct,
+                                     uint8_t downmix_mode,
+                                     uint8_t downmix_fade_s)
 {
     if (!s_screen) return;
 
@@ -1211,6 +1293,8 @@ void ui_songlist_song_settings_async(uint16_t song_id, uint8_t flags, uint8_t fi
     p->dimmer_holdoff_s     = dimmer_holdoff_s;
     p->dimmer_fadein_s      = dimmer_fadein_s;
     p->pitch_influence_pct  = pitch_influence_pct;
+    p->downmix_mode         = (downmix_mode <= 2u) ? downmix_mode : 0u;
+    p->downmix_fade_s       = (downmix_fade_s <= 10u) ? downmix_fade_s : 1u;
 
     lv_lock();
     lv_async_call(async_cb_song_settings, p);
