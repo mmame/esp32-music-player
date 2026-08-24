@@ -111,7 +111,6 @@ static volatile bool g_tempo_locked  = false;  /* true = poti changes are ignore
 static volatile uint8_t g_locked_tempo_raw = 50; /* poti-scale 0–100 value when locked         */
 static volatile uint8_t g_downmix_mode = 0u; /* 0=L+R mix (default), 1=CH1 only, 2=CH2 only */
 static volatile bool     g_downmix_fade_armed = false; /* true only for live mode changes while playing */
-static uint32_t          g_downmix_reset_seq  = 1u;    /* increment to force immediate coeff reset */
 
 /* Per-song settings loaded from an optional JSON sidecar (e.g. foo.json for foo.wav) */
 static volatile bool     g_song_loop           = false; /* true: restart on end instead of stop */
@@ -300,129 +299,10 @@ static void run_light_organ_fft(void)
 static audio_pipeline_handle_t    g_pipeline  = nullptr;
 static audio_element_handle_t     g_fatfs_el  = nullptr;
 static audio_element_handle_t     g_wav_el    = nullptr;
-static audio_element_handle_t     g_downmix_el = nullptr;
 static audio_element_handle_t     g_sonic_el  = nullptr;
 static audio_element_handle_t     g_alc_el    = nullptr;
 static audio_element_handle_t     g_i2s_el    = nullptr;
 static audio_event_iface_handle_t g_evt       = nullptr;
-
-static int16_t s_downmix_tmp[4096];
-
-static inline void downmix_mode_to_coeff_q15(uint8_t mode, int32_t *cl_q15, int32_t *cr_q15)
-{
-    if (mode == 1u) {
-        *cl_q15 = 32768;
-        *cr_q15 = 0;
-    } else if (mode == 2u) {
-        *cl_q15 = 0;
-        *cr_q15 = 32768;
-    } else {
-        *cl_q15 = 16384;
-        *cr_q15 = 16384;
-    }
-}
-
-static audio_element_err_t downmix_process(audio_element_handle_t self, char *in_buffer, int in_len)
-{
-    static uint32_t s_seen_reset_seq = 0u;
-    static uint8_t  s_effective_mode = 0u;
-    static int32_t  s_cur_l_q15      = 16384;
-    static int32_t  s_cur_r_q15      = 16384;
-    static int32_t  s_from_l_q15     = 16384;
-    static int32_t  s_from_r_q15     = 16384;
-    static int32_t  s_to_l_q15       = 16384;
-    static int32_t  s_to_r_q15       = 16384;
-    static uint32_t s_fade_prog_q20  = 0u;
-    static uint32_t s_fade_step_q20  = 0u;
-    static bool     s_fading         = false;
-
-    int in_bytes = audio_element_input(self, in_buffer, in_len);
-    if (in_bytes <= 0) return (audio_element_err_t)in_bytes;
-
-    if (g_channels <= 1u || g_bps != 2u) {
-        return (audio_element_err_t)audio_element_output(self, in_buffer, in_bytes);
-    }
-
-    int frame_bytes = (int)g_channels * (int)g_bps;
-    if (frame_bytes < 4) {
-        return (audio_element_err_t)audio_element_output(self, in_buffer, in_bytes);
-    }
-
-    int frames = in_bytes / frame_bytes;
-    int max_frames = (int)(sizeof(s_downmix_tmp) / sizeof(s_downmix_tmp[0]));
-    if (frames > max_frames) frames = max_frames;
-    if (frames <= 0) return (audio_element_err_t)in_bytes;
-
-    const int16_t *src = (const int16_t *)in_buffer;
-    uint32_t reset_seq = g_downmix_reset_seq;
-    uint8_t mode = g_downmix_mode;
-    if (mode > 2u) mode = 0u;
-
-    if (s_seen_reset_seq != reset_seq) {
-        s_seen_reset_seq = reset_seq;
-        s_effective_mode = mode;
-        downmix_mode_to_coeff_q15(mode, &s_cur_l_q15, &s_cur_r_q15);
-        s_fading = false;
-        s_fade_prog_q20 = 0u;
-        s_fade_step_q20 = 0u;
-        g_downmix_fade_armed = false;
-    }
-
-    if (mode != s_effective_mode) {
-        bool can_fade = g_downmix_fade_armed && (g_song_downmix_fade_ms > 0u);
-        if (can_fade) {
-            uint32_t sr = (g_sample_rate > 0u) ? g_sample_rate : 48000u;
-            uint32_t fade_samples = ((uint32_t)g_song_downmix_fade_ms * sr) / 1000u;
-            if (fade_samples > 0u) {
-                downmix_mode_to_coeff_q15(mode, &s_to_l_q15, &s_to_r_q15);
-                s_from_l_q15 = s_cur_l_q15;
-                s_from_r_q15 = s_cur_r_q15;
-                s_fade_prog_q20 = 0u;
-                s_fade_step_q20 = (1u << 20) / fade_samples;
-                if (s_fade_step_q20 == 0u) s_fade_step_q20 = 1u;
-                s_fading = true;
-            } else {
-                can_fade = false;
-            }
-        }
-        if (!can_fade) {
-            downmix_mode_to_coeff_q15(mode, &s_cur_l_q15, &s_cur_r_q15);
-            s_fading = false;
-            s_fade_prog_q20 = 0u;
-            s_fade_step_q20 = 0u;
-        }
-        s_effective_mode = mode;
-        g_downmix_fade_armed = false;
-    }
-
-    for (int i = 0; i < frames; ++i) {
-        int16_t l = src[(i * (int)g_channels) + 0];
-        int16_t r = src[(i * (int)g_channels) + 1];
-
-        if (s_fading) {
-            s_fade_prog_q20 += s_fade_step_q20;
-            if (s_fade_prog_q20 >= (1u << 20)) {
-                s_fade_prog_q20 = (1u << 20);
-            }
-            int32_t dl = s_to_l_q15 - s_from_l_q15;
-            int32_t dr = s_to_r_q15 - s_from_r_q15;
-            s_cur_l_q15 = s_from_l_q15 + (int32_t)(((int64_t)dl * (int64_t)s_fade_prog_q20) >> 20);
-            s_cur_r_q15 = s_from_r_q15 + (int32_t)(((int64_t)dr * (int64_t)s_fade_prog_q20) >> 20);
-            if (s_fade_prog_q20 >= (1u << 20)) {
-                s_cur_l_q15 = s_to_l_q15;
-                s_cur_r_q15 = s_to_r_q15;
-                s_fading = false;
-            }
-        }
-
-        int32_t out = ((int32_t)l * s_cur_l_q15 + (int32_t)r * s_cur_r_q15) >> 15;
-        if (out > 32767) out = 32767;
-        if (out < -32768) out = -32768;
-        s_downmix_tmp[i] = (int16_t)out;
-    }
-
-    return (audio_element_err_t)audio_element_output(self, (char *)s_downmix_tmp, frames * (int)sizeof(int16_t));
-}
 #endif
 
 /* ======================================================================
@@ -732,14 +612,30 @@ static void apply_speed_locked(float speed)
     soundtouch_el_set_tempo(g_sonic_el, speed);
 }
 
+static inline void apply_downmix_to_soundtouch(bool arm_fade)
+{
+    if (!g_sonic_el) return;
+    uint8_t mode = (g_downmix_mode <= 2u) ? g_downmix_mode : 0u;
+    soundtouch_el_set_downmix_fade_ms(g_sonic_el, g_song_downmix_fade_ms);
+    soundtouch_el_arm_downmix_fade(g_sonic_el, arm_fade && g_song_downmix_fade_ms > 0u);
+    soundtouch_el_set_downmix_mode(g_sonic_el, mode);
+}
+
 /* ======================================================================
  * Pipeline control
  * ====================================================================== */
 
 static void pipeline_stop_and_reset(void)
 {
-    audio_pipeline_stop(g_pipeline);
-    audio_pipeline_wait_for_stop(g_pipeline);
+    esp_err_t st = audio_pipeline_stop(g_pipeline);
+    if (st == ESP_OK) {
+        audio_pipeline_wait_for_stop(g_pipeline);
+    } else {
+        /* If pipeline state tracking is out of sync, force-terminate tasks
+         * before touching ringbuffers/elements to avoid live-task races. */
+        ESP_LOGW(TAG, "pipeline_stop_and_reset: stop failed (%s), forcing terminate", esp_err_to_name(st));
+        audio_pipeline_terminate_with_ticks(g_pipeline, pdMS_TO_TICKS(1000));
+    }
     audio_pipeline_reset_ringbuffer(g_pipeline);
     audio_pipeline_reset_elements(g_pipeline);
 }
@@ -775,7 +671,7 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     g_downmix_mode           = (settings.downmix_mode <= 2u) ? settings.downmix_mode : 0u;
     g_song_downmix_fade_ms   = (uint16_t)settings.downmix_fade_s * 1000u;
     g_downmix_fade_armed     = false;
-    g_downmix_reset_seq = g_downmix_reset_seq + 1u;
+    apply_downmix_to_soundtouch(false);
 #ifdef HAVE_ADF
     if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
     if (g_song_light_organ) s_lo_file = fopen(path, "rb");
@@ -832,7 +728,6 @@ static void do_stop(void)
 {
     if (!g_is_playing && !g_is_paused) return;
     g_downmix_fade_armed = false;
-    g_downmix_reset_seq = g_downmix_reset_seq + 1u;
     pipeline_stop_and_reset();
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     g_is_playing   = false;
@@ -850,6 +745,8 @@ static void do_stop(void)
     g_song_dimmer_holdoff_s      = 0.0f;
     g_song_dimmer_fadein_s       = 0.0f;
     g_song_downmix_fade_ms       = 1000u;
+    g_downmix_mode               = 0u;
+    apply_downmix_to_soundtouch(false);
     g_song_light_organ           = false;
     g_fft_dimmer_pct             = 0u;
 #ifdef HAVE_ADF
@@ -1046,7 +943,7 @@ static void create_pipeline(void)
 
     soundtouch_el_cfg_t st_cfg = SOUNDTOUCH_EL_DEFAULT_CFG();
     st_cfg.samplerate  = 44100;
-    st_cfg.channels    = 1;
+    st_cfg.channels    = 2;
     st_cfg.tempo       = g_speed;
     st_cfg.out_rb_size = 16 * 1024; /* 16 KB PSRAM – absorbs bursty TDHS output          */
     st_cfg.task_stack  =  16 * 1024; /*  16 KB – TDHS uses significant stack              */
@@ -1054,17 +951,8 @@ static void create_pipeline(void)
     g_sonic_el = soundtouch_el_init(&st_cfg);
     configASSERT(g_sonic_el);
 
-    audio_element_cfg_t dm_cfg = DEFAULT_AUDIO_ELEMENT_CONFIG();
-    dm_cfg.process      = downmix_process;
-    dm_cfg.buffer_len   = 4096;
-    dm_cfg.out_rb_size  = 16 * 1024;
-    dm_cfg.task_stack   = 4096;
-    dm_cfg.task_core    = 1;
-    g_downmix_el = audio_element_init(&dm_cfg);
-    configASSERT(g_downmix_el);
-
     alc_volume_setup_cfg_t alc_cfg = DEFAULT_ALC_VOLUME_SETUP_CONFIG();
-    alc_cfg.channel     = 1;   /* internal stream is mono after downmix */
+    alc_cfg.channel     = 1;   /* SoundTouch element emits mono after integrated downmix */
     alc_cfg.volume      = 0;
     alc_cfg.out_rb_size = 16 * 1024; /* 16 KB PSRAM (default 8 KB) */
     g_alc_el = alc_volume_setup_init(&alc_cfg);
@@ -1095,19 +983,18 @@ static void create_pipeline(void)
 
     audio_pipeline_register(g_pipeline, g_fatfs_el, "fatfs");
     audio_pipeline_register(g_pipeline, g_wav_el,   "wav");
-    audio_pipeline_register(g_pipeline, g_downmix_el, "downmix");
     audio_pipeline_register(g_pipeline, g_sonic_el, "sonic");
     audio_pipeline_register(g_pipeline, g_alc_el,   "alc");
     audio_pipeline_register(g_pipeline, g_i2s_el,   "i2s");
 
-    const char *link_tags[] = {"fatfs", "wav", "downmix", "sonic", "alc", "i2s"};
-    audio_pipeline_link(g_pipeline, link_tags, 6);
+    const char *link_tags[] = {"fatfs", "wav", "sonic", "alc", "i2s"};
+    audio_pipeline_link(g_pipeline, link_tags, 5);
 
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
     g_evt = audio_event_iface_init(&evt_cfg);
     audio_pipeline_set_listener(g_pipeline, g_evt);
 
-    ESP_LOGI(TAG, "Audio pipeline created: fatfs->wav->downmix->sonic->alc->i2s");
+    ESP_LOGI(TAG, "Audio pipeline created: fatfs->wav->sonic(downmix)->alc->i2s");
 }
 
 /* ======================================================================
@@ -1168,6 +1055,7 @@ static void audio_task(void *arg)
             s_cmd_downmix_mode_pending = false;
             g_downmix_mode = s_cmd_downmix_mode_value;
             g_downmix_fade_armed = (g_is_playing && !g_is_paused);
+            apply_downmix_to_soundtouch(g_downmix_fade_armed);
             ESP_LOGI(TAG, "Downmix mode set: %u (0=mix,1=ch1,2=ch2)", (unsigned)g_downmix_mode);
         }
 
@@ -1475,6 +1363,7 @@ static void on_set_song_settings(uint16_t song_id,
             g_song_dimmer_fadein_s       = 0.0f;
             g_song_downmix_fade_ms       = 1000u;
             g_downmix_mode               = 0u;
+            apply_downmix_to_soundtouch(false);
             soundtouch_el_set_pitch_influence(g_sonic_el, 0.0f);
         }
         return;
@@ -1552,6 +1441,7 @@ static void on_set_song_settings(uint16_t song_id,
         g_song_downmix_fade_ms   = (uint16_t)downmix_fade_s * 1000u;
         g_downmix_mode           = downmix_mode;
         g_downmix_fade_armed     = (g_is_playing && !g_is_paused);
+        apply_downmix_to_soundtouch(g_downmix_fade_armed);
         g_fft_dimmer_pct         = 0u;
 #ifdef HAVE_ADF
         if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
@@ -1611,6 +1501,7 @@ static void on_web_song_settings_saved(const char *wav_path,
     g_song_downmix_fade_ms  = (uint16_t)downmix_fade_s * 1000u;
     g_downmix_mode          = (downmix_mode <= 2u) ? downmix_mode : 0u;
     g_downmix_fade_armed    = (g_is_playing && !g_is_paused);
+    apply_downmix_to_soundtouch(g_downmix_fade_armed);
     /* Pitch influence on SoundTouch must be applied from the audio_task */
 #ifdef HAVE_ADF
     s_cmd_st_bypass_value   = (fixed_speed > 0.0f); /* reuse bypass flag for fixed-speed */

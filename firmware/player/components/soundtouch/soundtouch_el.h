@@ -102,6 +102,25 @@ esp_err_t soundtouch_el_set_bypass(audio_element_handle_t self, bool bypass);
  */
 esp_err_t soundtouch_el_set_pitch_influence(audio_element_handle_t self, float pitch_influence);
 
+/**
+ * @brief Set stereo downmix mode used before SoundTouch processing.
+ *
+ * 0 = mix L+R, 1 = left only, 2 = right only.
+ */
+esp_err_t soundtouch_el_set_downmix_mode(audio_element_handle_t self, uint8_t mode);
+
+/**
+ * @brief Set downmix transition fade duration in milliseconds.
+ */
+esp_err_t soundtouch_el_set_downmix_fade_ms(audio_element_handle_t self, uint16_t fade_ms);
+
+/**
+ * @brief Arm/disarm fade for the next mode change.
+ *
+ * When armed=true and mode changes, transition is faded. Otherwise it is instant.
+ */
+esp_err_t soundtouch_el_arm_downmix_fade(audio_element_handle_t self, bool armed);
+
 #ifdef __cplusplus
 }
 #endif

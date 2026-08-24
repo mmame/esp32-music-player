@@ -38,7 +38,8 @@ static constexpr int ST_DRAIN_FRAMES = 4096;
 struct StCtx {
     soundtouch::SoundTouch *st;
     int            samplerate;
-    int            channels;
+    int            in_channels;
+    int            st_channels;
     volatile float target_tempo;   /* written by any task, read by element task */
     float          applied_tempo;  /* last value actually sent to SoundTouch    */
     volatile bool  bypass;         /* true = passthrough, no SoundTouch         */
@@ -47,9 +48,21 @@ struct StCtx {
     volatile float pitch_influence;         /* 0.0 = time-stretch, 1.0 = tape effect  */
     float          applied_pitch_influence; /* last value applied to SoundTouch        */
 
+    volatile uint8_t  downmix_mode_target;  /* 0=mix,1=left,2=right */
+    uint8_t           downmix_mode_active;
+    volatile uint16_t downmix_fade_ms;
+    volatile bool     downmix_fade_armed;
+    bool              downmix_fading;
+    float             dm_cur_l;
+    float             dm_cur_r;
+    float             dm_step_l;
+    float             dm_step_r;
+    uint32_t          dm_fade_left;
+
     /* int16 buffers - interface to ADF ring buffers and SoundTouch        */
-    int16_t *pcm_in;   /* ST_CHUNK_FRAMES x channels                       */
-    int16_t *pcm_out;  /* ST_DRAIN_FRAMES x channels                       */
+    int16_t *pcm_in;   /* ST_CHUNK_FRAMES x in_channels                    */
+    int16_t *mono_in;  /* ST_CHUNK_FRAMES x 1                              */
+    int16_t *pcm_out;  /* ST_DRAIN_FRAMES x st_channels                    */
 };
 
 /* -- Helpers --------------------------------------------------------------- */
@@ -57,6 +70,17 @@ struct StCtx {
 static inline StCtx *ctx_of(audio_element_handle_t self)
 {
     return static_cast<StCtx *>(audio_element_getdata(self));
+}
+
+static inline void mode_to_gain(uint8_t mode, float *gl, float *gr)
+{
+    if (mode == 1u) {
+        *gl = 1.0f; *gr = 0.0f;
+    } else if (mode == 2u) {
+        *gl = 0.0f; *gr = 1.0f;
+    } else {
+        *gl = 0.5f; *gr = 0.5f;
+    }
 }
 
 /** Receive all frames currently available in SoundTouch and write to the
@@ -69,7 +93,7 @@ static void drain(audio_element_handle_t self, StCtx *ctx)
         if (frames > 0) {
             audio_element_output(self,
                                  reinterpret_cast<char *>(ctx->pcm_out),
-                                 (int)(frames * (uint)ctx->channels) * (int)sizeof(int16_t));
+                                 (int)(frames * (uint)ctx->st_channels) * (int)sizeof(int16_t));
         }
     } while (frames > 0);
 }
@@ -103,18 +127,88 @@ static audio_element_err_t _process(audio_element_handle_t self,
         ctx->prev_bypass = cur_bypass;
     }
 
-    /* When bypass is active, copy PCM straight through – zero SoundTouch involvement. */
-    if (cur_bypass) {
-        int rb_bytes = ST_CHUNK_FRAMES * ctx->channels * (int)sizeof(int16_t);
-        int bytes_in = audio_element_input(self,
-                                           reinterpret_cast<char *>(ctx->pcm_in),
-                                           rb_bytes);
-        if (bytes_in > 0) {
-            audio_element_output(self,
-                                 reinterpret_cast<char *>(ctx->pcm_in),
-                                 bytes_in);
+    int rb_bytes = ST_CHUNK_FRAMES * ctx->in_channels * (int)sizeof(int16_t);
+    int bytes_in = audio_element_input(self,
+                                       reinterpret_cast<char *>(ctx->pcm_in),
+                                       rb_bytes);
+    if (bytes_in <= 0) {
+        if (!cur_bypass && bytes_in == AEL_IO_DONE) {
+            ctx->st->flush();
+            drain(self, ctx);
         }
         return static_cast<audio_element_err_t>(bytes_in);
+    }
+
+    int frames_in = bytes_in / (ctx->in_channels * (int)sizeof(int16_t));
+
+    /* Detect downmix mode changes and optionally start fade. */
+    uint8_t mode = ctx->downmix_mode_target;
+    if (mode > 2u) mode = 0u;
+    if (mode != ctx->downmix_mode_active) {
+        float to_l = 0.5f, to_r = 0.5f;
+        mode_to_gain(mode, &to_l, &to_r);
+        if (ctx->downmix_fade_armed && ctx->downmix_fade_ms > 0u) {
+            uint32_t fs = ((uint32_t)ctx->samplerate * (uint32_t)ctx->downmix_fade_ms) / 1000u;
+            if (fs > 0u) {
+                ctx->dm_fade_left = fs;
+                ctx->dm_step_l = (to_l - ctx->dm_cur_l) / (float)fs;
+                ctx->dm_step_r = (to_r - ctx->dm_cur_r) / (float)fs;
+                ctx->downmix_fading = true;
+            } else {
+                ctx->dm_cur_l = to_l;
+                ctx->dm_cur_r = to_r;
+                ctx->downmix_fading = false;
+                ctx->dm_fade_left = 0u;
+            }
+        } else {
+            ctx->dm_cur_l = to_l;
+            ctx->dm_cur_r = to_r;
+            ctx->downmix_fading = false;
+            ctx->dm_fade_left = 0u;
+        }
+        ctx->downmix_mode_active = mode;
+        ctx->downmix_fade_armed = false;
+    }
+
+    /* Stereo->mono downmix. */
+    if (ctx->in_channels <= 1) {
+        memcpy(ctx->mono_in, ctx->pcm_in, (size_t)frames_in * sizeof(int16_t));
+    } else if (!ctx->downmix_fading) {
+        if (ctx->downmix_mode_active == 1u) {
+            for (int i = 0; i < frames_in; ++i) ctx->mono_in[i] = ctx->pcm_in[i * 2 + 0];
+        } else if (ctx->downmix_mode_active == 2u) {
+            for (int i = 0; i < frames_in; ++i) ctx->mono_in[i] = ctx->pcm_in[i * 2 + 1];
+        } else {
+            for (int i = 0; i < frames_in; ++i) {
+                int32_t l = ctx->pcm_in[i * 2 + 0];
+                int32_t r = ctx->pcm_in[i * 2 + 1];
+                ctx->mono_in[i] = (int16_t)((l + r) >> 1);
+            }
+        }
+    } else {
+        for (int i = 0; i < frames_in; ++i) {
+            float l = (float)ctx->pcm_in[i * 2 + 0];
+            float r = (float)ctx->pcm_in[i * 2 + 1];
+            float y = l * ctx->dm_cur_l + r * ctx->dm_cur_r;
+            if (y > 32767.0f) y = 32767.0f;
+            if (y < -32768.0f) y = -32768.0f;
+            ctx->mono_in[i] = (int16_t)y;
+            if (ctx->dm_fade_left > 0u) {
+                ctx->dm_cur_l += ctx->dm_step_l;
+                ctx->dm_cur_r += ctx->dm_step_r;
+                ctx->dm_fade_left--;
+                if (ctx->dm_fade_left == 0u) ctx->downmix_fading = false;
+            }
+        }
+    }
+
+    /* When bypass is active, output downmixed PCM directly. */
+    if (cur_bypass) {
+        int out_bytes = frames_in * (int)sizeof(int16_t);
+        int ret = audio_element_output(self,
+                                       reinterpret_cast<char *>(ctx->mono_in),
+                                       out_bytes);
+        return static_cast<audio_element_err_t>(ret);
     }
 
     /* Apply any pending tempo / rate change before processing this chunk. */
@@ -135,22 +229,8 @@ static audio_element_err_t _process(audio_element_handle_t self,
     }
 
     /* Pull one chunk of int16 PCM from the upstream ring buffer. */
-    int rb_bytes = ST_CHUNK_FRAMES * ctx->channels * (int)sizeof(int16_t);
-    int bytes_in = audio_element_input(self,
-                                       reinterpret_cast<char *>(ctx->pcm_in),
-                                       rb_bytes);
-    if (bytes_in <= 0) {
-        if (bytes_in == AEL_IO_DONE) {
-            /* Flush SoundTouch's internal lookahead and emit remaining frames. */
-            ctx->st->flush();
-            drain(self, ctx);
-        }
-        return static_cast<audio_element_err_t>(bytes_in);
-    }
-
-    /* Feed int16 PCM directly to SoundTouch (SAMPLETYPE = short). */
-    int frames_in = bytes_in / (ctx->channels * (int)sizeof(int16_t));
-    ctx->st->putSamples(ctx->pcm_in, (uint)frames_in);
+    /* Feed downmixed mono PCM to SoundTouch. */
+    ctx->st->putSamples(ctx->mono_in, (uint)frames_in);
 
     /* Drain all available output. */
     drain(self, ctx);
@@ -164,6 +244,7 @@ static esp_err_t _destroy(audio_element_handle_t self)
     if (ctx) {
         delete ctx->st;
         audio_free(ctx->pcm_in);
+        audio_free(ctx->mono_in);
         audio_free(ctx->pcm_out);
         audio_free(ctx);
     }
@@ -200,27 +281,65 @@ esp_err_t soundtouch_el_set_pitch_influence(audio_element_handle_t self, float p
     return ESP_OK;
 }
 
+esp_err_t soundtouch_el_set_downmix_mode(audio_element_handle_t self, uint8_t mode)
+{
+    StCtx *ctx = ctx_of(self);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    if (mode > 2u) mode = 0u;
+    ctx->downmix_mode_target = mode;
+    return ESP_OK;
+}
+
+esp_err_t soundtouch_el_set_downmix_fade_ms(audio_element_handle_t self, uint16_t fade_ms)
+{
+    StCtx *ctx = ctx_of(self);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    ctx->downmix_fade_ms = fade_ms;
+    return ESP_OK;
+}
+
+esp_err_t soundtouch_el_arm_downmix_fade(audio_element_handle_t self, bool armed)
+{
+    StCtx *ctx = ctx_of(self);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    ctx->downmix_fade_armed = armed;
+    return ESP_OK;
+}
+
 audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
 {
     StCtx *ctx = static_cast<StCtx *>(audio_calloc(1, sizeof(StCtx)));
     AUDIO_MEM_CHECK(TAG, ctx, return NULL);
 
     ctx->samplerate    = cfg->samplerate;
-    ctx->channels      = cfg->channels;
+    ctx->in_channels   = cfg->channels;
+    ctx->st_channels   = 1;
     ctx->applied_tempo      = cfg->tempo;
     ctx->target_tempo       = cfg->tempo;
     ctx->bypass             = false;
     ctx->prev_bypass        = false;
     ctx->pitch_influence         = 0.0f;
     ctx->applied_pitch_influence = 0.0f;
+    ctx->downmix_mode_target     = 0u;
+    ctx->downmix_mode_active     = 0u;
+    ctx->downmix_fade_ms         = 1000u;
+    ctx->downmix_fade_armed      = false;
+    ctx->downmix_fading          = false;
+    ctx->dm_cur_l                = 0.5f;
+    ctx->dm_cur_r                = 0.5f;
+    ctx->dm_step_l               = 0.0f;
+    ctx->dm_step_r               = 0.0f;
+    ctx->dm_fade_left            = 0u;
 
     /* int16 PCM buffers (may live in PSRAM via audio_calloc). */
     ctx->pcm_in  = static_cast<int16_t *>(
         audio_calloc(ST_CHUNK_FRAMES   * cfg->channels, sizeof(int16_t)));
+    ctx->mono_in = static_cast<int16_t *>(
+        audio_calloc(ST_CHUNK_FRAMES, sizeof(int16_t)));
     ctx->pcm_out = static_cast<int16_t *>(
-        audio_calloc(ST_DRAIN_FRAMES   * cfg->channels, sizeof(int16_t)));
+        audio_calloc(ST_DRAIN_FRAMES   * ctx->st_channels, sizeof(int16_t)));
 
-    if (!ctx->pcm_in || !ctx->pcm_out) {
+    if (!ctx->pcm_in || !ctx->mono_in || !ctx->pcm_out) {
         ESP_LOGE(TAG, "OOM allocating I/O buffers");
         goto fail;
     }
@@ -230,7 +349,7 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
     if (!ctx->st) { ESP_LOGE(TAG, "OOM: SoundTouch()"); goto fail; }
 
     ctx->st->setSampleRate((uint)cfg->samplerate);
-    ctx->st->setChannels((uint)cfg->channels);
+    ctx->st->setChannels((uint)ctx->st_channels);
     ctx->st->setTempo((double)cfg->tempo);
 
     /* Quality settings – let SoundTouch auto-tune sequence/seek/overlap for
@@ -270,6 +389,7 @@ fail:
     if (ctx) {
         delete ctx->st;
         audio_free(ctx->pcm_in);
+        audio_free(ctx->mono_in);
         audio_free(ctx->pcm_out);
         audio_free(ctx);
     }
