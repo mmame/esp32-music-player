@@ -49,6 +49,7 @@
 #include "cJSON.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_app_desc.h"
 
 static const char *TAG = "web_server";
 
@@ -927,6 +928,36 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, buf);
 }
 
+/* ── GET /api/about ────────────────────────────────────────────────── */
+
+static esp_err_t about_get_handler(httpd_req_t *req)
+{
+    const esp_app_desc_t *desc = esp_app_get_description();
+    if (!desc) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No app description");
+        return ESP_FAIL;
+    }
+
+    char sha_short[17] = {0};
+    for (int i = 0; i < 8; ++i) {
+        sprintf(&sha_short[i * 2], "%02x", (unsigned)desc->app_elf_sha256[i]);
+    }
+
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+             "{\"project\":\"%s\",\"version\":\"%s\",\"idf\":\"%s\",\"build_date\":\"%s\",\"build_time\":\"%s\",\"build_hash\":\"%s\"}",
+             desc->project_name,
+             desc->version,
+             desc->idf_ver,
+             desc->date,
+             desc->time,
+             sha_short);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, buf);
+}
+
 /* ── POST /api/crank_config  body: JSON object ───────────────────── */
 
 static esp_err_t crank_config_post_handler(httpd_req_t *req)
@@ -1516,7 +1547,7 @@ static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 16384; /* OTA end/SHA256 verification needs more than default 4K */
-    cfg.max_uri_handlers  = 16;
+    cfg.max_uri_handlers  = 17;
     cfg.recv_wait_timeout = 60;    /* seconds – generous for large OTA uploads */
     cfg.send_wait_timeout = 60;
     cfg.lru_purge_enable  = true;
@@ -1531,6 +1562,7 @@ static httpd_handle_t start_webserver(void)
         { "/",                   HTTP_GET,    root_get_handler,              nullptr },
         { "/update",             HTTP_GET,    update_get_handler,            nullptr },
         { "/api/files",          HTTP_GET,    files_get_handler,             nullptr },
+        { "/api/about",          HTTP_GET,    about_get_handler,             nullptr },
         { "/api/playlists",      HTTP_GET,    playlists_get_handler,         nullptr },
         { "/api/playlists",      HTTP_POST,   playlists_post_handler,        nullptr },
         { "/api/crank_config",   HTTP_GET,    crank_config_get_handler,      nullptr },

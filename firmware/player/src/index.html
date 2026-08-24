@@ -61,6 +61,12 @@ tbody tr:hover td{background:#1a1f3a}
 .tab-nav{display:flex;gap:6px;margin-bottom:16px}
 .tab-btn{padding:8px 20px;border:1px solid #1e2a52;border-radius:6px;cursor:pointer;background:#16213e;color:#9090b0;font-size:13px;font-weight:500;transition:all .15s}
 .tab-btn.active{background:#7c3aed;border-color:#7c3aed;color:#fff}
+/* About */
+.about-card p{font-size:14px;line-height:1.55;color:#cfd3ef;margin-bottom:10px}
+.about-link{color:#a78bfa;text-decoration:none;font-weight:600}
+.about-link:hover{text-decoration:underline}
+.about-meta{margin-top:12px;padding:10px;border:1px solid #2d3561;border-radius:8px;background:#101a36}
+.about-meta-line{font-size:12px;color:#aeb7de;line-height:1.5}
 /* Config */
 .cfg-row{margin-bottom:20px}
 .cfg-label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
@@ -109,6 +115,7 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
 <nav class="tab-nav">
   <button class="tab-btn active" data-tab="files" onclick="switchTab('files')">Files</button>
   <button class="tab-btn" data-tab="config" onclick="switchTab('config')">Configuration</button>
+  <button class="tab-btn" data-tab="about" onclick="switchTab('about')">About</button>
 </nav>
 
 <div id="tab-files">
@@ -253,6 +260,24 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <button class="btn btn-ghost" id="cal-start-btn" onclick="calStart()">&#9654; Calibrate Potentiometer</button>
 </section>
 </div><!-- /tab-config -->
+
+<div id="tab-about" style="display:none">
+<section class="about-card">
+  <h2>About</h2>
+  <p>This ESP32 music player project is open source and maintained on GitHub.</p>
+  <p>
+    Project page:
+    <a class="about-link" href="https://github.com/mmame/esp32-music-player" target="_blank" rel="noopener noreferrer">
+      github.com/mmame/esp32-music-player
+    </a>
+  </p>
+  <div class="about-meta" id="about-meta">
+    <div class="about-meta-line" id="about-version">Firmware: loading...</div>
+    <div class="about-meta-line" id="about-build">Build: loading...</div>
+    <div class="about-meta-line" id="about-idf">ESP-IDF: loading...</div>
+  </div>
+</section>
+</div><!-- /tab-about -->
 
 <div id="toast"></div>
 
@@ -874,12 +899,37 @@ window.duplicateSong=duplicateSong;
 window.setActivePlaylist=setActivePlaylist;
 window.setActivePlaylistByIndex=setActivePlaylistByIndex;
 
+var g_aboutLoaded=false;
+function loadAboutInfo(){
+  if(g_aboutLoaded)return;
+  fetch('/api/about').then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(a){
+    var ver=(a.version||'?');
+    var hash=(a.build_hash||'?');
+    var bdate=(a.build_date||'?');
+    var btime=(a.build_time||'?');
+    var idf=(a.idf||'?');
+    document.getElementById('about-version').textContent='Firmware: v'+ver;
+    document.getElementById('about-build').textContent='Build: '+bdate+' '+btime+'  ('+hash+')';
+    document.getElementById('about-idf').textContent='ESP-IDF: '+idf;
+    g_aboutLoaded=true;
+  }).catch(function(){
+    document.getElementById('about-version').textContent='Firmware: unavailable';
+    document.getElementById('about-build').textContent='Build: unavailable';
+    document.getElementById('about-idf').textContent='ESP-IDF: unavailable';
+  });
+}
+
 /* ── Tabs ── */
 function switchTab(t){
   document.getElementById('tab-files').style.display=(t==='files'?'':'none');
   document.getElementById('tab-config').style.display=(t==='config'?'':'none');
+  document.getElementById('tab-about').style.display=(t==='about'?'':'none');
   document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.toggle('active',b.dataset.tab===t);});
   if(t==='config')loadConfig();
+  if(t==='about')loadAboutInfo();
 }
 window.switchTab=switchTab;
 
