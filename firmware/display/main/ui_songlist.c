@@ -81,6 +81,8 @@ static lv_obj_t  *s_dd_downmix         = NULL; /* 0=mix, 1=ch1, 2=ch2 */
 static uint8_t    s_end_action         = 0u;
 static uint8_t    s_downmix_mode       = 0u;
 static lv_obj_t  *s_cb_fixed_speed     = NULL;
+static lv_obj_t  *s_btn_speed_minus     = NULL;
+static lv_obj_t  *s_btn_speed_plus      = NULL;
 static lv_obj_t  *s_cb_light_organ     = NULL; /* light-organ mode checkbox        */
 static lv_obj_t  *s_lbl_pitch_val      = NULL;
 static uint8_t    s_pitch_influence    = 0u;   /* dialog pitch influence 0-100   */
@@ -571,8 +573,32 @@ static void focus_item(int16_t idx)
     lv_obj_t *target = lv_obj_get_child(s_list, idx);
     if (target) {
         lv_group_focus_obj(target);
-        /* Scroll the list so the focused item is visible */
-        lv_obj_scroll_to_view(target, LV_ANIM_ON);
+
+        /* Center the selected entry in the visible area while clamping at the
+         * list boundaries.  This keeps the external index selection in the middle
+         * of the list, and only lets it drift to the edge when the end of the
+         * list is reached.
+         */
+        lv_coord_t item_y = lv_obj_get_y(target);
+        lv_coord_t item_h = lv_obj_get_height(target);
+        lv_coord_t list_h = lv_obj_get_height(s_list);
+
+        lv_coord_t max_scroll = 0;
+        uint16_t child_cnt = lv_obj_get_child_cnt(s_list);
+        if (child_cnt > 0) {
+            lv_obj_t *last = lv_obj_get_child(s_list, child_cnt - 1u);
+            if (last) {
+                lv_coord_t last_y = lv_obj_get_y(last) + lv_obj_get_height(last);
+                if (last_y > list_h) max_scroll = last_y - list_h;
+            }
+        }
+
+        lv_coord_t desired_y = item_y - ((list_h - item_h) / 2);
+
+        if (desired_y < 0) desired_y = 0;
+        if (desired_y > max_scroll) desired_y = max_scroll;
+
+        lv_obj_scroll_to_y(s_list, desired_y, LV_ANIM_OFF);
     }
 }
 
@@ -599,9 +625,37 @@ static void update_speed_label(void)
     lv_label_set_text(s_lbl_speed_val, buf);
 }
 
+static void update_speed_buttons_state(void)
+{
+    bool enabled = s_cb_fixed_speed && ((lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) != 0);
+
+    if (s_btn_speed_minus) {
+        if (enabled) {
+            lv_obj_clear_state(s_btn_speed_minus, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_btn_speed_minus, LV_STATE_DISABLED);
+        }
+    }
+
+    if (s_btn_speed_plus) {
+        if (enabled) {
+            lv_obj_clear_state(s_btn_speed_plus, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_btn_speed_plus, LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void on_fixed_speed_toggled(lv_event_t *e)
+{
+    (void)e;
+    update_speed_buttons_state();
+}
+
 static void on_speed_minus(lv_event_t *e)
 {
     (void)e;
+    if (s_cb_fixed_speed && ((lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) == 0u)) return;
     if (s_speed_x100 > 70u) s_speed_x100 -= 5u;
     if (s_cb_fixed_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
     update_speed_label();
@@ -610,6 +664,7 @@ static void on_speed_minus(lv_event_t *e)
 static void on_speed_plus(lv_event_t *e)
 {
     (void)e;
+    if (s_cb_fixed_speed && ((lv_obj_get_state(s_cb_fixed_speed) & LV_STATE_CHECKED) == 0u)) return;
     if (s_speed_x100 < 140u) s_speed_x100 += 5u;
     if (s_cb_fixed_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
     update_speed_label();
@@ -694,6 +749,8 @@ static void on_settings_cancel(lv_event_t *e)
         s_dd_end_action    = NULL;
         s_dd_downmix       = NULL;
         s_cb_fixed_speed   = NULL;
+        s_btn_speed_minus  = NULL;
+        s_btn_speed_plus   = NULL;
         s_cb_light_organ   = NULL;
         s_lbl_pitch_val    = NULL;
         s_lbl_dmax_val     = NULL;
@@ -772,6 +829,8 @@ static void on_settings_ok(lv_event_t *e)
     s_dd_end_action      = NULL;
     s_dd_downmix         = NULL;
     s_cb_fixed_speed     = NULL;
+    s_btn_speed_minus    = NULL;
+    s_btn_speed_plus     = NULL;
     s_cb_light_organ     = NULL;
     s_lbl_pitch_val      = NULL;
     s_lbl_speed_val      = NULL;
@@ -857,14 +916,14 @@ static void create_settings_dialog(uint16_t song_id)
 
     /* ── Dialog box ───────────────────────────────────────────────── */
     lv_obj_t *box = lv_obj_create(s_settings_overlay);
-    lv_obj_set_size(box, 500, 450);
+    lv_obj_set_size(box, 520, 452);
     lv_obj_center(box);
     lv_obj_set_style_bg_color(box, lv_color_hex(0x1A1A2E), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(box, lv_color_hex(0x1E88E5), 0);
     lv_obj_set_style_border_width(box, 2, 0);
     lv_obj_set_style_radius(box, 14, 0);
-    lv_obj_set_style_pad_all(box, 24, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
 
@@ -875,13 +934,13 @@ static void create_settings_dialog(uint16_t song_id)
     lv_obj_set_style_text_color(title, lv_color_hex(0x1E88E5), 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(title, 452);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 14);
 
     /* ── Scrollable content area (all settings in one vertical column) ── */
-    /* box inner: 452 × 402; title ~34px; buttons 44px fixed at bottom     */
+    /* Leave a footer strip for Cancel/OK so lower rows aren't hidden underneath. */
     lv_obj_t *content = lv_obj_create(box);
-    lv_obj_set_size(content, 452, 312);
-    lv_obj_align(content, LV_ALIGN_TOP_LEFT, 0, 40);
+    lv_obj_set_size(content, 472, 310);
+    lv_obj_align(content, LV_ALIGN_TOP_LEFT, 24, 54);
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
@@ -935,71 +994,109 @@ static void create_settings_dialog(uint16_t song_id)
         lv_obj_align(s_dd_downmix, LV_ALIGN_TOP_LEFT, 0, 116);
     }
 
-    s_cb_fixed_speed = lv_checkbox_create(content);
-    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed speed (ignore crank)");
-    if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
-    lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 252);
-
     /* Reuse MAKE_DIMMER_ROW for speed and pitch spinners */
-#define MAKE_DIMMER_ROW(par, ypos, lbl_txt, on_m, on_p, lbl_ref)                    \
-    do {                                                                              \
-        lv_obj_t *_rl = lv_label_create(par);                                        \
-        lv_label_set_text(_rl, lbl_txt);                                              \
-        lv_obj_set_style_text_font(_rl, &lv_font_montserrat_20, 0);                  \
-        lv_obj_set_style_text_color(_rl, lv_color_hex(0xA0A0C0), 0);                 \
-        lv_obj_align(_rl, LV_ALIGN_TOP_LEFT, 0, (ypos) + 8);                         \
-        lv_obj_t *_rm = lv_button_create(par);                                        \
-        lv_obj_set_size(_rm, 36, 36);                                                 \
-        lv_obj_align(_rm, LV_ALIGN_TOP_LEFT, 200, (ypos));                            \
-        lv_obj_set_style_bg_color(_rm, lv_color_hex(0x1E88E5), 0);                   \
-        lv_obj_set_style_bg_color(_rm, lv_color_hex(0x1565C0), LV_STATE_PRESSED);    \
-        lv_obj_set_style_radius(_rm, 6, 0);                                           \
-        lv_obj_set_style_border_width(_rm, 0, 0);                                     \
-        lv_obj_add_event_cb(_rm, on_m, LV_EVENT_CLICKED, NULL);                       \
-        lv_obj_t *_rml = lv_label_create(_rm);                                        \
-        lv_label_set_text(_rml, "-");                                                  \
-        lv_obj_set_style_text_font(_rml, &lv_font_montserrat_20, 0);                  \
-        lv_obj_set_style_text_color(_rml, lv_color_white(), 0);                       \
-        lv_obj_center(_rml);                                                           \
+#define MAKE_DIMMER_ROW(par, ypos, lbl_txt, on_m, on_p, lbl_ref)                     \
+    do {                                                                               \
+        lv_obj_t *_rl = lv_label_create(par);                                         \
+        lv_label_set_text(_rl, lbl_txt);                                               \
+        lv_obj_set_style_text_font(_rl, &lv_font_montserrat_20, 0);                   \
+        lv_obj_set_style_text_color(_rl, lv_color_hex(0xA0A0C0), 0);                  \
+        lv_obj_set_width(_rl, 170);                                                    \
+        lv_obj_align(_rl, LV_ALIGN_TOP_LEFT, 0, (ypos) + 8);                            \
+        lv_obj_t *_rm = lv_button_create(par);                                         \
+        lv_obj_set_size(_rm, 48, 48);                                                  \
+        lv_obj_align(_rm, LV_ALIGN_TOP_LEFT, 208, (ypos));                             \
+        lv_obj_set_style_bg_color(_rm, lv_color_hex(0x1E88E5), 0);                    \
+        lv_obj_set_style_bg_color(_rm, lv_color_hex(0x1565C0), LV_STATE_PRESSED);     \
+        lv_obj_set_style_radius(_rm, 8, 0);                                            \
+        lv_obj_set_style_border_width(_rm, 0, 0);                                      \
+        lv_obj_add_event_cb(_rm, on_m, LV_EVENT_CLICKED, NULL);                        \
+        lv_obj_t *_rml = lv_label_create(_rm);                                         \
+        lv_label_set_text(_rml, "-");                                                 \
+        lv_obj_set_style_text_font(_rml, &lv_font_montserrat_28, 0);                   \
+        lv_obj_set_style_text_color(_rml, lv_color_white(), 0);                        \
+        lv_obj_center(_rml);                                                            \
         (lbl_ref) = lv_label_create(par);                                              \
-        lv_obj_set_size((lbl_ref), 72, 36);                                            \
-        lv_obj_align((lbl_ref), LV_ALIGN_TOP_LEFT, 240, (ypos));                       \
-        lv_obj_set_style_text_font((lbl_ref), &lv_font_montserrat_20, 0);              \
-        lv_obj_set_style_text_color((lbl_ref), lv_color_hex(0xE0E0FF), 0);             \
-        lv_obj_set_style_text_align((lbl_ref), LV_TEXT_ALIGN_CENTER, 0);               \
+        lv_obj_set_size((lbl_ref), 90, 40);                                            \
+        lv_obj_align((lbl_ref), LV_ALIGN_TOP_LEFT, 268, (ypos) + 4);                   \
+        lv_obj_set_style_text_font((lbl_ref), &lv_font_montserrat_20, 0);               \
+        lv_obj_set_style_text_color((lbl_ref), lv_color_hex(0xE0E0FF), 0);              \
+        lv_obj_set_style_text_align((lbl_ref), LV_TEXT_ALIGN_CENTER, 0);                \
         lv_obj_t *_rp = lv_button_create(par);                                         \
-        lv_obj_set_size(_rp, 36, 36);                                                  \
-        lv_obj_align(_rp, LV_ALIGN_TOP_LEFT, 316, (ypos));                             \
+        lv_obj_set_size(_rp, 48, 48);                                                  \
+        lv_obj_align(_rp, LV_ALIGN_TOP_LEFT, 372, (ypos));                             \
         lv_obj_set_style_bg_color(_rp, lv_color_hex(0x1E88E5), 0);                    \
         lv_obj_set_style_bg_color(_rp, lv_color_hex(0x1565C0), LV_STATE_PRESSED);     \
-        lv_obj_set_style_radius(_rp, 6, 0);                                            \
+        lv_obj_set_style_radius(_rp, 8, 0);                                            \
         lv_obj_set_style_border_width(_rp, 0, 0);                                      \
         lv_obj_add_event_cb(_rp, on_p, LV_EVENT_CLICKED, NULL);                        \
         lv_obj_t *_rpl = lv_label_create(_rp);                                         \
-        lv_label_set_text(_rpl, "+");                                                   \
-        lv_obj_set_style_text_font(_rpl, &lv_font_montserrat_20, 0);                   \
-        lv_obj_set_style_text_color(_rpl, lv_color_white(), 0);                         \
+        lv_label_set_text(_rpl, "+");                                                 \
+        lv_obj_set_style_text_font(_rpl, &lv_font_montserrat_28, 0);                   \
+        lv_obj_set_style_text_color(_rpl, lv_color_white(), 0);                        \
         lv_obj_center(_rpl);                                                            \
     } while(0)
 
-    MAKE_DIMMER_ROW(content, 168, "Downmix fade", on_dmxfade_minus, on_dmxfade_plus, s_lbl_dmxfade_val);
+    MAKE_DIMMER_ROW(content, 185, "Downmix fade", on_dmxfade_minus, on_dmxfade_plus, s_lbl_dmxfade_val);
     if (s_lbl_dmxfade_val) {
         char buf[8];
         snprintf(buf, sizeof(buf), "%us", s_downmix_fade_s);
         lv_label_set_text(s_lbl_dmxfade_val, buf);
     }
-    MAKE_DIMMER_ROW(content, 290,  "Speed \xc3\x97",  on_speed_minus, on_speed_plus, s_lbl_speed_val);
+
+    s_cb_fixed_speed = lv_checkbox_create(content);
+    lv_checkbox_set_text(s_cb_fixed_speed, "Fixed Speed");
+    if (cached_speed) lv_obj_add_state(s_cb_fixed_speed, LV_STATE_CHECKED);
+    lv_obj_set_style_text_font(s_cb_fixed_speed, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_cb_fixed_speed, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_align(s_cb_fixed_speed, LV_ALIGN_TOP_LEFT, 0, 255);
+    lv_obj_add_event_cb(s_cb_fixed_speed, on_fixed_speed_toggled, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_btn_speed_minus = lv_button_create(content);
+    lv_obj_set_size(s_btn_speed_minus, 48, 48);
+    lv_obj_align(s_btn_speed_minus, LV_ALIGN_TOP_LEFT, 208, 245);
+    lv_obj_set_style_bg_color(s_btn_speed_minus, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_bg_color(s_btn_speed_minus, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(s_btn_speed_minus, 8, 0);
+    lv_obj_set_style_border_width(s_btn_speed_minus, 0, 0);
+    lv_obj_add_event_cb(s_btn_speed_minus, on_speed_minus, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *speed_minus_label = lv_label_create(s_btn_speed_minus);
+    lv_label_set_text(speed_minus_label, "-");
+    lv_obj_set_style_text_font(speed_minus_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(speed_minus_label, lv_color_white(), 0);
+    lv_obj_center(speed_minus_label);
+
+    s_lbl_speed_val = lv_label_create(content);
+    lv_obj_set_size(s_lbl_speed_val, 90, 40);
+    lv_obj_align(s_lbl_speed_val, LV_ALIGN_TOP_LEFT, 268, 249);
+    lv_obj_set_style_text_font(s_lbl_speed_val, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_lbl_speed_val, lv_color_hex(0xE0E0FF), 0);
+    lv_obj_set_style_text_align(s_lbl_speed_val, LV_TEXT_ALIGN_CENTER, 0);
     update_speed_label();
-    MAKE_DIMMER_ROW(content, 332, "Pitch %",  on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
+
+    s_btn_speed_plus = lv_button_create(content);
+    lv_obj_set_size(s_btn_speed_plus, 48, 48);
+    lv_obj_align(s_btn_speed_plus, LV_ALIGN_TOP_LEFT, 372, 245);
+    lv_obj_set_style_bg_color(s_btn_speed_plus, lv_color_hex(0x1E88E5), 0);
+    lv_obj_set_style_bg_color(s_btn_speed_plus, lv_color_hex(0x1565C0), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(s_btn_speed_plus, 8, 0);
+    lv_obj_set_style_border_width(s_btn_speed_plus, 0, 0);
+    lv_obj_add_event_cb(s_btn_speed_plus, on_speed_plus, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *speed_plus_label = lv_label_create(s_btn_speed_plus);
+    lv_label_set_text(speed_plus_label, "+");
+    lv_obj_set_style_text_font(speed_plus_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(speed_plus_label, lv_color_white(), 0);
+    lv_obj_center(speed_plus_label);
+    update_speed_buttons_state();
+
+    MAKE_DIMMER_ROW(content, 310, "Pitch %", on_pitch_minus, on_pitch_plus, s_lbl_pitch_val);
     update_pitch_label();
 
     /* ── Separator ────────────────────────────────────────────────── */
     {
         lv_obj_t *sep = lv_obj_create(content);
         lv_obj_set_size(sep, 452, 1);
-        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 378);
+        lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, 392);
         lv_obj_set_style_bg_color(sep, lv_color_hex(0x2A3A5A), 0);
         lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(sep, 0, 0);
@@ -1009,7 +1106,7 @@ static void create_settings_dialog(uint16_t song_id)
         lv_label_set_text(dim_lbl, "Dimmer");
         lv_obj_set_style_text_font(dim_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(dim_lbl, lv_color_hex(0x6d6d8a), 0);
-        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 384);
+        lv_obj_align(dim_lbl, LV_ALIGN_TOP_LEFT, 0, 410);
     }
 
     /* ── Dimmer controls ──────────────────────────────────────────── */
@@ -1018,17 +1115,17 @@ static void create_settings_dialog(uint16_t song_id)
     if (cached_light_organ) lv_obj_add_state(s_cb_light_organ, LV_STATE_CHECKED);
     lv_obj_set_style_text_font(s_cb_light_organ, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(s_cb_light_organ, lv_color_hex(0xE0E0FF), 0);
-    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 410);
+    lv_obj_align(s_cb_light_organ, LV_ALIGN_TOP_LEFT, 0, 440);
 
-    MAKE_DIMMER_ROW(content, 448, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
-    MAKE_DIMMER_ROW(content, 490, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
-    MAKE_DIMMER_ROW(content, 532, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
+    MAKE_DIMMER_ROW(content, 470, "Max bright",  on_dmax_minus, on_dmax_plus, s_lbl_dmax_val);
+    MAKE_DIMMER_ROW(content, 530, "Min bright",  on_dmin_minus, on_dmin_plus, s_lbl_dmin_val);
+    MAKE_DIMMER_ROW(content, 590, "Full at RPS", on_drps_minus, on_drps_plus, s_lbl_drps_val);
 
     /* ── Separator ────────────────────────────────────────────────── */
     {
         lv_obj_t *sep2 = lv_obj_create(content);
         lv_obj_set_size(sep2, 452, 1);
-        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 598);
+        lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, 665);
         lv_obj_set_style_bg_color(sep2, lv_color_hex(0x2A3A5A), 0);
         lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(sep2, 0, 0);
@@ -1038,11 +1135,11 @@ static void create_settings_dialog(uint16_t song_id)
         lv_label_set_text(hld_lbl, "Lamp timing");
         lv_obj_set_style_text_font(hld_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(hld_lbl, lv_color_hex(0x6d6d8a), 0);
-        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 604);
+        lv_obj_align(hld_lbl, LV_ALIGN_TOP_LEFT, 0, 684);
     }
 
-    MAKE_DIMMER_ROW(content, 630, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
-    MAKE_DIMMER_ROW(content, 672, "Fade-in",  on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
+    MAKE_DIMMER_ROW(content, 710, "Holdoff",  on_dhld_minus, on_dhld_plus, s_lbl_dhld_val);
+    MAKE_DIMMER_ROW(content, 770, "Fade-in",  on_dfad_minus, on_dfad_plus, s_lbl_dfad_val);
     update_dimmer_labels();
 
 #undef MAKE_DIMMER_ROW
@@ -1050,7 +1147,7 @@ static void create_settings_dialog(uint16_t song_id)
     /* ── Cancel / OK ─────────────────────────────────────────────── */
     lv_obj_t *btn_cancel = lv_obj_create(box);
     lv_obj_set_size(btn_cancel, 180, 44);
-    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 18, -14);
     lv_obj_set_style_bg_color(btn_cancel, lv_color_hex(0x2A2A3E), 0);
     lv_obj_set_style_bg_opa(btn_cancel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(btn_cancel, lv_color_hex(0x505060), 0);
@@ -1067,7 +1164,7 @@ static void create_settings_dialog(uint16_t song_id)
 
     lv_obj_t *btn_ok = lv_obj_create(box);
     lv_obj_set_size(btn_ok, 180, 44);
-    lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_RIGHT, -18, -14);
     lv_obj_set_style_bg_color(btn_ok, lv_color_hex(0x1E88E5), 0);
     lv_obj_set_style_bg_opa(btn_ok, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(btn_ok, 0, 0);
