@@ -56,7 +56,8 @@ while True:
 filename = f"dual_sine_{format_num(freq1)}_ch1_{format_num(freq2)}_ch2.wav"
 
 # 16-bit audio configuration: Maximum peak amplitude for signed 16-bit is 32767[cite: 1]
-max_amplitude = 32767
+output_gain_db = -6.0  # Output level relative to full scale (dBFS)
+max_amplitude = int(32767 * 10 ** (output_gain_db / 20.0))  # -6 dBFS -> 16422
 
 num_samples = int(sample_rate * duration)
 

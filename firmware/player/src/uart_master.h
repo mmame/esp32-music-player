@@ -136,6 +136,7 @@ typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
  * @param pitch_influence_pct Pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
  * @param downmix_mode        0=L+R mix (default), 1=CH1 only, 2=CH2 only.
  * @param downmix_fade_s      Downmix transition fade duration in seconds (0-10).
+ * @param gain_db             Per-song gain -6..+6 dB (added to the global output gain).
  */
 typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  flags,
@@ -147,7 +148,8 @@ typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  dimmer_fadein_s,
                                              uint8_t  pitch_influence_pct,
                                              uint8_t  downmix_mode,
-                                             uint8_t  downmix_fade_s);
+                                             uint8_t  downmix_fade_s,
+                                             int8_t   gain_db);
 
 /**
  * @brief Called when the display requests switching the active playlist.
@@ -239,7 +241,7 @@ void uart_master_send_playlists(const char *active_name,
 /**
  * @brief Send CMD_SONG_SETTINGS to the display.
  *
- * Payload (12 bytes):
+ * Payload (13 bytes):
  *   [0..1] song_id            : uint16_t LE
  *   [2]    flags              : bit0=loop, bit1=fixed_speed_en, bit2=autoplay_next
  *   [3]    fixed_speed_x100   : speed × 100 (e.g. 100 = 1.0×).
@@ -251,6 +253,7 @@ void uart_master_send_playlists(const char *active_name,
  *   [9]    pitch_influence_pct: pitch blend factor 0-100
  *   [10]   downmix_mode       : 0=L+R mix, 1=CH1 only, 2=CH2 only
  *   [11]   downmix_fade_s     : downmix transition fade in seconds (0-10)
+ *   [12]   gain_db            : per-song gain, int8_t, -6..+6 dB
  */
 void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  flags,
@@ -262,7 +265,8 @@ void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  dimmer_fadein_s,
                                     uint8_t  pitch_influence_pct,
                                     uint8_t  downmix_mode,
-                                    uint8_t  downmix_fade_s);
+                                    uint8_t  downmix_fade_s,
+                                    int8_t   gain_db);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

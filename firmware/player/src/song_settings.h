@@ -28,6 +28,7 @@ extern "C" {
  *   "light_organ"       : boolean – drive dimmer brightness from audio FFT energy instead of crank speed.
  *   "downmix_mode"      : number  – stereo->mono mode: 0=mix, 1=CH1 only, 2=CH2 only.
  *   "downmix_fade_s"    : number  – fade time in seconds for live downmix-mode changes (0-10).
+ *   "gain_db"           : number  – per-song gain in dB, -6..+6 (default 0); added to the global output gain.
  */
 
 typedef struct {
@@ -43,7 +44,11 @@ typedef struct {
     bool    light_organ;     /**< true: dimmer driven by FFT audio energy instead of crank speed */
     uint8_t downmix_mode;    /**< 0=L+R mix (default), 1=CH1 only, 2=CH2 only                    */
     uint8_t downmix_fade_s;  /**< live downmix fade duration in seconds (0-10)                    */
+    int8_t  gain_db;         /**< per-song gain -6..+6 dB, added to the global output gain        */
 } song_settings_t;
+
+#define SONG_GAIN_DB_MIN  (-6)
+#define SONG_GAIN_DB_MAX  (6)
 
 /**
  * Load settings for the given WAV file path.

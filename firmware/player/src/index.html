@@ -200,6 +200,11 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     <p class="cfg-desc">Volume units stepped per 10&thinsp;ms tick during fade-in/out when cranking starts or stops. 1&nbsp;=&nbsp;slow fade (~700&thinsp;ms at full volume). 10&nbsp;=&nbsp;fast fade (~70&thinsp;ms). Default: 1</p>
   </div>
   <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Output gain (dB)</span><span class="cfg-val" id="vv-gain_db">+6</span></div>
+    <input type="range" class="cfg-slider" id="sl-gain_db" min="0" max="10" step="1" value="6" oninput="document.getElementById('vv-gain_db').textContent='+'+this.value">
+    <p class="cfg-desc">Static gain added on top of the volume potentiometer (applies live). A peak limiter (ceiling &minus;1&thinsp;dBFS) follows the gain, so loud passages are squeezed instead of clipping &mdash; at high settings loud material may sound compressed. Range: 0&ndash;10&thinsp;dB. 0 = off (bit-perfect). Default: +6&thinsp;dB.</p>
+  </div>
+  <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Dimmer fade-in (stop&rarr;start) ms</span><span class="cfg-val" id="vv-dimmer_start_fade_ms">1000</span></div>
     <input type="range" class="cfg-slider" id="sl-dimmer_start_fade_ms" min="0" max="5000" step="10" value="1000" oninput="document.getElementById('vv-dimmer_start_fade_ms').textContent=this.value">
     <p class="cfg-desc">Global dimmer fade-in duration after crank restarts. Range: 0&ndash;5000&thinsp;ms. Default: 1000&thinsp;ms.</p>
@@ -954,6 +959,7 @@ function loadConfig(){
     setSlider('vol_fade_step',c.vol_fade_step,0);
     setSlider('dimmer_start_fade_ms',c.dimmer_start_fade_ms,0);
     setSlider('dimmer_stop_fade_ms',c.dimmer_stop_fade_ms,0);
+    if(c.gain_db!==undefined){setSlider('gain_db',c.gain_db,0);document.getElementById('vv-gain_db').textContent='+'+c.gain_db;}
     if(c.crank_dir!==undefined){document.getElementById('sl-crank_dir').value=String(c.crank_dir);}
     if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
     if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
@@ -973,6 +979,7 @@ function saveConfig(){
   var fs =parseInt(document.getElementById('sl-vol_fade_step').value);
   var dsf=parseInt(document.getElementById('sl-dimmer_start_fade_ms').value);
   var dso=parseInt(document.getElementById('sl-dimmer_stop_fade_ms').value);
+  var gdb=parseInt(document.getElementById('sl-gain_db').value);
   var cd =parseInt(document.getElementById('sl-crank_dir').value);
   var lbw=parseFloat(document.getElementById('sl-lo_bass_weight').value);
   var lmw=parseFloat(document.getElementById('sl-lo_mid_weight').value);
@@ -982,7 +989,7 @@ function saveConfig(){
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -997,6 +1004,7 @@ function resetConfig(){
   setSlider('vol_fade_step',  1,    0);
   setSlider('dimmer_start_fade_ms', 1000, 0);
   setSlider('dimmer_stop_fade_ms',  1000, 0);
+  setSlider('gain_db', 6, 0);document.getElementById('vv-gain_db').textContent='+6';
   document.getElementById('sl-crank_dir').value='-1';
   setSlider('lo_bass_weight', 45,   0);
   setSlider('lo_mid_weight',  5,    1);
@@ -1075,6 +1083,10 @@ function openSongSettings(name){
       var pi=s.pitch_influence||0;
       document.getElementById('ss-pitch').value=pi;
       document.getElementById('ss-pitch-val').textContent=pi+'%';
+      var gdb=parseInt(s.gain_db,10);
+      if(isNaN(gdb)||gdb<-6||gdb>6)gdb=0;
+      document.getElementById('ss-gain').value=gdb;
+      document.getElementById('ss-gain-val').textContent=(gdb>0?'+':'')+gdb+' dB';
       var dmx=(s.downmix_mode!==undefined)?parseInt(s.downmix_mode,10):0;
       if(isNaN(dmx)||dmx<0||dmx>2)dmx=0;
       document.getElementById('ss-downmix').value=String(dmx);
@@ -1110,6 +1122,7 @@ function ssSave(){
     fixed_speed_en:document.getElementById('ss-fixed-en').checked,
     fixed_speed:parseFloat(document.getElementById('ss-fixed-spd').value),
     pitch_influence:parseInt(document.getElementById('ss-pitch').value),
+    gain_db:parseInt(document.getElementById('ss-gain').value,10),
     downmix_mode:parseInt(document.getElementById('ss-downmix').value,10),
     downmix_fade_s:parseInt(document.getElementById('ss-downmix-fade').value,10),
     dimmer_holdoff_s:parseInt(document.getElementById('ss-holdoff').value),
@@ -1169,6 +1182,12 @@ loadPlaylists();
       <input type="range" class="cfg-slider" id="ss-pitch" min="0" max="100" step="5" value="0"
         oninput="document.getElementById('ss-pitch-val').textContent=this.value+'%'">
       <p class="ss-hint">0% = time-stretch only (pitch unchanged at any speed).<br>100% = tape effect (pitch rises and falls with crank speed).</p>
+    </div>
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Song gain</span><span class="ss-sv" id="ss-gain-val">0 dB</span></div>
+      <input type="range" class="cfg-slider" id="ss-gain" min="-6" max="6" step="1" value="0"
+        oninput="document.getElementById('ss-gain-val').textContent=(this.value>0?'+':'')+this.value+' dB'">
+      <p class="ss-hint">Added to the global output gain (Settings page) for this song. Range: &minus;6 to +6&thinsp;dB, default 0&thinsp;dB. The total (global + song) is capped at +10&thinsp;dB and peak-limited at &minus;1&thinsp;dBFS.</p>
     </div>
     <div class="ss-sr">
       <div class="ss-sl"><span class="ss-sn">Default downmix mode</span></div>

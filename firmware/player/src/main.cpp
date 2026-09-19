@@ -3,7 +3,7 @@
  * @brief Music Player firmware – ESP-ADF pipeline implementation.
  *
  * Audio pipeline (when HAVE_ADF is defined via CMakeLists):
- *   SD card -> fatfs_stream -> wav_decoder -> downmix(2->1 selectable) -> audio_sonic -> alc_volume_setup -> i2s_stream -> DAC
+ *   SD card -> fatfs_stream -> wav_decoder -> downmix(2->1 selectable) -> audio_sonic -> alc_volume_setup -> limiter(gain) -> i2s_stream -> DAC
  *
  * Architecture:
  *   Core 1 (audio_task, high priority) - pipeline management, event loop, command dispatch
@@ -63,6 +63,7 @@
 #include "i2s_stream.h"
 #include "fatfs_stream.h"
 #include "soundtouch_el.h"
+#include "limiter_el.h"
 #include "audio_alc.h"
 #include "wav_decoder.h"
 #endif /* HAVE_ADF */
@@ -127,6 +128,7 @@ static volatile float    g_song_dimmer_fadein_s   = 0.0f; /* seconds to fade fro
 static volatile bool     g_song_light_organ        = false; /* true: dimmer driven by audio FFT, not crank speed */
 static volatile uint8_t  g_fft_dimmer_pct          = 0u;   /* 0-100, updated by light-organ FFT analysis */
 static volatile uint16_t g_song_downmix_fade_ms    = 1000u; /* per-song downmix fade duration for live mode changes */
+static volatile int8_t   g_song_gain_db            = 0;     /* per-song gain -6..+6 dB, added to the global gain     */
 
 static uint32_t g_song_bytes   = 0;
 static uint32_t g_sample_rate  = 44100;
@@ -301,6 +303,8 @@ static audio_element_handle_t     g_fatfs_el  = nullptr;
 static audio_element_handle_t     g_wav_el    = nullptr;
 static audio_element_handle_t     g_sonic_el  = nullptr;
 static audio_element_handle_t     g_alc_el    = nullptr;
+static audio_element_handle_t     g_lim_el    = nullptr; /* static gain + peak limiter, last stage before I2S */
+static int8_t                     s_applied_gain_db = 0;  /* total gain last pushed to g_lim_el */
 static audio_element_handle_t     g_i2s_el    = nullptr;
 static audio_event_iface_handle_t g_evt       = nullptr;
 #endif
@@ -586,6 +590,15 @@ static float get_current_pos_s_locked(void)
  * Volume / speed control (call with s_state_mutex held)
  * ====================================================================== */
 
+/* Total static gain = global (web config) + per-song, limited to what the limiter element supports. */
+static int8_t total_gain_db(void)
+{
+    int t = (int)g_crank_cfg.gain_db + (int)g_song_gain_db;
+    if (t > LIMITER_EL_MAX_GAIN_DB) t = LIMITER_EL_MAX_GAIN_DB;
+    if (t < LIMITER_EL_MIN_GAIN_DB) t = LIMITER_EL_MIN_GAIN_DB;
+    return (int8_t)t;
+}
+
 static void apply_volume_locked(uint8_t vol)
 {
     /* Power-law taper (γ=0.5): stretches the bottom quarter from –64…–48 dB to –64…–32 dB. */
@@ -668,6 +681,7 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     g_song_dimmer_holdoff_s  = (float)settings.dimmer_holdoff_s;
     g_song_dimmer_fadein_s   = (float)settings.dimmer_fadein_s;
     g_song_light_organ       = settings.light_organ;
+    g_song_gain_db           = settings.gain_db;
     g_downmix_mode           = (settings.downmix_mode <= 2u) ? settings.downmix_mode : 0u;
     g_song_downmix_fade_ms   = (uint16_t)settings.downmix_fade_s * 1000u;
     g_downmix_fade_armed     = false;
@@ -745,6 +759,7 @@ static void do_stop(void)
     g_song_dimmer_holdoff_s      = 0.0f;
     g_song_dimmer_fadein_s       = 0.0f;
     g_song_downmix_fade_ms       = 1000u;
+    g_song_gain_db               = 0;
     g_downmix_mode               = 0u;
     apply_downmix_to_soundtouch(false);
     g_song_light_organ           = false;
@@ -958,6 +973,14 @@ static void create_pipeline(void)
     g_alc_el = alc_volume_setup_init(&alc_cfg);
     configASSERT(g_alc_el);
 
+    limiter_el_cfg_t lim_cfg = LIMITER_EL_DEFAULT_CFG();
+    lim_cfg.samplerate = 48000; /* matches the I2S clock below */
+    lim_cfg.channels   = 1;     /* mono after downmix */
+    g_lim_el = limiter_el_init(&lim_cfg);
+    configASSERT(g_lim_el);
+    s_applied_gain_db = total_gain_db();
+    limiter_el_set_gain_db(g_lim_el, s_applied_gain_db);
+
     i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_cfg.type = AUDIO_STREAM_WRITER;
     i2s_cfg.std_cfg.gpio_cfg.bclk = (gpio_num_t)MY_I2S_BCK;
@@ -985,16 +1008,17 @@ static void create_pipeline(void)
     audio_pipeline_register(g_pipeline, g_wav_el,   "wav");
     audio_pipeline_register(g_pipeline, g_sonic_el, "sonic");
     audio_pipeline_register(g_pipeline, g_alc_el,   "alc");
+    audio_pipeline_register(g_pipeline, g_lim_el,   "limiter");
     audio_pipeline_register(g_pipeline, g_i2s_el,   "i2s");
 
-    const char *link_tags[] = {"fatfs", "wav", "sonic", "alc", "i2s"};
-    audio_pipeline_link(g_pipeline, link_tags, 5);
+    const char *link_tags[] = {"fatfs", "wav", "sonic", "alc", "limiter", "i2s"};
+    audio_pipeline_link(g_pipeline, link_tags, 6);
 
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
     g_evt = audio_event_iface_init(&evt_cfg);
     audio_pipeline_set_listener(g_pipeline, g_evt);
 
-    ESP_LOGI(TAG, "Audio pipeline created: fatfs->wav->sonic(downmix)->alc->i2s");
+    ESP_LOGI(TAG, "Audio pipeline created: fatfs->wav->sonic(downmix)->alc->limiter->i2s");
 }
 
 /* ======================================================================
@@ -1313,7 +1337,7 @@ static void on_song_settings_req(uint16_t song_id)
 
     uart_master_send_song_settings(song_id, flags, spd_x100,
                                    d_max, d_min, d_rps_x10, d_holdoff, d_fadein, s.pitch_influence,
-                                   downmix_mode, downmix_fade_s);
+                                   downmix_mode, downmix_fade_s, s.gain_db);
 }
 
 /**
@@ -1331,7 +1355,8 @@ static void on_set_song_settings(uint16_t song_id,
                                  uint8_t  dimmer_fadein_s,
                                  uint8_t  pitch_influence_pct,
                                  uint8_t  downmix_mode,
-                                 uint8_t  downmix_fade_s)
+                                 uint8_t  downmix_fade_s,
+                                 int8_t   gain_db)
 {
     if (song_id == 0 || song_id > g_song_count) {
         ESP_LOGW("main", "set_song_settings: id %u out of range", song_id);
@@ -1348,8 +1373,10 @@ static void on_set_song_settings(uint16_t song_id,
     memcpy(json_path + wav_len - 4, ".json", 6);
 
     /* If all settings are default: remove the sidecar file */
+    if (gain_db < SONG_GAIN_DB_MIN) gain_db = SONG_GAIN_DB_MIN;
+    if (gain_db > SONG_GAIN_DB_MAX) gain_db = SONG_GAIN_DB_MAX;
     if (flags == 0 && dimmer_holdoff_s == 0 && dimmer_fadein_s == 0 && pitch_influence_pct == 0
-        && downmix_mode == 0u && downmix_fade_s == 1u
+        && downmix_mode == 0u && downmix_fade_s == 1u && gain_db == 0
         && dimmer_max == 100u && dimmer_min == 0u && dimmer_rps_ref_x10 == 14u) {
         remove(json_path);
         ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
@@ -1362,6 +1389,7 @@ static void on_set_song_settings(uint16_t song_id,
             g_song_dimmer_holdoff_s      = 0.0f;
             g_song_dimmer_fadein_s       = 0.0f;
             g_song_downmix_fade_ms       = 1000u;
+            g_song_gain_db               = 0;
             g_downmix_mode               = 0u;
             apply_downmix_to_soundtouch(false);
             soundtouch_el_set_pitch_influence(g_sonic_el, 0.0f);
@@ -1409,6 +1437,9 @@ static void on_set_song_settings(uint16_t song_id,
     if (downmix_fade_s != 1u) {
         cJSON_AddNumberToObject(root, "downmix_fade_s", downmix_fade_s);
     }
+    if (gain_db != 0) {
+        cJSON_AddNumberToObject(root, "gain_db", gain_db);
+    }
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1439,6 +1470,7 @@ static void on_set_song_settings(uint16_t song_id,
         g_song_dimmer_fadein_s   = (float)dimmer_fadein_s;
         g_song_light_organ       = light_organ;
         g_song_downmix_fade_ms   = (uint16_t)downmix_fade_s * 1000u;
+        g_song_gain_db           = gain_db;
         g_downmix_mode           = downmix_mode;
         g_downmix_fade_armed     = (g_is_playing && !g_is_paused);
         apply_downmix_to_soundtouch(g_downmix_fade_armed);
@@ -1453,10 +1485,10 @@ static void on_set_song_settings(uint16_t song_id,
 #endif
         soundtouch_el_set_pitch_influence(g_sonic_el, (float)pitch_influence_pct / 100.0f);
         ESP_LOGI("main", "Applied settings live: loop=%d autoplay_next=%d fixed_en=%d spd=%.2f pitch_infl=%u%% "
-                 "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us",
+                 "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us gain=%+d dB",
                  (int)loop, (int)autoplay_next, (int)fixed_en, fixed_en ? (double)spd : 1.0, pitch_influence_pct,
                  dimmer_max, dimmer_min, (double)d_rps_ref, dimmer_holdoff_s, dimmer_fadein_s,
-                 (unsigned)downmix_mode, (unsigned)downmix_fade_s);
+                 (unsigned)downmix_mode, (unsigned)downmix_fade_s, (int)gain_db);
     }
 }
 
@@ -1475,7 +1507,8 @@ static void on_web_song_settings_saved(const char *wav_path,
                                         uint8_t     dimmer_holdoff_s,
                                         uint8_t     dimmer_fadein_s,
                                         uint8_t     downmix_mode,
-                                        uint8_t     downmix_fade_s)
+                                        uint8_t     downmix_fade_s,
+                                        int8_t      gain_db)
 {
     if (g_current_song < 0) return;
 
@@ -1499,6 +1532,7 @@ static void on_web_song_settings_saved(const char *wav_path,
     g_song_dimmer_fadein_s  = (float)dimmer_fadein_s;
     if (downmix_fade_s > 10u) downmix_fade_s = 10u;
     g_song_downmix_fade_ms  = (uint16_t)downmix_fade_s * 1000u;
+    g_song_gain_db          = gain_db;
     g_downmix_mode          = (downmix_mode <= 2u) ? downmix_mode : 0u;
     g_downmix_fade_armed    = (g_is_playing && !g_is_paused);
     apply_downmix_to_soundtouch(g_downmix_fade_armed);
@@ -1507,12 +1541,12 @@ static void on_web_song_settings_saved(const char *wav_path,
     s_cmd_st_bypass_value   = (fixed_speed > 0.0f); /* reuse bypass flag for fixed-speed */
     /* pitch: set via existing async command path */
 #endif
-    ESP_LOGI(TAG, "Browser settings live-applied: %s  loop=%d autoplay_next=%d max=%u min=%u rps=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us",
+    ESP_LOGI(TAG, "Browser settings live-applied: %s  loop=%d autoplay_next=%d max=%u min=%u rps=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us gain=%+d dB",
              wav_path, (int)loop, (int)autoplay_next,
              dimmer_max, dimmer_min,
              (double)((dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f),
              dimmer_holdoff_s, dimmer_fadein_s, (unsigned)g_downmix_mode,
-             (unsigned)downmix_fade_s);
+             (unsigned)downmix_fade_s, (int)gain_db);
 }
 
 /* ======================================================================
@@ -1544,6 +1578,17 @@ static void io_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(10));
         TickType_t now = xTaskGetTickCount();
+
+#ifdef HAVE_ADF
+        /* Global (web config) or per-song gain changed: push the total to the limiter element (live). */
+        int8_t total_gain = total_gain_db();
+        if (total_gain != s_applied_gain_db) {
+            s_applied_gain_db = total_gain;
+            limiter_el_set_gain_db(g_lim_el, total_gain);
+            ESP_LOGI(TAG, "Total gain set: %+d dB (global +%u, song %+d)",
+                     (int)total_gain, (unsigned)g_crank_cfg.gain_db, (int)g_song_gain_db);
+        }
+#endif
 
         /* Volume potentiometer (tempo poti removed from speed control) */
         {

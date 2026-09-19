@@ -35,6 +35,7 @@ void crank_config_defaults(crank_config_t *c)
     c->pot_cal_lo     = 559;
     c->pot_cal_mid    = 945;
     c->pot_cal_hi     = 3071;
+    c->gain_db        = 6;
 }
 
 /* ── load ──────────────────────────────────────────────────────────────── */
@@ -109,6 +110,7 @@ void crank_config_load(void)
     read_u16(root, "pot_cal_lo",    0, 4095, &g_crank_cfg.pot_cal_lo);
     read_u16(root, "pot_cal_mid",   0, 4095, &g_crank_cfg.pot_cal_mid);
     read_u16(root, "pot_cal_hi",    0, 4095, &g_crank_cfg.pot_cal_hi);
+    read_u8 (root, "gain_db",       0,   10, &g_crank_cfg.gain_db);
 
     cJSON_Delete(root);
     ESP_LOGI(TAG, "Loaded: attack=%.3f rel=%.1f stop=%.2f start=%.2f rt=%u fs=%u ds=%u de=%u",
@@ -143,6 +145,7 @@ void crank_config_save(void)
     cJSON_AddNumberToObject(root, "pot_cal_lo",      (double)g_crank_cfg.pot_cal_lo);
     cJSON_AddNumberToObject(root, "pot_cal_mid",     (double)g_crank_cfg.pot_cal_mid);
     cJSON_AddNumberToObject(root, "pot_cal_hi",      (double)g_crank_cfg.pot_cal_hi);
+    cJSON_AddNumberToObject(root, "gain_db",         (double)g_crank_cfg.gain_db);
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

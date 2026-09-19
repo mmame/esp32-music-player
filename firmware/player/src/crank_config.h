@@ -34,6 +34,7 @@ typedef struct {
     uint16_t pot_cal_lo;     /**< raw ADC at pot minimum stop  [0–4095, def 559]  */
     uint16_t pot_cal_mid;    /**< raw ADC at pot center knob   [0–4095, def 945]  */
     uint16_t pot_cal_hi;     /**< raw ADC at pot maximum stop  [0–4095, def 3071] */
+    uint8_t  gain_db;        /**< static output gain added on top of the volume poti [0–10 dB, def 6; peak-limited] */
 } crank_config_t;
 
 /** Globally shared config; written by crank_config_load() and the web POST handler. */

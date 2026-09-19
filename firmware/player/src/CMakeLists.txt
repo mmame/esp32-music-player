@@ -30,6 +30,8 @@ if(DEFINED ENV{ADF_PATH})
         esp-adf-libs
         # SoundTouch time-stretching element (replaces audio_sonic)
         soundtouch
+        # Static gain + peak limiter element (esp_audio_effects DRC)
+        limiter
     )
 endif()
 

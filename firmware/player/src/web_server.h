@@ -30,7 +30,8 @@ typedef void (*web_song_settings_cb_t)(const char *wav_path,
                                        uint8_t     dimmer_holdoff_s,
                                        uint8_t     dimmer_fadein_s,
                                        uint8_t     downmix_mode,
-                                       uint8_t     downmix_fade_s);
+                                       uint8_t     downmix_fade_s,
+                                       int8_t      gain_db);
 
 /**
  * Initialise the WiFi stack (netif, event loop, esp_wifi_init) and store the

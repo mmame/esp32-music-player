@@ -101,6 +101,7 @@ void ui_songlist_encoder_btn_async(void);
  * @param pitch_influence_pct  Pitch blend factor 0-100.
  * @param downmix_mode         0=L+R mix, 1=CH1 only, 2=CH2 only.
  * @param downmix_fade_s       Downmix transition fade duration in seconds (0-10).
+ * @param gain_db              Per-song gain -6..+6 dB.
  */
 void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  flags,
@@ -112,7 +113,8 @@ void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  dimmer_fadein_s,
                                      uint8_t  pitch_influence_pct,
                                      uint8_t  downmix_mode,
-                                     uint8_t  downmix_fade_s);
+                                     uint8_t  downmix_fade_s,
+                                     int8_t   gain_db);
 
 /**
  * @brief Update the BT enable/disable button state from the player's flags.

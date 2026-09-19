@@ -35,6 +35,7 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
     out->light_organ      = false;
     out->downmix_mode     = 0u;
         out->downmix_fade_s   = 1u; /* Default downmix fade seconds */
+    out->gain_db          = 0;
 
     if (!wav_path) return;
 
@@ -189,10 +190,17 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
             out->downmix_fade_s = (uint8_t)((v < 0) ? 0 : (v > 10) ? 10 : v);
         }
 
+    /* "gain_db": per-song gain, -6..+6 dB */
+    const cJSON *gain_item = cJSON_GetObjectItemCaseSensitive(root, "gain_db");
+    if (cJSON_IsNumber(gain_item)) {
+        int v = (int)(gain_item->valuedouble < 0 ? gain_item->valuedouble - 0.5 : gain_item->valuedouble + 0.5);
+        out->gain_db = (int8_t)((v < SONG_GAIN_DB_MIN) ? SONG_GAIN_DB_MIN : (v > SONG_GAIN_DB_MAX) ? SONG_GAIN_DB_MAX : v);
+    }
+
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "Settings for '%s': loop=%s autoplay_next=%s fixed_speed=%s(%.2f) pitch_influence=%u%% "
-             "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us",
+             "max=%u min=%u rps_ref=%.1f holdoff=%us fadein=%us downmix=%u downmix_fade=%us gain=%+d dB",
              json_path,
              out->loop ? "yes" : "no",
              out->autoplay_next ? "yes" : "no",
@@ -204,5 +212,6 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
              out->dimmer_holdoff_s,
              out->dimmer_fadein_s,
                  (unsigned)out->downmix_mode,
-                 (unsigned)out->downmix_fade_s);
+                 (unsigned)out->downmix_fade_s,
+                 (int)out->gain_db);
 }

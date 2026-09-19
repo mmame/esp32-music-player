@@ -898,7 +898,7 @@ static esp_err_t playlists_post_handler(httpd_req_t *req)
 
 static esp_err_t crank_config_get_handler(httpd_req_t *req)
 {
-    char buf[520];
+    char buf[560];
     snprintf(buf, sizeof(buf),
              "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
              "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
@@ -906,7 +906,7 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              "\"dimmer_start_fade_ms\":%u,\"dimmer_stop_fade_ms\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
              "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
-             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u}",
+             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
              (double)g_crank_cfg.stop_thresh,
@@ -922,7 +922,8 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (double)g_crank_cfg.lo_lookahead_s,
              (unsigned)g_crank_cfg.pot_cal_lo,
              (unsigned)g_crank_cfg.pot_cal_mid,
-             (unsigned)g_crank_cfg.pot_cal_hi);
+             (unsigned)g_crank_cfg.pot_cal_hi,
+             (unsigned)g_crank_cfg.gain_db);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     return httpd_resp_sendstr(req, buf);
@@ -1013,6 +1014,7 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_u8(root, "vol_fade_step", 1, 10, &nc.vol_fade_step);
     read_u16(root, "dimmer_start_fade_ms", 0, 5000, &nc.dimmer_start_fade_ms);
     read_u16(root, "dimmer_stop_fade_ms",  0, 5000, &nc.dimmer_stop_fade_ms);
+    read_u8(root, "gain_db", 0, 10, &nc.gain_db);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
@@ -1365,13 +1367,13 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
 
     const char *end_action = s.loop ? "loop" : (s.autoplay_next ? "next" : "none");
 
-    char buf[448];
+    char buf[480];
     snprintf(buf, sizeof(buf),
              "{\"end_action\":\"%s\",\"loop\":%s,\"autoplay_next\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
              "\"pitch_influence\":%u,"
              "\"dimmer_max\":%u,\"dimmer_min\":%u,"
              "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u,\"dimmer_fadein_s\":%u,"
-             "\"light_organ\":%s,\"downmix_mode\":%u,\"downmix_fade_s\":%u}",
+             "\"light_organ\":%s,\"downmix_mode\":%u,\"downmix_fade_s\":%u,\"gain_db\":%d}",
              end_action,
              s.loop ? "true" : "false",
              s.autoplay_next ? "true" : "false",
@@ -1385,7 +1387,8 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
              (unsigned)s.dimmer_fadein_s,
              s.light_organ ? "true" : "false",
              (unsigned)s.downmix_mode,
-             (unsigned)s.downmix_fade_s);
+             (unsigned)s.downmix_fade_s,
+             (int)s.gain_db);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
@@ -1429,6 +1432,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     uint8_t d_hoff    = 0;
     uint8_t downmix_mode = 0;
     uint8_t downmix_fade_s = 1;
+    int8_t  gain_db = 0;
 
     cJSON *it;
     it = cJSON_GetObjectItemCaseSensitive(root, "end_action");
@@ -1474,6 +1478,11 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_mode = (uint8_t)(v < 0 ? 0 : v > 2 ? 2 : v); }
     it = cJSON_GetObjectItemCaseSensitive(root, "downmix_fade_s");
     if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_fade_s = (uint8_t)(v < 0 ? 0 : v > 10 ? 10 : v); }
+    it = cJSON_GetObjectItemCaseSensitive(root, "gain_db");
+    if (cJSON_IsNumber(it)) {
+        int v = (int)(it->valuedouble < 0 ? it->valuedouble - 0.5 : it->valuedouble + 0.5);
+        gain_db = (int8_t)(v < SONG_GAIN_DB_MIN ? SONG_GAIN_DB_MIN : v > SONG_GAIN_DB_MAX ? SONG_GAIN_DB_MAX : v);
+    }
     cJSON_Delete(root);
 
     char wav_path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
@@ -1482,7 +1491,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     wav_to_json_path(wav_path, json_path, sizeof(json_path));
 
     bool dimmer_default = (d_max == 100 && d_min == 0 && fabsf(d_rps - 1.4f) <= 0.05f);
-    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ && downmix_mode == 0u) {
+    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ && downmix_mode == 0u && gain_db == 0) {
         if (downmix_fade_s == 1u) {
         remove(json_path);
         ESP_LOGI(TAG, "Song settings cleared via web for %s", fname);
@@ -1509,6 +1518,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (light_organ) cJSON_AddBoolToObject(out, "light_organ", true);
     if (downmix_mode > 0u) cJSON_AddNumberToObject(out, "downmix_mode", downmix_mode);
     if (downmix_fade_s != 1u) cJSON_AddNumberToObject(out, "downmix_fade_s", downmix_fade_s);
+    if (gain_db != 0) cJSON_AddNumberToObject(out, "gain_db", gain_db);
 
     char *js = cJSON_PrintUnformatted(out);
     cJSON_Delete(out);
@@ -1532,7 +1542,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (s_song_settings_cb) {
         float fixed_speed_f = fixed_en ? fixed_spd : 0.0f;
         s_song_settings_cb(wav_path, loop, autoplay_next, fixed_speed_f, pitch,
-                         d_max, d_min, d_rps, d_hoff, d_fadein, downmix_mode, downmix_fade_s);
+                         d_max, d_min, d_rps, d_hoff, d_fadein, downmix_mode, downmix_fade_s, gain_db);
         /* light_organ live-apply is handled via the same callback path: the
          * callback rereads the just-written JSON to pick up all new fields. */
     }
