@@ -60,6 +60,8 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_PLAYLISTS           0x14  /* Host → Display: active playlist + playlist names     */
 #define CMD_SET_ACTIVE_PLAYLIST 0x15  /* Display → Host: select active playlist by name        */
 #define CMD_DOWNMIX_MODE        0x16  /* Display → Host: set stereo->mono mode (0=mix,1=ch1,2=ch2) */
+#define CMD_END_ACTION          0x17  /* Display → Host: player-mode end-of-song action (0=stop,1=next,2=repeat) */
+#define CMD_BUTTON_PRESS        0x18  /* Host → Display: flash an on-screen player button (physical press feedback) */
 #define CMD_ACK                 0xFF  /* Display → Host: ACK with optional touch            */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -222,6 +224,18 @@ void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
 void uart_master_set_set_active_playlist_callback(um_on_set_active_playlist_cb_t cb);
 
 /**
+ * @brief Called when the display sets the player-mode end-of-song action (CMD_END_ACTION).
+ *
+ * @param action  0 = stop, 1 = play next, 2 = repeat.
+ */
+typedef void (*um_on_end_action_cb_t)(uint8_t action);
+
+/**
+ * @brief Register the callback for CMD_END_ACTION.
+ */
+void uart_master_set_end_action_callback(um_on_end_action_cb_t cb);
+
+/**
  * @brief Register the callback for CMD_DOWNMIX_MODE.
  */
 void uart_master_set_downmix_mode_callback(um_on_downmix_mode_cb_t cb);
@@ -318,6 +332,14 @@ void uart_master_send_encoder_move(int8_t delta);
 
 /** @brief Send CMD_ENCODER_BTN so the display knows the encoder was pressed. */
 void uart_master_send_encoder_btn(void);
+
+/**
+ * @brief Send CMD_BUTTON_PRESS so the display shows the pressed state of an on-screen
+ *        player-screen button (feedback for a physical button press).
+ *
+ * @param target  0 = Play/Pause, 1 = Next, 2 = Prev, 3 = Stop, 4 = end-of-song toggle.
+ */
+void uart_master_send_button_press(uint8_t target);
 
 /**
  * @brief Send CMD_SYNC and wait up to @p timeout_ms for CMD_ACK.

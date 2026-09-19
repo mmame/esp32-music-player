@@ -63,6 +63,19 @@ int16_t encoder_read_steps(void);
  */
 int8_t encoder_btn_read(void);
 
+/**
+ * @brief Average raw ADC value of the samples behind the latest press seen by
+ *        encoder_btn_read() (call right after it returned a button index).
+ *        -1 if nothing has been sampled yet.
+ */
+int encoder_btn_avg_raw(void);
+
+/**
+ * @brief One raw 12-bit ADC sample of the button ladder (idle is above the top rung
+ *        threshold).  -1 if the ADC is not initialised.
+ */
+int encoder_btn_read_raw(void);
+
 #ifdef __cplusplus
 }
 #endif

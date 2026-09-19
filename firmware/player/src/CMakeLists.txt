@@ -39,6 +39,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "bt_ctrl.cpp"
+        "buttons.cpp"
         "crank_config.cpp"
         "dimmerlink.cpp"
         "disp_ota.cpp"

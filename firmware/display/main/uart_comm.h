@@ -78,6 +78,8 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_PLAYLISTS           0x14  /* Host -> Display: active playlist + playlist names   */
 #define CMD_SET_ACTIVE_PLAYLIST 0x15  /* Display -> Host: set active playlist by name        */
 #define CMD_DOWNMIX_MODE        0x16  /* Display -> Host: set stereo->mono mode (0=mix,1=ch1,2=ch2) */
+#define CMD_SET_END_ACTION      0x17  /* Display -> Host: player-mode end-of-song action (0=stop,1=next,2=repeat) */
+#define CMD_BUTTON_PRESS        0x18  /* Host -> Display: flash an on-screen player button (physical press feedback) */
 #define CMD_ACK                 0xFF  /* Display -> Host: sync acknowledgement              */
 
 /* ---------- Global system state ---------- */
@@ -184,6 +186,13 @@ void uart_comm_send_set_active_playlist(const char *playlist_name);
  * @param mode  0 = L+R mix (default), 1 = CH1 only, 2 = CH2 only.
  */
 void uart_comm_send_downmix_mode(uint8_t mode);
+
+/**
+ * @brief Enqueue CMD_SET_END_ACTION (player mode: what happens when a song ends).
+ *
+ * @param action  0 = stop, 1 = play next, 2 = repeat.
+ */
+void uart_comm_send_end_action(uint8_t action);
 
 /**
  * @brief Enqueue CMD_PLAY_SONG to be sent on the next poll response.

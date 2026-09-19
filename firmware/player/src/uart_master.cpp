@@ -39,6 +39,7 @@ static um_on_song_settings_req_cb_t  s_on_song_settings_req  = nullptr;
 static um_on_set_song_settings_cb_t  s_on_set_song_settings  = nullptr;
 static um_on_set_active_playlist_cb_t s_on_set_active_playlist = nullptr;
 static um_on_downmix_mode_cb_t       s_on_downmix_mode       = nullptr;
+static um_on_end_action_cb_t         s_on_end_action         = nullptr;
 
 /** Semaphore posted by the rx task when CMD_ACK arrives (for uart_master_sync). */
 static SemaphoreHandle_t s_ack_sem  = nullptr;
@@ -195,6 +196,11 @@ void uart_master_set_set_song_settings_callback(um_on_set_song_settings_cb_t cb)
 void uart_master_set_set_active_playlist_callback(um_on_set_active_playlist_cb_t cb)
 {
     s_on_set_active_playlist = cb;
+}
+
+void uart_master_set_end_action_callback(um_on_end_action_cb_t cb)
+{
+    s_on_end_action = cb;
 }
 
 void uart_master_set_downmix_mode_callback(um_on_downmix_mode_cb_t cb)
@@ -370,6 +376,13 @@ void uart_master_send_encoder_btn(void)
 {
     ESP_LOGD(TAG, "TX CMD_ENCODER_BTN");
     send_packet(CMD_ENCODER_BTN, nullptr, 0);
+}
+
+/* ── CMD_BUTTON_PRESS ──────────────────────────────────────────────────────── */
+
+void uart_master_send_button_press(uint8_t target)
+{
+    send_packet(CMD_BUTTON_PRESS, &target, 1);
 }
 
 /* ── CMD_SYNC ──────────────────────────────────────────────────────────────── */
@@ -645,6 +658,19 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             if (mode > 2u) mode = 0u;
             ESP_LOGI(TAG, "CMD_DOWNMIX_MODE: mode=%u", (unsigned)mode);
             if (s_on_downmix_mode) s_on_downmix_mode(mode);
+        }
+        break;
+
+    case CMD_END_ACTION:
+        if (len < 1) {
+            ESP_LOGW(TAG, "CMD_END_ACTION: missing payload");
+            break;
+        }
+        {
+            uint8_t action = payload[0];
+            if (action > 2u) action = 0u;
+            ESP_LOGI(TAG, "CMD_END_ACTION: action=%u", (unsigned)action);
+            if (s_on_end_action) s_on_end_action(action);
         }
         break;
 

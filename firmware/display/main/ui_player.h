@@ -106,6 +106,27 @@ void ui_player_song_settings_async(uint16_t song_id,
                                    uint8_t  downmix_mode);
 
 /**
+ * @brief Show the pressed state of a player-mode button for a moment, exactly like a touch
+ *        press (feedback for a physical button press).  Ignored outside player mode.
+ *        Safe to call from any task / core.
+ *
+ * @param target  0 = Play/Pause, 1 = Next, 2 = Prev, 3 = Stop, 4 = end-of-song toggle.
+ */
+void ui_player_press_button_async(uint8_t target);
+
+/**
+ * @brief Update operating mode, pause state and end-of-song action (from the player's state flags).
+ *        Player mode swaps the crank controls for Prev / Play-Pause / Next / Stop, an
+ *        end-of-song button, and hides the TMP bar and per-song settings gear.
+ *        Called every state tick; cheap when nothing changed.  Safe from any task / core.
+ *
+ * @param player_mode  true = player mode, false = crank mode (default).
+ * @param paused       true while the current song is paused.
+ * @param end_action   0 = stop, 1 = play next, 2 = repeat.
+ */
+void ui_player_update_mode_async(bool player_mode, bool paused, uint8_t end_action);
+
+/**
  * @brief Update the speed-lock ("HOLD") indicator.
  *        Called every ~100 ms with the current hardware switch state.
  *        Safe to call from any task / core.

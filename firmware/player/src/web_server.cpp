@@ -44,6 +44,7 @@
 
 #include "disp_ota.h"
 #include "crank_config.h"
+#include "buttons.h"
 #include "potis.h"
 #include "song_settings.h"
 #include "cJSON.h"
@@ -898,7 +899,7 @@ static esp_err_t playlists_post_handler(httpd_req_t *req)
 
 static esp_err_t crank_config_get_handler(httpd_req_t *req)
 {
-    char buf[560];
+    char buf[640];
     snprintf(buf, sizeof(buf),
              "{\"ema_attack\":%.3f,\"ema_release\":%.3f,"
              "\"stop_thresh\":%.3f,\"start_thresh\":%.3f,"
@@ -906,7 +907,7 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              "\"dimmer_start_fade_ms\":%u,\"dimmer_stop_fade_ms\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
              "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
-             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u}",
+             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
              (double)g_crank_cfg.stop_thresh,
@@ -923,7 +924,9 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (unsigned)g_crank_cfg.pot_cal_lo,
              (unsigned)g_crank_cfg.pot_cal_mid,
              (unsigned)g_crank_cfg.pot_cal_hi,
-             (unsigned)g_crank_cfg.gain_db);
+             (unsigned)g_crank_cfg.gain_db,
+             (unsigned)g_crank_cfg.ui_mode,
+             (unsigned)g_crank_cfg.player_end_action);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     return httpd_resp_sendstr(req, buf);
@@ -1015,6 +1018,8 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_u16(root, "dimmer_start_fade_ms", 0, 5000, &nc.dimmer_start_fade_ms);
     read_u16(root, "dimmer_stop_fade_ms",  0, 5000, &nc.dimmer_stop_fade_ms);
     read_u8(root, "gain_db", 0, 10, &nc.gain_db);
+    read_u8(root, "ui_mode", 0, 1, &nc.ui_mode);
+    read_u8(root, "player_end_action", 0, 2, &nc.player_end_action);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
@@ -1551,13 +1556,135 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Physical buttons (ADC ladder) ────────────────────────────────────
+ *   GET  /api/buttons          → functions + assigned ADC value, learn status, last physical press
+ *   POST /api/buttons/learn    body {"fn":"<id>"} → wait for the next press and store it for fn
+ *   POST /api/buttons/cancel   → stop waiting for a press
+ *   POST /api/buttons/clear    body {"fn":"<id>"} or {"all":true}
+ * ------------------------------------------------------------------------ */
+
+static cJSON *read_small_json_body(httpd_req_t *req)
+{
+    if (req->content_len == 0 || req->content_len > 256) return nullptr;
+    char body[257] = {};
+    int r = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (r <= 0) return nullptr;
+    return cJSON_Parse(body);
+}
+
+static esp_err_t buttons_get_handler(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    cJSON *arr = cJSON_AddArrayToObject(root, "functions");
+    for (int i = 0; i < BTN_FN_COUNT; i++) {
+        const button_fn_info_t *fi = buttons_fn_info(i);
+        cJSON *o = cJSON_CreateObject();
+        if (!fi || !o) continue;
+        cJSON_AddStringToObject(o, "id", fi->id);
+        cJSON_AddStringToObject(o, "label", fi->label);
+        cJSON_AddStringToObject(o, "ctx", fi->ctx == BTN_CTX_PLAYER ? "player" : "list");
+        int adc = buttons_get_adc(i);
+        if (adc >= 0) cJSON_AddNumberToObject(o, "adc", adc);
+        else          cJSON_AddNullToObject(o, "adc");
+        cJSON_AddItemToArray(arr, o);
+    }
+
+    button_learn_status_t ls;
+    buttons_learn_get(&ls);
+    static const char *k_state[] = { "idle", "waiting", "done", "error" };
+    cJSON *learn = cJSON_AddObjectToObject(root, "learn");
+    cJSON_AddStringToObject(learn, "state", k_state[(int)ls.state <= 3 ? (int)ls.state : 0]);
+    const button_fn_info_t *lf = buttons_fn_info(ls.fn);
+    if (lf) cJSON_AddStringToObject(learn, "fn", lf->id);
+    else    cJSON_AddNullToObject(learn, "fn");
+    cJSON_AddNumberToObject(learn, "adc", ls.adc);
+    cJSON_AddStringToObject(learn, "error", ls.error);
+
+    uint32_t seq = 0, age_ms = 0;
+    int pfn = -1, padc = -1;
+    buttons_last_press_get(&seq, &pfn, &padc, &age_ms);
+    cJSON *lp = cJSON_AddObjectToObject(root, "last_press");
+    cJSON_AddNumberToObject(lp, "seq", (double)seq);
+    const button_fn_info_t *pf = buttons_fn_info(pfn);
+    if (pf) cJSON_AddStringToObject(lp, "fn", pf->id);
+    else    cJSON_AddNullToObject(lp, "fn");
+    cJSON_AddNumberToObject(lp, "adc", padc);
+    cJSON_AddNumberToObject(lp, "age_ms", (double)age_ms);
+
+    cJSON_AddBoolToObject(root, "player_mode", g_crank_cfg.ui_mode == 1u);
+
+    char *js = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!js) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    esp_err_t r = httpd_resp_sendstr(req, js);
+    cJSON_free(js);
+    return r;
+}
+
+static esp_err_t buttons_learn_post_handler(httpd_req_t *req)
+{
+    cJSON *root = read_small_json_body(req);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "fn");
+    int fn = (cJSON_IsString(it) && it->valuestring) ? buttons_fn_by_id(it->valuestring) : -1;
+    cJSON_Delete(root);
+    if (fn < 0 || buttons_learn_start(fn) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown function");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, "OK");
+}
+
+static esp_err_t buttons_cancel_post_handler(httpd_req_t *req)
+{
+    buttons_learn_cancel();
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, "OK");
+}
+
+static esp_err_t buttons_clear_post_handler(httpd_req_t *req)
+{
+    cJSON *root = read_small_json_body(req);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    const cJSON *all = cJSON_GetObjectItemCaseSensitive(root, "all");
+    const cJSON *it  = cJSON_GetObjectItemCaseSensitive(root, "fn");
+    int fn = -2;
+    if (cJSON_IsTrue(all))                                fn = -1;
+    else if (cJSON_IsString(it) && it->valuestring)       fn = buttons_fn_by_id(it->valuestring);
+    cJSON_Delete(root);
+    if (fn == -2 || (fn < 0 && fn != -1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown function");
+        return ESP_FAIL;
+    }
+    buttons_clear(fn);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, "OK");
+}
+
 /* ── HTTP server ────────────────────────────────────────────────────── */
 
 static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 16384; /* OTA end/SHA256 verification needs more than default 4K */
-    cfg.max_uri_handlers  = 17;
+    cfg.max_uri_handlers  = 24;
     cfg.recv_wait_timeout = 60;    /* seconds – generous for large OTA uploads */
     cfg.send_wait_timeout = 60;
     cfg.lru_purge_enable  = true;
@@ -1586,6 +1713,10 @@ static httpd_handle_t start_webserver(void)
         { "/player_update",      HTTP_POST,   player_update_post_handler,    nullptr },
         { "/api/song_settings",  HTTP_GET,    song_settings_get_handler,     nullptr },
         { "/api/song_settings",  HTTP_POST,   song_settings_post_handler,    nullptr },
+        { "/api/buttons",        HTTP_GET,    buttons_get_handler,           nullptr },
+        { "/api/buttons/learn",  HTTP_POST,   buttons_learn_post_handler,    nullptr },
+        { "/api/buttons/cancel", HTTP_POST,   buttons_cancel_post_handler,   nullptr },
+        { "/api/buttons/clear",  HTTP_POST,   buttons_clear_post_handler,    nullptr },
     };
     for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); i++) {
         httpd_register_uri_handler(server, &handlers[i]);

@@ -46,7 +46,7 @@ static const char *TAG = "ui_player";
 #define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass (1.0x) label row          */
 #define HOLD_LBL_Y       (VAL_LABEL_Y + 24) /* "HOLD" label row (under TMP bar)  */
 #define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
-#define STATUS_LBL_Y     (TIME_LABEL_Y + 22)  /* loop / 1.0x indicator row (left panel) */
+#define STATUS_LBL_Y     (TIME_LABEL_Y + 36)  /* loop / 1.0x indicator row (left panel) */
 #define NEXT_SONG_LBL_Y  (STATUS_LBL_Y + 24)  /* next-song name label              */
 #define GEAR_BTN_W       80
 #define GEAR_BTN_H       80
@@ -55,6 +55,21 @@ static const char *TAG = "ui_player";
 #define STOP_BTN_X       (((SPLIT_X - STOP_W - BTN_GAP - NEXT_BTN_W - BTN_GAP - GEAR_BTN_W) / 2) + BTN_ROW_SHIFT_X)
 #define NEXT_BTN_X       (STOP_BTN_X + STOP_W + BTN_GAP)
 #define GEAR_BTN_X       (NEXT_BTN_X + NEXT_BTN_W + BTN_GAP)
+
+/* Player mode: [PREV][PLAY/PAUSE][NEXT][STOP] row + end-of-song toggle */
+#define PM_SIDE_W        80
+#define PM_PP_W          120
+#define PM_GAP           16
+#define PM_PREV_X        160
+#define PM_PP_X          (PM_PREV_X + PM_SIDE_W + PM_GAP)
+#define PM_NEXT_X        (PM_PP_X + PM_PP_W + PM_GAP)
+#define PM_STOP_X        (PM_NEXT_X + PM_SIDE_W + PM_GAP)
+#define PM_END_X         430
+#define PM_END_CAP_Y     278
+#define PM_END_BTN_Y     298
+#define PM_END_BTN_W     140
+#define PM_END_BTN_H     56
+#define PM_TAP_HOLD_MS   1500   /* ignore player state for this long after a local tap */
 
 /* Left-side downmix selector (3 stacked buttons) */
 #define DOWNMIX_COL_X    34
@@ -81,6 +96,8 @@ static const char *TAG = "ui_player";
 #define COLOR_BAR_TRACK  0x0A2744   /* dark bar background                  */
 #define COLOR_DIVIDER    0x2A2A5E
 #define COLOR_LOCKED     0xF39C12   /* amber – tempo locked                 */
+#define COLOR_PRESSED_BG 0xFF9800   /* loud fill while a button is pressed  */
+#define PRESS_FLASH_MS   300        /* physical-press feedback duration     */
 
 /* =========================================================================
  * Widget handles
@@ -126,6 +143,27 @@ static uint8_t   s_downmix_mode       = 0u;   /* 0=MIX, 1=CH1, 2=CH2 */
 
 /* Indeterminate progress animation */
 static bool      s_prog_anim_active = false;
+
+/* Operating mode (from the player's state flags): crank mode is the default. */
+static bool      s_player_mode    = false;
+static bool      s_paused         = false;  /* player mode: song loaded but paused */
+static uint8_t   s_end_action     = 0u;     /* player mode: 0=stop, 1=next, 2=repeat */
+static bool      s_pp_tap_active  = false;  /* local tap pending player confirmation */
+static uint32_t  s_pp_tap_tick    = 0u;
+static bool      s_end_tap_active = false;
+static uint32_t  s_end_tap_tick   = 0u;
+
+static lv_obj_t *s_np_lbl         = NULL;   /* "NOW PLAYING" / "PAUSED" */
+static lv_obj_t *s_crank_stop_btn = NULL;
+static lv_obj_t *s_col_name_lbl[2] = {NULL, NULL};
+static lv_obj_t *s_pm_prev        = NULL;
+static lv_obj_t *s_pm_pp          = NULL;
+static lv_obj_t *s_pm_pp_icon     = NULL;
+static lv_obj_t *s_pm_next        = NULL;
+static lv_obj_t *s_pm_stop        = NULL;
+static lv_obj_t *s_pm_end_cap     = NULL;
+static lv_obj_t *s_pm_end_btn     = NULL;
+static lv_obj_t *s_pm_end_lbl     = NULL;
 
 /* =========================================================================
  * Internal helpers
@@ -173,6 +211,7 @@ static void create_indicator_col(lv_obj_t *parent,
     lv_obj_set_width(name_lbl, COL_W);
     lv_obj_set_style_text_align(name_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(name_lbl, col_x, COLLABEL_Y);
+    s_col_name_lbl[col_idx] = name_lbl;
 
     /* Vertical bar (height > width → LVGL renders it vertically) */
     lv_obj_t *bar = lv_bar_create(parent);
@@ -293,6 +332,130 @@ static void on_downmix_clicked(lv_event_t *e)
 }
 
 /* =========================================================================
+ * Player mode – helpers and callbacks (run in the LVGL task)
+ * ========================================================================= */
+
+static void set_hidden(lv_obj_t *o, bool hide)
+{
+    if (!o) return;
+    if (hide) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+/** Loud pressed state (touch or physical press): solid orange fill + thick white border. */
+static void style_pressed(lv_obj_t *btn)
+{
+    lv_obj_set_style_bg_color(btn, lv_color_hex(COLOR_PRESSED_BG), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_white(), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn, 4, LV_STATE_PRESSED);
+}
+
+static void refresh_pm_widgets(void)
+{
+    static const char *k_end_txt[3] = {
+        LV_SYMBOL_STOP "  Stop",
+        LV_SYMBOL_NEXT "  Next",
+        LV_SYMBOL_LOOP "  Repeat",
+    };
+    if (s_pm_pp_icon) lv_label_set_text(s_pm_pp_icon, s_paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+    if (s_np_lbl) {
+        lv_label_set_text(s_np_lbl, (s_player_mode && s_paused) ? LV_SYMBOL_PAUSE "  PAUSED"
+                                                                  : LV_SYMBOL_PLAY "  NOW PLAYING");
+    }
+    if (s_pm_end_lbl) lv_label_set_text(s_pm_end_lbl, k_end_txt[s_end_action <= 2u ? s_end_action : 0u]);
+}
+
+/** Show the widget set of the current operating mode. */
+static void apply_mode_visibility(void)
+{
+    const bool pm = s_player_mode;
+
+    /* Crank-mode controls: STOP / NEXT / per-song settings gear */
+    set_hidden(s_crank_stop_btn, pm);
+    set_hidden(s_next_btn,       pm);
+    set_hidden(s_gear_btn,       pm);
+
+    /* The TMP (speed) column is meaningless without the crank */
+    set_hidden(s_col_name_lbl[1], pm);
+    set_hidden(s_bar[1],          pm);
+    set_hidden(s_val_lbl[1],      pm);
+    set_hidden(s_hold_lbl,        pm);
+    if (pm) {
+        /* Indicators driven by song settings / lock state: keep hidden in player mode. */
+        set_hidden(s_tmp_live_bar, true);
+        set_hidden(s_bypass_lbl,   true);
+        set_hidden(s_loop_lbl,     true);
+    }
+
+    /* Player-mode controls */
+    set_hidden(s_pm_prev,    !pm);
+    set_hidden(s_pm_pp,      !pm);
+    set_hidden(s_pm_next,    !pm);
+    set_hidden(s_pm_stop,    !pm);
+    set_hidden(s_pm_end_cap, !pm);
+    set_hidden(s_pm_end_btn, !pm);
+
+    refresh_pm_widgets();
+}
+
+static void on_pm_playpause_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_paused) uart_comm_send_resume();
+    else          uart_comm_send_pause();
+    /* Optimistic update; the player's state is trusted again after PM_TAP_HOLD_MS. */
+    s_paused        = !s_paused;
+    s_pp_tap_active = true;
+    s_pp_tap_tick   = lv_tick_get();
+    refresh_pm_widgets();
+}
+
+static void on_pm_prev_clicked(lv_event_t *e)
+{
+    (void)e;
+    uint16_t prev_id = ui_songlist_get_prev_song_id(s_current_song_id);
+    if (prev_id != 0) {
+        uart_comm_send_play_song(prev_id);
+    }
+}
+
+static void on_pm_end_clicked(lv_event_t *e)
+{
+    (void)e;
+    s_end_action     = (uint8_t)((s_end_action + 1u) % 3u);
+    s_end_tap_active = true;
+    s_end_tap_tick   = lv_tick_get();
+    uart_comm_send_end_action(s_end_action);
+    refresh_pm_widgets();
+}
+
+/** Create one icon button of the player-mode control row. */
+static lv_obj_t *make_pm_button(lv_obj_t *parent, lv_coord_t x, lv_coord_t w,
+                                uint32_t bg, uint32_t bg_pressed, const char *symbol,
+                                lv_event_cb_t cb, lv_obj_t **icon_out)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, w, STOP_H);
+    lv_obj_set_pos(btn, x, STOP_Y);
+    (void)bg_pressed; /* superseded by the shared loud pressed style */
+    lv_obj_set_style_bg_color(btn, lv_color_hex(bg), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    style_pressed(btn);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *icon = lv_label_create(btn);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+    lv_obj_center(icon);
+    if (icon_out) *icon_out = icon;
+    return btn;
+}
+
+/* =========================================================================
  * Lifecycle
  * ========================================================================= */
 void ui_player_create(void)
@@ -328,6 +491,7 @@ void ui_player_create(void)
     lv_obj_set_style_text_font(np_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(np_lbl, lv_color_hex(COLOR_ACCENT), 0);
     lv_obj_set_pos(np_lbl, PROGRESS_PAD_X, NOWPLAY_Y);
+    s_np_lbl = np_lbl;
 
     /* Horizontal divider line -------------------------------------------- */
     static lv_point_precise_t div_pts[2] = {
@@ -365,7 +529,7 @@ void ui_player_create(void)
     /* Time label: "elapsed / total" right-aligned below the progress bar -- */
     s_time_lbl = lv_label_create(left);
     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
-    lv_obj_set_style_text_font(s_time_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_time_lbl, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(s_time_lbl, lv_color_hex(COLOR_ACCENT), 0);
     lv_obj_set_width(s_time_lbl, SPLIT_X - 2 * PROGRESS_PAD_X);
     lv_obj_set_style_text_align(s_time_lbl, LV_TEXT_ALIGN_RIGHT, 0);
@@ -400,6 +564,8 @@ void ui_player_create(void)
     lv_obj_set_style_border_width(stop_btn, 0, 0);
     lv_obj_set_style_shadow_width(stop_btn, 0, 0);
     lv_obj_add_event_cb(stop_btn, on_stop_clicked, LV_EVENT_CLICKED, NULL);
+    s_crank_stop_btn = stop_btn;
+    style_pressed(stop_btn);
 
     lv_obj_t *stop_lbl = lv_label_create(stop_btn);
     lv_label_set_text(stop_lbl, LV_SYMBOL_STOP);
@@ -418,6 +584,7 @@ void ui_player_create(void)
     lv_obj_set_style_border_width(s_next_btn, 0, 0);
     lv_obj_set_style_shadow_width(s_next_btn, 0, 0);
     lv_obj_add_event_cb(s_next_btn, on_next_clicked, LV_EVENT_CLICKED, NULL);
+    style_pressed(s_next_btn);
     lv_obj_t *next_icon = lv_label_create(s_next_btn);
     lv_label_set_text(next_icon, LV_SYMBOL_NEXT);
     lv_obj_set_style_text_font(next_icon, &lv_font_montserrat_28, 0);
@@ -435,11 +602,47 @@ void ui_player_create(void)
     lv_obj_set_style_border_width(s_gear_btn, 0, 0);
     lv_obj_set_style_shadow_width(s_gear_btn, 0, 0);
     lv_obj_add_event_cb(s_gear_btn, on_gear_clicked_player, LV_EVENT_CLICKED, NULL);
+    style_pressed(s_gear_btn);
     lv_obj_t *gear_icon = lv_label_create(s_gear_btn);
     lv_label_set_text(gear_icon, LV_SYMBOL_SETTINGS);
     lv_obj_set_style_text_font(gear_icon, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(gear_icon, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_center(gear_icon);
+
+    /* Player-mode controls: [PREV][PLAY/PAUSE][NEXT][STOP] (hidden in crank mode). */
+    s_pm_prev = make_pm_button(left, PM_PREV_X, PM_SIDE_W, 0x1A5276, 0x1A3A4A,
+                               LV_SYMBOL_PREV, on_pm_prev_clicked, NULL);
+    s_pm_pp   = make_pm_button(left, PM_PP_X, PM_PP_W, 0x0F7B95, 0x0B5C70,
+                               LV_SYMBOL_PAUSE, on_pm_playpause_clicked, &s_pm_pp_icon);
+    s_pm_next = make_pm_button(left, PM_NEXT_X, PM_SIDE_W, 0x1A5276, 0x1A3A4A,
+                               LV_SYMBOL_NEXT, on_next_clicked, NULL);
+    s_pm_stop = make_pm_button(left, PM_STOP_X, PM_SIDE_W, COLOR_STOP_BG, 0xC73652,
+                               LV_SYMBOL_STOP, on_stop_clicked, NULL);
+
+    /* End-of-song behaviour toggle (Stop -> Next -> Repeat). */
+    s_pm_end_cap = lv_label_create(left);
+    lv_label_set_text(s_pm_end_cap, "AT END OF SONG");
+    lv_obj_set_style_text_font(s_pm_end_cap, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_pm_end_cap, lv_color_hex(0xA0A0C0), 0);
+    lv_obj_set_pos(s_pm_end_cap, PM_END_X, PM_END_CAP_Y);
+
+    s_pm_end_btn = lv_button_create(left);
+    lv_obj_set_size(s_pm_end_btn, PM_END_BTN_W, PM_END_BTN_H);
+    lv_obj_set_pos(s_pm_end_btn, PM_END_X, PM_END_BTN_Y);
+    lv_obj_set_style_bg_color(s_pm_end_btn, lv_color_hex(0x2A2A3E), 0);
+    lv_obj_set_style_bg_opa(s_pm_end_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_pm_end_btn, lv_color_hex(0x1A1A2E), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(s_pm_end_btn, lv_color_hex(0x7CC6FF), 0);
+    lv_obj_set_style_border_width(s_pm_end_btn, 1, 0);
+    lv_obj_set_style_radius(s_pm_end_btn, 10, 0);
+    lv_obj_set_style_shadow_width(s_pm_end_btn, 0, 0);
+    lv_obj_add_event_cb(s_pm_end_btn, on_pm_end_clicked, LV_EVENT_CLICKED, NULL);
+    style_pressed(s_pm_end_btn);
+    s_pm_end_lbl = lv_label_create(s_pm_end_btn);
+    lv_label_set_text(s_pm_end_lbl, "");
+    lv_obj_set_style_text_font(s_pm_end_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_pm_end_lbl, lv_color_hex(COLOR_TEXT), 0);
+    lv_obj_center(s_pm_end_lbl);
 
     /* Left-side downmix mode selector (MIX / CH1 / CH2). */
     static const char *k_dmx_labels[3] = {"MIX", "CH1", "CH2"};
@@ -528,6 +731,8 @@ void ui_player_create(void)
     lv_obj_set_width(s_hold_lbl, COL_W);
     lv_obj_set_style_text_align(s_hold_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(s_hold_lbl, COL_W, HOLD_LBL_Y);
+
+    apply_mode_visibility(); /* crank mode until the player reports otherwise */
 
     ESP_LOGI(TAG, "Player view created");
 }
@@ -671,7 +876,7 @@ static void async_cb_update_potis(void *user_data)
         /* In HOLD/fixed mode, keep showing the live incoming tempo on a slim
          * secondary bar so both effective and live values are visible. */
         if (s_tmp_live_bar) {
-            bool show_live = s_tempo_locked || s_bypass_active;
+            bool show_live = (s_tempo_locked || s_bypass_active) && !s_player_mode;
             if (show_live) {
                 lv_obj_clear_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
                 lv_bar_set_value(s_tmp_live_bar, p->live_tempo, LV_ANIM_ON);
@@ -809,14 +1014,14 @@ static void async_cb_song_settings_player(void *user_data)
 
     /* Update 1.0x indicator */
     if (s_bypass_lbl) {
-        if (speed_en) lv_obj_clear_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
-        else          lv_obj_add_flag(s_bypass_lbl,   LV_OBJ_FLAG_HIDDEN);
+        if (speed_en && !s_player_mode) lv_obj_clear_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);
+        else                            lv_obj_add_flag(s_bypass_lbl,   LV_OBJ_FLAG_HIDDEN);
     }
 
     /* Update LOOP indicator */
     if (s_loop_lbl) {
-        if (loop_en) lv_obj_clear_flag(s_loop_lbl, LV_OBJ_FLAG_HIDDEN);
-        else         lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
+        if (loop_en && !s_player_mode) lv_obj_clear_flag(s_loop_lbl, LV_OBJ_FLAG_HIDDEN);
+        else                           lv_obj_add_flag(s_loop_lbl,   LV_OBJ_FLAG_HIDDEN);
     }
 
     /* Re-tint TMP bar if bypass state changed */
@@ -871,6 +1076,94 @@ void ui_player_song_settings_async(uint16_t song_id,
 }
 
 /* =========================================================================
+ * Physical-button feedback: show the pressed state on the on-screen button
+ * ========================================================================= */
+
+static void press_release_cb(lv_timer_t *t)
+{
+    lv_obj_t *btn = (lv_obj_t *)lv_timer_get_user_data(t);
+    if (btn) lv_obj_clear_state(btn, LV_STATE_PRESSED);
+}
+
+static void async_cb_press_button(void *user_data)
+{
+    const uint8_t target = (uint8_t)(uintptr_t)user_data;
+    lv_obj_t *const btns[5] = { s_pm_pp, s_pm_next, s_pm_prev, s_pm_stop, s_pm_end_btn };
+
+    if (!s_player_mode || target >= 5u) return;
+    lv_obj_t *btn = btns[target];
+    if (!btn || lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN)) return;
+
+    lv_obj_add_state(btn, LV_STATE_PRESSED);
+    lv_timer_t *t = lv_timer_create(press_release_cb, PRESS_FLASH_MS, btn);
+    lv_timer_set_repeat_count(t, 1);
+}
+
+void ui_player_press_button_async(uint8_t target)
+{
+    if (!s_screen) return;
+    lv_lock();
+    lv_async_call(async_cb_press_button, (void *)(uintptr_t)target);
+    lv_unlock();
+}
+
+/* =========================================================================
+ * Operating mode / pause state / end-of-song action
+ * ========================================================================= */
+
+typedef struct {
+    bool    player_mode;
+    bool    paused;
+    uint8_t end_action;
+} async_mode_payload_t;
+
+static void async_cb_update_mode(void *user_data)
+{
+    async_mode_payload_t *p = (async_mode_payload_t *)user_data;
+
+    bool changed = false;
+
+    if (p->player_mode != s_player_mode) {
+        s_player_mode = p->player_mode;
+        apply_mode_visibility();
+        /* Back in crank mode: request the song settings again so the LOOP / FIX indicators return. */
+        if (!s_player_mode && s_current_song_id != 0) {
+            uart_comm_send_song_settings_req(s_current_song_id);
+        }
+        changed = true;
+    }
+
+    /* Trust the player again once the local tap has had time to take effect. */
+    if (s_pp_tap_active && lv_tick_elaps(s_pp_tap_tick) >= PM_TAP_HOLD_MS) s_pp_tap_active = false;
+    if (!s_pp_tap_active && p->paused != s_paused) {
+        s_paused = p->paused;
+        changed  = true;
+    }
+    if (s_end_tap_active && lv_tick_elaps(s_end_tap_tick) >= PM_TAP_HOLD_MS) s_end_tap_active = false;
+    if (!s_end_tap_active && p->end_action != s_end_action) {
+        s_end_action = p->end_action;
+        changed      = true;
+    }
+
+    if (changed) refresh_pm_widgets();
+    free(p);
+}
+
+void ui_player_update_mode_async(bool player_mode, bool paused, uint8_t end_action)
+{
+    if (!s_screen) return;
+
+    async_mode_payload_t *p = malloc(sizeof(async_mode_payload_t));
+    if (!p) { ESP_LOGE(TAG, "OOM in update_mode_async"); return; }
+    p->player_mode = player_mode;
+    p->paused      = paused;
+    p->end_action  = (end_action <= 2u) ? end_action : 0u;
+    lv_lock();
+    lv_async_call(async_cb_update_mode, p);
+    lv_unlock();
+}
+
+/* =========================================================================
  * Speed-lock ("HOLD") indicator
  * ========================================================================= */
 
@@ -893,8 +1186,8 @@ static void async_cb_update_speed_locked(void *user_data)
     }
 
     if (s_tmp_live_bar) {
-        if (locked || s_bypass_active) lv_obj_clear_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
-        else                           lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+        if ((locked || s_bypass_active) && !s_player_mode) lv_obj_clear_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+        else                                               lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
     }
 }
 

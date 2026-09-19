@@ -50,6 +50,8 @@ static int8_t  s_btn_last_id    = -1;  /* raw decoded button from last sample */
 static uint8_t s_btn_stable_cnt =  0;  /* # of consecutive identical readings */
 static int8_t  s_btn_confirmed  = -1;  /* fully-debounced current button       */
 static int8_t  s_btn_reported   = -1;  /* last button for which event was fired */
+static int     s_btn_avg_sum    =  0;  /* raw ADC sum / count over the current stable id */
+static int     s_btn_avg_cnt    =  0;
 
 static const uint16_t s_btn_thresholds[BTN_COUNT] = BTN_THRESHOLDS;
 
@@ -177,6 +179,19 @@ int16_t encoder_read_steps(void)
     return steps;
 }
 
+int encoder_btn_avg_raw(void)
+{
+    return (s_btn_avg_cnt > 0) ? (s_btn_avg_sum / s_btn_avg_cnt) : -1;
+}
+
+int encoder_btn_read_raw(void)
+{
+    if (!s_btn_adc) return -1;
+    int raw = 0;
+    if (adc_oneshot_read(s_btn_adc, s_btn_ch, &raw) != ESP_OK) return -1;
+    return raw;
+}
+
 int8_t encoder_btn_read(void)
 {
     if (!s_btn_adc) return -1;
@@ -188,9 +203,12 @@ int8_t encoder_btn_read(void)
     /* Debounce: require BTN_DEBOUNCE_SAMPLES consecutive identical readings */
     if (id == s_btn_last_id) {
         if (s_btn_stable_cnt < BTN_DEBOUNCE_SAMPLES) s_btn_stable_cnt++;
+        if (s_btn_avg_cnt < 32) { s_btn_avg_sum += raw; s_btn_avg_cnt++; }
     } else {
         s_btn_last_id    = id;
         s_btn_stable_cnt = 1;
+        s_btn_avg_sum    = raw;
+        s_btn_avg_cnt    = 1;
     }
 
     if (s_btn_stable_cnt >= BTN_DEBOUNCE_SAMPLES) {

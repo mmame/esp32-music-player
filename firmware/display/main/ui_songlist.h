@@ -169,6 +169,13 @@ bool ui_songlist_get_song_name(uint16_t song_id, char *buf, size_t buf_len);
  */
 uint16_t ui_songlist_get_next_song_id(uint16_t current_id);
 
+/**
+ * @brief Return the id of the song before @p current_id in the list (wraps around).
+ *
+ * @return previous song_id (> 0), or 0 if the song list is empty.
+ */
+uint16_t ui_songlist_get_prev_song_id(uint16_t current_id);
+
 #ifdef __cplusplus
 }
 #endif

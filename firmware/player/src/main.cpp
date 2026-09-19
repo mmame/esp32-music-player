@@ -50,6 +50,7 @@
 #include "web_server.h"
 #include "song_settings.h"
 #include "crank_config.h"
+#include "buttons.h"
 #include "bt_ctrl.h"
 #include "cJSON.h"
 
@@ -152,6 +153,13 @@ static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
 static volatile bool    s_cmd_wifi_enable        = false; /* set by on_wifi_ctrl(true)  */
 static volatile bool    s_cmd_wifi_disable       = false; /* set by on_wifi_ctrl(false) or on_play_song */
 static volatile bool    s_cmd_new_song_loaded    = false;
+
+/* Player mode: the Play/Pause buttons act as a "virtual crank" (true = spinning),
+ * so the crank's fade-in/out, pause/resume and lamp logic is shared by both modes. */
+static volatile bool    s_virtual_crank_on       = false;
+
+/** true when the global config selects player mode (buttons instead of crank). */
+static inline bool player_mode(void) { return g_crank_cfg.ui_mode == 1u; }
 static volatile bool    s_cmd_downmix_mode_pending = false;
 static volatile uint8_t s_cmd_downmix_mode_value   = 0u;
 
@@ -1049,6 +1057,7 @@ static void audio_task(void *arg)
                  * which calls do_resume() and starts the pipeline. */
                 play_song_idx((uint16_t)play_id, false);
                 s_cmd_new_song_loaded = true; /* force enc2 rising-edge even if crank is already spinning */
+                if (player_mode()) s_virtual_crank_on = true; /* player mode: start playing right away */
             }
         }
 
@@ -1125,7 +1134,11 @@ static void audio_task(void *arg)
                  * call succeeds instead of printing "Pipeline already started". */
                 pipeline_stop_and_reset();
 
-                if (g_song_loop && g_current_song >= 0) {
+                /* Player mode: the display's end-of-song button overrides the per-song setting. */
+                const bool eff_loop = player_mode() ? (g_crank_cfg.player_end_action == 2u) : g_song_loop;
+                const bool eff_next = player_mode() ? (g_crank_cfg.player_end_action == 1u) : g_song_autoplay_next;
+
+                if (eff_loop && g_current_song >= 0) {
                     /* Loop: reload song at position 0 then resume immediately.
                      * Do NOT set g_is_playing/g_is_paused to false here – that
                      * would briefly signal "stopped" to the io_task state sender
@@ -1137,7 +1150,7 @@ static void audio_task(void *arg)
                     ESP_LOGI(TAG, "Loop: restarting song %u", loop_idx);
                     play_song_idx(loop_idx, false); /* load at pos 0, pipeline not started */
                     do_resume();                    /* start immediately                   */
-                } else if (g_song_autoplay_next && g_current_song >= 0 && g_song_count > 0) {
+                } else if (eff_next && g_current_song >= 0 && g_song_count > 0) {
                     uint16_t next_idx = (uint16_t)g_current_song + 1u;
                     if (next_idx >= g_song_count) next_idx = 0u;
                     ESP_LOGI(TAG, "Autoplay-next: advancing to song %u", (unsigned)next_idx);
@@ -1169,9 +1182,18 @@ static void on_play_song(uint16_t song_id)
 }
 
 static void on_stop_song(void)     { s_cmd_stop    = true; }
-static void on_pause(void)         { s_cmd_pause   = true; }
-static void on_resume(void)        { s_cmd_resume  = true; }
+static void on_pause(void)         { if (player_mode()) s_virtual_crank_on = false; else s_cmd_pause  = true; }
+static void on_resume(void)        { if (player_mode()) s_virtual_crank_on = true;  else s_cmd_resume = true; }
 static void on_display_ready(void) { s_cmd_display_ready = true; }
+
+/** Display toggled the player-mode end-of-song action (0=stop, 1=next, 2=repeat); persist it. */
+static void on_set_end_action(uint8_t action)
+{
+    if (action > 2u) action = 0u;
+    if (g_crank_cfg.player_end_action == action) return;
+    g_crank_cfg.player_end_action = action;
+    crank_config_save();
+}
 
 static void on_st_bypass(bool bypass)
 {
@@ -1550,6 +1572,47 @@ static void on_web_song_settings_saved(const char *wav_path,
 }
 
 /* ======================================================================
+ * Assignable physical buttons (player mode) – see buttons.h
+ * ====================================================================== */
+
+/** Run the function a learned button is assigned to.  fn is a btn_fn_t. */
+static void run_button_function(int fn)
+{
+    switch (fn) {
+    case BTN_FN_PLAYER_PLAYPAUSE:
+        /* Toggle the virtual crank: the same fade-in/out as the display's Play/Pause button. */
+        if (g_is_playing || g_is_paused) s_virtual_crank_on = !s_virtual_crank_on;
+        break;
+    case BTN_FN_PLAYER_NEXT:
+    case BTN_FN_PLAYER_PREV:
+        if (g_current_song >= 0 && g_song_count > 0) {
+            int cnt = (int)g_song_count;
+            int idx = ((int)g_current_song + (fn == BTN_FN_PLAYER_NEXT ? 1 : cnt - 1)) % cnt;
+            s_cmd_play_id = (int16_t)idx;
+        }
+        break;
+    case BTN_FN_PLAYER_STOP:
+        s_cmd_stop = true;
+        break;
+    case BTN_FN_PLAYER_END_ACTION:
+        on_set_end_action((uint8_t)((g_crank_cfg.player_end_action + 1u) % 3u));
+        break;
+    case BTN_FN_LIST_UP:
+        uart_master_send_encoder_move(-1);
+        break;
+    case BTN_FN_LIST_DOWN:
+        uart_master_send_encoder_move(1);
+        break;
+    case BTN_FN_LIST_SELECT:
+        uart_master_send_encoder_btn();
+        break;
+    default:
+        break;
+    }
+    ESP_LOGI(TAG, "Button function: %s", buttons_fn_info(fn) ? buttons_fn_info(fn)->id : "?");
+}
+
+/* ======================================================================
  * IO task (Core 0)
  * ====================================================================== */
 
@@ -1645,6 +1708,26 @@ static void io_task(void *arg)
             float enc2_spd  = encoder2_update(); /* updates EMA; 0 when stopped */
             bool  enc2_move = encoder2_is_moving();
 
+            /* Player mode: ignore the physical crank; the virtual crank (Play/Pause buttons)
+             * feeds the same fade / pause / resume / lamp logic below at a fixed 1.0x speed. */
+            {
+                static uint8_t s_mode_applied = 255u; /* 255 = apply on first pass */
+                const bool pm = player_mode();
+                if ((uint8_t)pm != s_mode_applied) {
+                    s_mode_applied     = (uint8_t)pm;
+                    s_virtual_crank_on = pm && g_is_playing;
+                    /* Fixed 1.0x speed in player mode: bit-perfect SoundTouch bypass. */
+                    s_cmd_st_bypass_value   = pm;
+                    s_cmd_st_bypass_pending = true;
+                    ESP_LOGI(TAG, "Operating mode: %s", pm ? "player" : "crank");
+                }
+                if (pm) {
+                    const bool v = s_virtual_crank_on && (g_is_playing || g_is_paused);
+                    enc2_move = v;
+                    enc2_spd  = v ? 1.0f : 0.0f;
+                }
+            }
+
             /* ── Dimmer: off during holdoff, optional fade-in, ramp with crank ── */
             {
                 static uint8_t  s_last_dimmer_pct      = 255u; /* latest requested level */
@@ -1664,6 +1747,7 @@ static void io_task(void *arg)
                 uint8_t dpct;
 
                 float inst_rps = encoder2_get_instant_rps();
+                if (player_mode()) inst_rps = enc2_move ? 1.0f : 0.0f;
                 bool  inst_active = (inst_rps > 0.01f);
 
                 /* Reset fade-in state when the active song changes */
@@ -1826,6 +1910,7 @@ static void io_task(void *arg)
                         float dimmer_rps = (inst_rps > enc2_spd) ? inst_rps : enc2_spd;
                         t = (ref > 0.0f) ? (dimmer_rps / ref) : 0.0f;
                         if (t > 1.0f) t = 1.0f;
+                        if (player_mode() && enc2_move) t = 1.0f; /* no crank: lamp at full level while playing */
                     }
                     float pf   = dmin + (dmax - dmin) * t;
                     if (s_dimmer_fadein_on) {
@@ -1947,7 +2032,7 @@ static void io_task(void *arg)
             /* Push speed to display whenever it changes by ≥1 unit (0–100).
              * send_state() covers playback; send_poti_update() ensures the
              * display's speed bar stays current at all times. */
-            float disp_speed = g_song_fixed_speed_en
+            float disp_speed = player_mode() ? 1.0f : g_song_fixed_speed_en
                 ? g_song_fixed_speed
                 : (g_tempo_locked
                     ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
@@ -1976,7 +2061,7 @@ static void io_task(void *arg)
         /* Apply updated speed target to SoundTouch every tick.
          * When speed is locked the locked value always wins over encoder2. */
         {
-            speed_applied = g_song_fixed_speed_en
+            speed_applied = player_mode() ? 1.0f : g_song_fixed_speed_en
                 ? g_song_fixed_speed
                 : (g_tempo_locked
                     ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
@@ -1991,7 +2076,28 @@ static void io_task(void *arg)
         int16_t steps = encoder_read_steps();
         if (steps != 0) uart_master_send_encoder_move((int8_t)steps);
 
+        buttons_learn_poll(); /* web-triggered "assign a button" mode */
         int8_t btn = encoder_btn_read();
+        if (btn >= 0) {
+            if (buttons_is_learning()) {
+                btn = -1; /* while learning, presses only teach – no action */
+            } else {
+                /* Every physical press is recorded for the web UI; in player mode a press that
+                 * matches an assigned function (for the current screen) runs it instead of the
+                 * built-in behaviour below. */
+                const int       raw_avg = encoder_btn_avg_raw();
+                const btn_ctx_t ctx     = (g_is_playing || g_is_paused) ? BTN_CTX_PLAYER : BTN_CTX_LIST;
+                const int       fn      = buttons_match(raw_avg, ctx);
+                buttons_note_press(raw_avg, fn);
+                if (fn >= 0 && player_mode()) {
+                    /* Player-screen functions: press the matching on-screen button as visual
+                     * feedback (BTN_FN_PLAYER_* are ordered like the display's targets). */
+                    if (fn <= BTN_FN_PLAYER_END_ACTION) uart_master_send_button_press((uint8_t)fn);
+                    run_button_function(fn);
+                    btn = -1;
+                }
+            }
+        }
         if (btn == 0) {
             if (g_is_playing || g_is_paused) {
                 s_cmd_stop = true;
@@ -2081,6 +2187,9 @@ static void io_task(void *arg)
             uint8_t  state_flags = g_tempo_locked ? 0x01u : 0x00u;
             if (bt_ctrl_is_enabled())      state_flags |= 0x02u;
             if (web_server_is_running())   state_flags |= 0x04u;
+            if (g_is_paused)               state_flags |= 0x08u;
+            if (player_mode())             state_flags |= 0x10u;
+            state_flags |= (uint8_t)((g_crank_cfg.player_end_action & 0x03u) << 5);
             uint16_t state_id    = (song >= 0) ? (uint16_t)((uint16_t)song + 1u) : 0u;
             uart_master_send_state(name, (uint8_t)(playing ? 1 : 0),
                                    cur_vol, tempo_byte, pct, dur_s, state_flags, state_id);
@@ -2119,6 +2228,7 @@ extern "C" void app_main(void)
     mount_sd();
     scan_playlist();
     crank_config_load();
+    buttons_load();
 
     //delay 2 seconds to allow the display to boot and send its SYNC command
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -2157,6 +2267,7 @@ extern "C" void app_main(void)
     uart_master_set_set_song_settings_callback(on_set_song_settings);
     uart_master_set_set_active_playlist_callback(on_set_active_playlist);
     uart_master_set_downmix_mode_callback(on_downmix_mode);
+    uart_master_set_end_action_callback(on_set_end_action);
 
     send_song_and_playlist_lists_to_display();
 

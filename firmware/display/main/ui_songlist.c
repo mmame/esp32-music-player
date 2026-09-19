@@ -1244,6 +1244,18 @@ uint16_t ui_songlist_get_next_song_id(uint16_t current_id)
     return s_songs[0].id;
 }
 
+uint16_t ui_songlist_get_prev_song_id(uint16_t current_id)
+{
+    if (s_song_count == 0) return 0;
+    for (uint8_t i = 0; i < s_song_count; i++) {
+        if (s_songs[i].id == current_id) {
+            uint8_t prev = (uint8_t)((i + s_song_count - 1u) % s_song_count);
+            return s_songs[prev].id;
+        }
+    }
+    return s_songs[s_song_count - 1u].id;
+}
+
 /* =========================================================================
  * Lifecycle
  * ========================================================================= */

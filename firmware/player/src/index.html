@@ -69,6 +69,14 @@ tbody tr:hover td{background:#1a1f3a}
 .about-meta-line{font-size:12px;color:#aeb7de;line-height:1.5}
 /* Config */
 .cfg-row{margin-bottom:20px}
+.btn-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #1e2a52;border-radius:6px;margin-bottom:6px;flex-wrap:wrap;transition:background .2s,border-color .2s}
+.btn-row.hit{background:#14532d;border-color:#22c55e}
+.btn-row.wait{background:#3b2f0f;border-color:#f59e0b}
+.btn-name{flex:1;min-width:170px}
+.btn-val{color:#9090b0;font-size:12px;min-width:150px}
+.btn-err{color:#f87171;font-size:12px;flex-basis:100%}
+.btn-live{padding:8px 10px;border:1px dashed #2a3a6a;border-radius:6px;font-size:13px;margin:10px 0 14px;color:#a0a0c0}
+.btn-live.hit{border-color:#22c55e;color:#86efac}
 .cfg-label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
 .cfg-name{color:#d0d0e8;font-size:13px;font-weight:500}
 .cfg-val{color:#a78bfa;font-family:monospace;font-size:14px;min-width:52px;text-align:right}
@@ -115,6 +123,7 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
 <nav class="tab-nav">
   <button class="tab-btn active" data-tab="files" onclick="switchTab('files')">Files</button>
   <button class="tab-btn" data-tab="config" onclick="switchTab('config')">Configuration</button>
+  <button class="tab-btn" data-tab="buttons" onclick="switchTab('buttons')">Buttons</button>
   <button class="tab-btn" data-tab="about" onclick="switchTab('about')">About</button>
 </nav>
 
@@ -169,6 +178,24 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
 <div id="tab-config" style="display:none">
 <section>
   <h2>Crank &amp; Playback Configuration</h2>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Operating mode</span></div>
+    <select class="cfg-slider" id="sl-ui_mode" style="padding:4px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
+      <option value="0" selected>Crank mode (default)</option>
+      <option value="1">Player mode</option>
+    </select>
+    <p class="cfg-desc">Crank mode: the crank starts, stops and speeds up playback. Player mode: a normal player &mdash; Play/Pause, Prev/Next and Stop buttons on the display, fixed 1.0&times; speed, the crank is ignored. Applies live. Default: Crank mode</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Player mode: when song ends</span></div>
+    <select class="cfg-slider" id="sl-player_end_action" style="padding:4px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
+      <option value="0" selected>Stop (default)</option>
+      <option value="1">Play next track</option>
+      <option value="2">Repeat this track</option>
+    </select>
+    <p class="cfg-desc">Only used in player mode (ignores the per-song setting). Can also be toggled with the button on the display.</p>
+  </div>
+  <hr style="border-color:#1e2a52;margin:20px 0 14px">
   <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Speed smoothing (attack)</span><span class="cfg-val" id="vv-ema_attack">0.025</span></div>
     <input type="range" class="cfg-slider" id="sl-ema_attack" min="0.005" max="0.200" step="0.005" value="0.025" oninput="document.getElementById('vv-ema_attack').textContent=parseFloat(this.value).toFixed(3)">
@@ -265,6 +292,20 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <button class="btn btn-ghost" id="cal-start-btn" onclick="calStart()">&#9654; Calibrate Potentiometer</button>
 </section>
 </div><!-- /tab-config -->
+
+<div id="tab-buttons" style="display:none">
+<section>
+  <h2>Physical Buttons</h2>
+  <p class="cfg-desc">Assign the buttons on the ADC ladder to player functions. Click <b>Assign</b>, then press the button you want to use &mdash; it is recognised by its averaged ADC value. One button can only have <b>one function per screen</b>; the same button may be reused on the other screen (e.g. &ldquo;Next&rdquo; on the player screen and &ldquo;Down&rdquo; in the song list). Assigned buttons are active in <b>player mode</b> only (Configuration &rarr; Operating mode).</p>
+  <div id="btn-mode-note" class="cfg-desc" style="color:#f59e0b;display:none">Player mode is currently off &mdash; assignments are stored but presses do not trigger them yet.</div>
+  <div id="btn-live" class="btn-live">Last button press: &mdash; (press a physical button to see it here)</div>
+  <h3 style="font-size:.7rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin:14px 0 8px">Player screen</h3>
+  <div id="btn-list-player"></div>
+  <h3 style="font-size:.7rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin:14px 0 8px">Song list</h3>
+  <div id="btn-list-list"></div>
+  <button class="btn btn-ghost btn-sm" style="margin-top:10px" onclick="btnClearAll()">Clear all assignments</button>
+</section>
+</div><!-- /tab-buttons -->
 
 <div id="tab-about" style="display:none">
 <section class="about-card">
@@ -931,12 +972,87 @@ function loadAboutInfo(){
 function switchTab(t){
   document.getElementById('tab-files').style.display=(t==='files'?'':'none');
   document.getElementById('tab-config').style.display=(t==='config'?'':'none');
+  document.getElementById('tab-buttons').style.display=(t==='buttons'?'':'none');
   document.getElementById('tab-about').style.display=(t==='about'?'':'none');
   document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.toggle('active',b.dataset.tab===t);});
   if(t==='config')loadConfig();
   if(t==='about')loadAboutInfo();
+  if(t==='buttons')btnsStart(); else btnsStop();
 }
 window.switchTab=switchTab;
+
+/* ── Physical buttons ── */
+var g_btn_timer=null,g_btn_seq=null,g_btn_data=null,g_btn_prev_state='idle';
+function btnPost(url,body){
+  return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})
+    .then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});});
+}
+function btnFlash(el){
+  if(!el)return;
+  el.classList.add('hit');
+  setTimeout(function(){el.classList.remove('hit');},1200);
+}
+function btnsRender(d){
+  g_btn_data=d;
+  var learn=d.learn||{state:'idle'};
+  var waiting=learn.state==='waiting';
+  var byId={};
+  ['player','list'].forEach(function(c){document.getElementById('btn-list-'+c).innerHTML='';});
+  d.functions.forEach(function(f){
+    byId[f.id]=f;
+    var row=document.createElement('div');
+    row.className='btn-row'+((waiting&&learn.fn===f.id)?' wait':'');
+    row.id='btnrow-'+f.id;
+    var isWait=waiting&&learn.fn===f.id;
+    var val=isWait?'Press the button now\u2026':(f.adc===null?'not assigned':'ADC '+f.adc);
+    var html='<span class="btn-name">'+f.label+'</span><span class="btn-val">'+val+'</span>';
+    if(isWait){
+      html+='<button class="btn btn-sm btn-danger" onclick="btnCancel()">Cancel</button>';
+    }else{
+      html+='<button class="btn btn-sm btn-ghost" onclick="btnAssign(\''+f.id+'\')">Assign</button>';
+      html+='<button class="btn btn-sm btn-ghost"'+(f.adc===null?' disabled':'')+' onclick="btnClear(\''+f.id+'\')">Clear</button>';
+    }
+    if(learn.state==='error'&&learn.fn===f.id&&learn.error){
+      html+='<span class="btn-err">'+learn.error+'</span>';
+    }
+    row.innerHTML=html;
+    document.getElementById('btn-list-'+f.ctx).appendChild(row);
+  });
+  /* learn result toasts (once per transition) */
+  if(g_btn_prev_state==='waiting'&&learn.state==='done'){toast('Button stored (ADC '+learn.adc+')');}
+  if(g_btn_prev_state==='waiting'&&learn.state==='error'){toast(learn.error||'Assigning failed',true);}
+  g_btn_prev_state=learn.state;
+  document.getElementById('btn-mode-note').style.display=d.player_mode?'none':'';
+  /* live indicator for physical presses */
+  var lp=d.last_press||{seq:0};
+  if(g_btn_seq===null){g_btn_seq=lp.seq;}
+  else if(lp.seq!==g_btn_seq){
+    g_btn_seq=lp.seq;
+    var live=document.getElementById('btn-live');
+    var fn=lp.fn?byId[lp.fn]:null;
+    live.textContent='Last button press: '+(fn?fn.label:'unassigned button')+' (ADC '+lp.adc+')';
+    btnFlash(live);
+    if(fn)btnFlash(document.getElementById('btnrow-'+fn.id));
+  }
+}
+function btnsPoll(){
+  fetch('/api/buttons').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    .then(btnsRender).catch(function(){});
+}
+function btnsStart(){btnsPoll();if(!g_btn_timer)g_btn_timer=setInterval(btnsPoll,300);}
+function btnsStop(){
+  if(g_btn_timer){clearInterval(g_btn_timer);g_btn_timer=null;}
+  /* leaving the tab must not leave the player waiting for a button */
+  if(g_btn_data&&g_btn_data.learn&&g_btn_data.learn.state==='waiting'){btnPost('/api/buttons/cancel').catch(function(){});}
+}
+function btnAssign(id){btnPost('/api/buttons/learn',{fn:id}).then(btnsPoll).catch(function(e){toast('Failed: '+e.message,true);});}
+function btnCancel(){btnPost('/api/buttons/cancel').then(btnsPoll).catch(function(e){toast('Failed: '+e.message,true);});}
+function btnClear(id){btnPost('/api/buttons/clear',{fn:id}).then(btnsPoll).catch(function(e){toast('Failed: '+e.message,true);});}
+function btnClearAll(){
+  if(!confirm('Clear all button assignments?'))return;
+  btnPost('/api/buttons/clear',{all:true}).then(btnsPoll).catch(function(e){toast('Failed: '+e.message,true);});
+}
+window.btnAssign=btnAssign;window.btnCancel=btnCancel;window.btnClear=btnClear;window.btnClearAll=btnClearAll;
 
 /* ── Config ── */
 function setSlider(id,val,dec){
@@ -960,6 +1076,8 @@ function loadConfig(){
     setSlider('dimmer_start_fade_ms',c.dimmer_start_fade_ms,0);
     setSlider('dimmer_stop_fade_ms',c.dimmer_stop_fade_ms,0);
     if(c.gain_db!==undefined){setSlider('gain_db',c.gain_db,0);document.getElementById('vv-gain_db').textContent='+'+c.gain_db;}
+    if(c.ui_mode!==undefined){document.getElementById('sl-ui_mode').value=String(c.ui_mode);}
+    if(c.player_end_action!==undefined){document.getElementById('sl-player_end_action').value=String(c.player_end_action);}
     if(c.crank_dir!==undefined){document.getElementById('sl-crank_dir').value=String(c.crank_dir);}
     if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
     if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
@@ -981,6 +1099,8 @@ function saveConfig(){
   var dso=parseInt(document.getElementById('sl-dimmer_stop_fade_ms').value);
   var gdb=parseInt(document.getElementById('sl-gain_db').value);
   var cd =parseInt(document.getElementById('sl-crank_dir').value);
+  var um =parseInt(document.getElementById('sl-ui_mode').value);
+  var pea=parseInt(document.getElementById('sl-player_end_action').value);
   var lbw=parseFloat(document.getElementById('sl-lo_bass_weight').value);
   var lmw=parseFloat(document.getElementById('sl-lo_mid_weight').value);
   var ldr=parseFloat(document.getElementById('sl-lo_decay_rate').value);
@@ -989,7 +1109,7 @@ function saveConfig(){
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -1005,6 +1125,8 @@ function resetConfig(){
   setSlider('dimmer_start_fade_ms', 1000, 0);
   setSlider('dimmer_stop_fade_ms',  1000, 0);
   setSlider('gain_db', 6, 0);document.getElementById('vv-gain_db').textContent='+6';
+  document.getElementById('sl-ui_mode').value='0';
+  document.getElementById('sl-player_end_action').value='0';
   document.getElementById('sl-crank_dir').value='-1';
   setSlider('lo_bass_weight', 45,   0);
   setSlider('lo_mid_weight',  5,    1);
