@@ -25,6 +25,9 @@
 // interupt pin was falsely routed to GND, so its 0x5D
 #define SUNTON_ESP32_TOUCH_ADDRESS              ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS
 
+// 1 = show GT911 config/raw/mapped touch info and a red dot at the touch point on screen
+#define SUNTON_ESP32_TOUCH_DEBUG                0
+
 // not required, external pullups R3 / R4 in place
 //#define SUNTON_ESP32_TOUCH_I2C_PULLUP           y
 

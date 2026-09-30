@@ -209,16 +209,59 @@ i2c_master_bus_handle_t sunton_esp32s3_i2c_master(void)
     return touch_i2c_bus_handle;
 }
 
-static inline uint16_t map(uint16_t n, uint16_t in_min, uint16_t in_max, uint16_t out_min, uint16_t out_max)
-{
-    return (n - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
+/* Coordinate range the GT911 reports (from its config registers); probed in touch_init() */
+static uint16_t gt911_x_max = SUNTON_ESP32_LCD_WIDTH;
+static uint16_t gt911_y_max = SUNTON_ESP32_LCD_HEIGHT;
+
+#if SUNTON_ESP32_TOUCH_DEBUG
+static uint8_t gt911_cfg_version, gt911_cfg_switch1;
+static bool gt911_cfg_valid;
+static uint16_t dbg_raw_x, dbg_raw_y;
+static lv_obj_t *dbg_label, *dbg_dot;
+#endif
 
 static void process_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, uint16_t *y, uint16_t *strength, uint8_t *point_num, uint8_t max_point_num)
 {
-    *x = map(*x, 0, SUNTON_ESP32_LCD_WIDTH, 0, SUNTON_ESP32_LCD_WIDTH);
-    *y = map(*y, 0, SUNTON_ESP32_LCD_HEIGHT, 0, SUNTON_ESP32_LCD_HEIGHT);
+    for (uint8_t i = 0; i < *point_num; i++)
+    {
+#if SUNTON_ESP32_TOUCH_DEBUG
+        if (i == 0)
+        {
+            dbg_raw_x = x[0];
+            dbg_raw_y = y[0];
+        }
+#endif
+        x[i] = (uint32_t)x[i] * SUNTON_ESP32_LCD_WIDTH / gt911_x_max;
+        y[i] = (uint32_t)y[i] * SUNTON_ESP32_LCD_HEIGHT / gt911_y_max;
+    }
 }
+
+#if SUNTON_ESP32_TOUCH_DEBUG
+static void touch_debug_create(void)
+{
+    lv_lock();
+    dbg_label = lv_label_create(lv_layer_top());
+    lv_obj_remove_flag(dbg_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(dbg_label, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(dbg_label, LV_OPA_70, 0);
+    lv_obj_set_style_text_color(dbg_label, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(dbg_label, 4, 0);
+    lv_obj_align(dbg_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_label_set_text_fmt(dbg_label, "GT911 %s cfg v%u range %ux%u sw=0x%02X\nlcd %ux%u - touch to see raw/mapped",
+                          gt911_cfg_valid ? "ok" : "CFG READ FAILED", gt911_cfg_version,
+                          gt911_x_max, gt911_y_max, gt911_cfg_switch1,
+                          SUNTON_ESP32_LCD_WIDTH, SUNTON_ESP32_LCD_HEIGHT);
+
+    dbg_dot = lv_obj_create(lv_layer_top());
+    lv_obj_remove_flag(dbg_dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dbg_dot, 14, 14);
+    lv_obj_set_style_radius(dbg_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dbg_dot, lv_color_make(255, 0, 0), 0);
+    lv_obj_set_style_border_width(dbg_dot, 0, 0);
+    lv_obj_add_flag(dbg_dot, LV_OBJ_FLAG_HIDDEN);
+    lv_unlock();
+}
+#endif
 
 static void touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
@@ -235,6 +278,19 @@ static void touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
         data->point.x = data_point.x;
         data->point.y = data_point.y;
         data->state = LV_INDEV_STATE_PRESSED;
+#if SUNTON_ESP32_TOUCH_DEBUG
+        if (dbg_label)
+        {
+            /* runs inside the LVGL timer handler, so the LVGL lock is already held */
+            lv_label_set_text_fmt(dbg_label, "GT911 %s cfg v%u range %ux%u sw=0x%02X\nraw %u,%u -> lcd %d,%d (of %ux%u)",
+                                  gt911_cfg_valid ? "ok" : "CFG READ FAILED", gt911_cfg_version,
+                                  gt911_x_max, gt911_y_max, gt911_cfg_switch1,
+                                  dbg_raw_x, dbg_raw_y, (int)data->point.x, (int)data->point.y,
+                                  SUNTON_ESP32_LCD_WIDTH, SUNTON_ESP32_LCD_HEIGHT);
+            lv_obj_set_pos(dbg_dot, data->point.x - 7, data->point.y - 7);
+            lv_obj_remove_flag(dbg_dot, LV_OBJ_FLAG_HIDDEN);
+        }
+#endif
     }
     else
     {
@@ -284,6 +340,27 @@ static esp_lcd_touch_handle_t touch_init(i2c_master_bus_handle_t i2c_master)
         .interrupt_callback = NULL,
     };
     ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_gt911(gt911_touch_io_handle, &gt911_touch_cfg, &touch_handle));
+
+    /* Probe the coordinate range configured inside the GT911: 0x8047 version, 0x8048/49 X max,
+     * 0x804A/4B Y max, 0x804C touch count, 0x804D Module_Switch1 (bit 3 = X/Y swap). */
+    uint8_t cfg[7] = {0};
+    if (esp_lcd_panel_io_rx_param(gt911_touch_io_handle, 0x8047, cfg, sizeof(cfg)) == ESP_OK)
+    {
+        uint16_t xm = cfg[1] | (cfg[2] << 8);
+        uint16_t ym = cfg[3] | (cfg[4] << 8);
+        if (xm >= 64 && xm <= 4096 && ym >= 64 && ym <= 4096)
+        {
+            gt911_x_max = xm;
+            gt911_y_max = ym;
+#if SUNTON_ESP32_TOUCH_DEBUG
+            gt911_cfg_valid = true;
+#endif
+        }
+#if SUNTON_ESP32_TOUCH_DEBUG
+        gt911_cfg_version = cfg[0];
+        gt911_cfg_switch1 = cfg[6];
+#endif
+    }
     return touch_handle;
 }
 
@@ -293,4 +370,7 @@ void sunton_esp32s3_touch_init(i2c_master_bus_handle_t i2c_master)
     lv_indev_set_type(indev_touchpad, LV_INDEV_TYPE_POINTER);
     lv_indev_set_user_data(indev_touchpad, touch_init(i2c_master));
     lv_indev_set_read_cb(indev_touchpad, touchpad_read);
+#if SUNTON_ESP32_TOUCH_DEBUG
+    touch_debug_create();
+#endif
 }
