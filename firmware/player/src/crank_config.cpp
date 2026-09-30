@@ -38,6 +38,7 @@ void crank_config_defaults(crank_config_t *c)
     c->gain_db        = 6;
     c->ui_mode        = 0;
     c->player_end_action = 0;
+    c->vol_full       = 0;
 }
 
 /* ── load ──────────────────────────────────────────────────────────────── */
@@ -115,6 +116,7 @@ void crank_config_load(void)
     read_u8 (root, "gain_db",       0,   10, &g_crank_cfg.gain_db);
     read_u8 (root, "ui_mode",       0,    1, &g_crank_cfg.ui_mode);
     read_u8 (root, "player_end_action", 0, 2, &g_crank_cfg.player_end_action);
+    read_u8 (root, "vol_full",      0,    1, &g_crank_cfg.vol_full);
 
     cJSON_Delete(root);
     ESP_LOGI(TAG, "Loaded: attack=%.3f rel=%.1f stop=%.2f start=%.2f rt=%u fs=%u ds=%u de=%u",
@@ -152,6 +154,7 @@ void crank_config_save(void)
     cJSON_AddNumberToObject(root, "gain_db",         (double)g_crank_cfg.gain_db);
     cJSON_AddNumberToObject(root, "ui_mode",         (double)g_crank_cfg.ui_mode);
     cJSON_AddNumberToObject(root, "player_end_action", (double)g_crank_cfg.player_end_action);
+    cJSON_AddNumberToObject(root, "vol_full",        (double)g_crank_cfg.vol_full);
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

@@ -907,7 +907,7 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              "\"dimmer_start_fade_ms\":%u,\"dimmer_stop_fade_ms\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
              "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
-             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u}",
+             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u,\"vol_full\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
              (double)g_crank_cfg.stop_thresh,
@@ -926,7 +926,8 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (unsigned)g_crank_cfg.pot_cal_hi,
              (unsigned)g_crank_cfg.gain_db,
              (unsigned)g_crank_cfg.ui_mode,
-             (unsigned)g_crank_cfg.player_end_action);
+             (unsigned)g_crank_cfg.player_end_action,
+             (unsigned)g_crank_cfg.vol_full);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     return httpd_resp_sendstr(req, buf);
@@ -1020,6 +1021,7 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_u8(root, "gain_db", 0, 10, &nc.gain_db);
     read_u8(root, "ui_mode", 0, 1, &nc.ui_mode);
     read_u8(root, "player_end_action", 0, 2, &nc.player_end_action);
+    read_u8(root, "vol_full", 0, 1, &nc.vol_full);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {

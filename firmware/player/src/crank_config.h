@@ -37,6 +37,7 @@ typedef struct {
     uint8_t  gain_db;        /**< static output gain added on top of the volume poti [0–10 dB, def 6; peak-limited] */
     uint8_t  ui_mode;        /**< 0 = crank mode (default), 1 = player mode (buttons instead of crank) */
     uint8_t  player_end_action; /**< player mode, end of song: 0 = stop (default), 1 = play next, 2 = repeat */
+    uint8_t  vol_full;       /**< 0 = volume follows the potentiometer (default), 1 = always 100 % */
 } crank_config_t;
 
 /** Globally shared config; written by crank_config_load() and the web POST handler. */

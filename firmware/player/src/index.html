@@ -227,6 +227,14 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     <p class="cfg-desc">Volume units stepped per 10&thinsp;ms tick during fade-in/out when cranking starts or stops. 1&nbsp;=&nbsp;slow fade (~700&thinsp;ms at full volume). 10&nbsp;=&nbsp;fast fade (~70&thinsp;ms). Default: 1</p>
   </div>
   <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Volume control</span></div>
+    <select class="cfg-slider" id="sl-vol_full" style="padding:4px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
+      <option value="0" selected>Potentiometer (default)</option>
+      <option value="1">Always 100%</option>
+    </select>
+    <p class="cfg-desc">Always 100%: the volume potentiometer is ignored and the volume is fixed at maximum (the output gain below still applies). Applies live. Default: Potentiometer</p>
+  </div>
+  <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Output gain (dB)</span><span class="cfg-val" id="vv-gain_db">+6</span></div>
     <input type="range" class="cfg-slider" id="sl-gain_db" min="0" max="10" step="1" value="6" oninput="document.getElementById('vv-gain_db').textContent='+'+this.value">
     <p class="cfg-desc">Static gain added on top of the volume potentiometer (applies live). A peak limiter (ceiling &minus;1&thinsp;dBFS) follows the gain, so loud passages are squeezed instead of clipping &mdash; at high settings loud material may sound compressed. Range: 0&ndash;10&thinsp;dB. 0 = off (bit-perfect). Default: +6&thinsp;dB.</p>
@@ -1078,6 +1086,7 @@ function loadConfig(){
     if(c.gain_db!==undefined){setSlider('gain_db',c.gain_db,0);document.getElementById('vv-gain_db').textContent='+'+c.gain_db;}
     if(c.ui_mode!==undefined){document.getElementById('sl-ui_mode').value=String(c.ui_mode);}
     if(c.player_end_action!==undefined){document.getElementById('sl-player_end_action').value=String(c.player_end_action);}
+    if(c.vol_full!==undefined){document.getElementById('sl-vol_full').value=String(c.vol_full);}
     if(c.crank_dir!==undefined){document.getElementById('sl-crank_dir').value=String(c.crank_dir);}
     if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
     if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
@@ -1101,6 +1110,7 @@ function saveConfig(){
   var cd =parseInt(document.getElementById('sl-crank_dir').value);
   var um =parseInt(document.getElementById('sl-ui_mode').value);
   var pea=parseInt(document.getElementById('sl-player_end_action').value);
+  var vfl=parseInt(document.getElementById('sl-vol_full').value);
   var lbw=parseFloat(document.getElementById('sl-lo_bass_weight').value);
   var lmw=parseFloat(document.getElementById('sl-lo_mid_weight').value);
   var ldr=parseFloat(document.getElementById('sl-lo_decay_rate').value);
@@ -1109,7 +1119,7 @@ function saveConfig(){
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,vol_full:vfl,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -1127,6 +1137,7 @@ function resetConfig(){
   setSlider('gain_db', 6, 0);document.getElementById('vv-gain_db').textContent='+6';
   document.getElementById('sl-ui_mode').value='0';
   document.getElementById('sl-player_end_action').value='0';
+  document.getElementById('sl-vol_full').value='0';
   document.getElementById('sl-crank_dir').value='-1';
   setSlider('lo_bass_weight', 45,   0);
   setSlider('lo_mid_weight',  5,    1);

@@ -1618,8 +1618,9 @@ static void run_button_function(int fn)
 
 static void io_task(void *arg)
 {
-    uint8_t vol = g_volume;
-    potis_read(&vol);
+    uint8_t pot_vol = g_volume;
+    potis_read(&pot_vol);
+    uint8_t vol = g_crank_cfg.vol_full ? 100 : pot_vol;
 
     uart_master_send_poti_update(vol, 0, 0,
                                  (uint8_t)(SPEED_MIN * 10.0f),
@@ -1653,11 +1654,14 @@ static void io_task(void *arg)
         }
 #endif
 
-        /* Volume potentiometer (tempo poti removed from speed control) */
+        /* Volume potentiometer (tempo poti removed from speed control);
+         * the web option "always 100 %" overrides it (applies live). */
         {
-            uint8_t new_vol = vol;
-            if (potis_read(&new_vol)) {
-                vol = new_vol;
+            uint8_t new_vol = pot_vol;
+            if (potis_read(&new_vol)) pot_vol = new_vol;
+            const uint8_t eff_vol = g_crank_cfg.vol_full ? 100 : pot_vol;
+            if (eff_vol != vol) {
+                vol = eff_vol;
 #ifdef HAVE_ADF
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                 apply_volume_locked(vol);
