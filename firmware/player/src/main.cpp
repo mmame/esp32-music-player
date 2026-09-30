@@ -2092,7 +2092,10 @@ static void io_task(void *arg)
                 const int       raw_avg = encoder_btn_avg_raw();
                 const btn_ctx_t ctx     = (g_is_playing || g_is_paused) ? BTN_CTX_PLAYER : BTN_CTX_LIST;
                 const int       fn      = buttons_match(raw_avg, ctx);
-                buttons_note_press(raw_avg, fn);
+                /* The web indicator also recognises buttons assigned on the other screen. */
+                const int note_fn = (fn >= 0) ? fn
+                                  : buttons_match(raw_avg, ctx == BTN_CTX_PLAYER ? BTN_CTX_LIST : BTN_CTX_PLAYER);
+                buttons_note_press(raw_avg, note_fn);
                 if (fn >= 0 && player_mode()) {
                     /* Player-screen functions: press the matching on-screen button as visual
                      * feedback (BTN_FN_PLAYER_* are ordered like the display's targets). */
