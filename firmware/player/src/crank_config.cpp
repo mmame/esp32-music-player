@@ -1,4 +1,5 @@
 #include "crank_config.h"
+#include "atomic_file.h"
 #include "encoder2.h"
 #include "potis.h"
 
@@ -47,20 +48,11 @@ void crank_config_load(void)
 {
     crank_config_defaults(&g_crank_cfg);
 
-    struct stat st = {};
-    if (stat(CFG_PATH, &st) != 0 || st.st_size <= 0) {
-        return; /* file absent – silently use defaults */
+    char *buf = atomic_file_read(CFG_PATH, 8192);
+    if (!buf) {
+        ESP_LOGW(TAG, "%s missing or empty - using defaults", CFG_PATH);
+        return;
     }
-
-    FILE *f = fopen(CFG_PATH, "r");
-    if (!f) return;
-
-    char *buf = (char *)malloc((size_t)st.st_size + 1u);
-    if (!buf) { fclose(f); return; }
-
-    size_t n = fread(buf, 1u, (size_t)st.st_size, f);
-    fclose(f);
-    buf[n] = '\0';
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
@@ -160,10 +152,7 @@ void crank_config_save(void)
     cJSON_Delete(root);
     if (!str) return;
 
-    FILE *f = fopen(CFG_PATH, "w");
-    if (f) {
-        fputs(str, f);
-        fclose(f);
+    if (atomic_file_write(CFG_PATH, str)) {
         ESP_LOGI(TAG, "Config saved");
     } else {
         ESP_LOGE(TAG, "Cannot write %s", CFG_PATH);

@@ -1,4 +1,5 @@
 #include "buttons.h"
+#include "atomic_file.h"
 
 #include "encoder.h"
 #include "pins.h"
@@ -73,10 +74,7 @@ static void save_map(void)
     cJSON_Delete(root);
     if (!str) return;
 
-    FILE *f = fopen(MAP_PATH, "w");
-    if (f) {
-        fputs(str, f);
-        fclose(f);
+    if (atomic_file_write(MAP_PATH, str)) {
         ESP_LOGI(TAG, "Button map saved: %s", str);
     } else {
         ESP_LOGE(TAG, "Cannot write %s", MAP_PATH);
@@ -89,16 +87,11 @@ void buttons_load(void)
     if (!s_mu) s_mu = xSemaphoreCreateMutex();
     for (int i = 0; i < BTN_FN_COUNT; i++) s_adc[i] = -1;
 
-    struct stat st = {};
-    if (stat(MAP_PATH, &st) != 0 || st.st_size <= 0 || st.st_size > 2048) return;
-
-    FILE *f = fopen(MAP_PATH, "r");
-    if (!f) return;
-    char *buf = (char *)malloc((size_t)st.st_size + 1u);
-    if (!buf) { fclose(f); return; }
-    size_t n = fread(buf, 1u, (size_t)st.st_size, f);
-    fclose(f);
-    buf[n] = '\0';
+    char *buf = atomic_file_read(MAP_PATH, 2048);
+    if (!buf) {
+        ESP_LOGW(TAG, "%s missing or empty - no buttons assigned", MAP_PATH);
+        return;
+    }
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
