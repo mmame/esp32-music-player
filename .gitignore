@@ -11,3 +11,4 @@
 /firmware/player/build_output.txt
 /hardware/debug.log
 /tools/*.wav
+/firmware/player/release
