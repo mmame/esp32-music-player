@@ -62,6 +62,8 @@ static const uint8_t UM_MAGIC[8] = {
 #define CMD_DOWNMIX_MODE        0x16  /* Display → Host: set stereo->mono mode (0=mix,1=ch1,2=ch2) */
 #define CMD_END_ACTION          0x17  /* Display → Host: player-mode end-of-song action (0=stop,1=next,2=repeat) */
 #define CMD_BUTTON_PRESS        0x18  /* Host → Display: flash an on-screen player button (physical press feedback) */
+#define CMD_DISPLAY_INFO        0x19  /* Display → Host: display firmware info "project|version|build|idf|WxH" (text) */
+#define CMD_DISPLAY_INFO_REQ    0x1A  /* Host → Display: request CMD_DISPLAY_INFO (no payload)  */
 #define CMD_ACK                 0xFF  /* Display → Host: ACK with optional touch            */
 
 /* ── Callbacks invoked from the UART receive task (Core 0) ───────────────── */
@@ -340,6 +342,24 @@ void uart_master_send_encoder_btn(void);
  * @param target  0 = Play/Pause, 1 = Next, 2 = Prev, 3 = Stop, 4 = end-of-song toggle.
  */
 void uart_master_send_button_press(uint8_t target);
+
+/** Build info of the display firmware, as reported by the display (CMD_DISPLAY_INFO). */
+typedef struct {
+    char project[24];      /* e.g. "ESP32-2432S032C"            */
+    char version[32];      /* git describe                      */
+    char build[24];        /* "Oct  4 2026 14:02:32"            */
+    char idf[16];          /* ESP-IDF version                   */
+    char resolution[12];   /* "320x240"                         */
+} um_display_info_t;
+
+/**
+ * @brief Get the display firmware info received from the display.
+ * @return true if the display has reported its info since (re)start, false otherwise.
+ */
+bool uart_master_get_display_info(um_display_info_t *out);
+
+/** @brief Ask the display to (re)send its firmware info (CMD_DISPLAY_INFO_REQ). */
+void uart_master_request_display_info(void);
 
 /**
  * @brief Send CMD_SYNC and wait up to @p timeout_ms for CMD_ACK.

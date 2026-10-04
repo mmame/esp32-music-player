@@ -326,9 +326,14 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     </a>
   </p>
   <div class="about-meta" id="about-meta">
-    <div class="about-meta-line" id="about-version">Firmware: loading...</div>
+    <div class="about-meta-line" id="about-version">Player firmware: loading...</div>
     <div class="about-meta-line" id="about-build">Build: loading...</div>
     <div class="about-meta-line" id="about-idf">ESP-IDF: loading...</div>
+  </div>
+  <div class="about-meta" id="about-display-meta" style="margin-top:10px">
+    <div class="about-meta-line" id="about-disp-version">Display firmware: loading...</div>
+    <div class="about-meta-line" id="about-disp-build">Build: loading...</div>
+    <div class="about-meta-line" id="about-disp-idf">ESP-IDF: loading...</div>
   </div>
 </section>
 </div><!-- /tab-about -->
@@ -953,7 +958,19 @@ window.duplicateSong=duplicateSong;
 window.setActivePlaylist=setActivePlaylist;
 window.setActivePlaylistByIndex=setActivePlaylistByIndex;
 
-var g_aboutLoaded=false;
+var g_aboutLoaded=false,g_aboutTries=0;
+function showDisplayInfo(d){
+  var v=document.getElementById('about-disp-version'),b=document.getElementById('about-disp-build'),i=document.getElementById('about-disp-idf');
+  if(d){
+    v.textContent='Display firmware: '+(d.project||'?')+' v'+(d.version||'?')+(d.resolution?'  ('+d.resolution+')':'');
+    b.textContent='Build: '+(d.build||'?');
+    i.textContent='ESP-IDF: '+(d.idf||'?');
+  }else{
+    v.textContent='Display firmware: not reported (display firmware too old?)';
+    b.textContent='Build: -';
+    i.textContent='ESP-IDF: -';
+  }
+}
 function loadAboutInfo(){
   if(g_aboutLoaded)return;
   fetch('/api/about').then(function(r){
@@ -965,12 +982,16 @@ function loadAboutInfo(){
     var bdate=(a.build_date||'?');
     var btime=(a.build_time||'?');
     var idf=(a.idf||'?');
-    document.getElementById('about-version').textContent='Firmware: v'+ver;
+    document.getElementById('about-version').textContent='Player firmware: v'+ver;
     document.getElementById('about-build').textContent='Build: '+bdate+' '+btime+'  ('+hash+')';
     document.getElementById('about-idf').textContent='ESP-IDF: '+idf;
-    g_aboutLoaded=true;
+    if(a.display){showDisplayInfo(a.display);g_aboutLoaded=true;}
+    else if(++g_aboutTries<4){   /* the display answers the request a moment later: retry */
+      document.getElementById('about-disp-version').textContent='Display firmware: querying display...';
+      setTimeout(loadAboutInfo,1500);
+    }else{showDisplayInfo(null);g_aboutLoaded=true;}
   }).catch(function(){
-    document.getElementById('about-version').textContent='Firmware: unavailable';
+    document.getElementById('about-version').textContent='Player firmware: unavailable';
     document.getElementById('about-build').textContent='Build: unavailable';
     document.getElementById('about-idf').textContent='ESP-IDF: unavailable';
   });

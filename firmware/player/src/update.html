@@ -45,11 +45,20 @@ section{background:#16213e;border:1px solid #1e2a52;border-radius:12px;padding:1
     <span class="fw-fname" id="disp-bin-name">No file chosen</span>
   </div>
   <div class="fw-row">
+    <label class="note" for="disp-addr">Flash address</label>
+    <input type="text" id="disp-addr" value="auto" size="9" title="auto = 0x1000 (ESP32) / 0x0 (ESP32-S3)" style="background:#0a0a14;color:#e0e0e0;border:1px solid #1e2a52;border-radius:4px;padding:4px 6px">
+    <label class="note"><input type="checkbox" id="disp-log-chk" checked> show display boot log after flashing</label>
+  </div>
+  <div class="fw-row">
     <button class="btn btn-primary" id="disp-flash-btn">&#9889; Flash Display</button>
+    <button class="btn btn-ghost btn-sm" id="disp-log-btn">&#128065; Show display log</button>
   </div>
   <input type="file" id="disp-bin-input" accept=".bin" style="display:none">
   <pre class="fw-log" id="disp-ota-log"></pre>
-  <p class="note">Firmware is flashed via the ROM UART bootloader (UART1). Flash address: 0x10000.</p>
+  <p class="note">Firmware is flashed via the ROM UART bootloader (UART1). Use the merged <code>*-full.bin</code>
+    (bootloader + partition table + app); with address <b>auto</b> it is written to 0x1000 (ESP32) or 0x0 (ESP32-S3),
+    chosen from the detected chip. Enter an address only for special cases (e.g. 0x10000 = application only).
+    &ldquo;Show display log&rdquo; resets the display and shows its boot output (115200 baud, 10 s).</p>
 </section>
 
 <!-- ── Player ESP32 ──────────────────────────────────────────────── -->
@@ -90,14 +99,15 @@ async function flashFirmware(url, file, logEl, btn, idleLabel) {
   }
 
   try {
-    var resp = await fetch(url, {
-      method : 'POST',
-      body   : file,
-      headers: {
+    var opts = { method : 'POST' };
+    if (file) {   /* firmware upload; no body for e.g. the display-log request */
+      opts.body    = file;
+      opts.headers = {
         'Content-Type'  : 'application/octet-stream',
         'Content-Length': String(file.size)
-      }
-    });
+      };
+    }
+    var resp = await fetch(url, opts);
     if (!resp.ok) {
       appendLog('HTTP error: ' + resp.status + ' ' + resp.statusText + '\n');
       return;
@@ -132,7 +142,16 @@ dispInput.addEventListener('change', function(){
 
 dispBtn.addEventListener('click', function(){
   if (!dispInput.files.length) { alert('Choose a .bin file first.'); return; }
-  flashFirmware('/disp_update', dispInput.files[0], dispLog, dispBtn, '\u26A1 Flash Display');
+  var addr = document.getElementById('disp-addr').value.trim() || 'auto';
+  if (!/^(auto|0x[0-9a-fA-F]+|[0-9]+)$/i.test(addr)) { alert('Invalid flash address.'); return; }
+  var url = '/disp_update?addr=' + encodeURIComponent(addr);
+  if (document.getElementById('disp-log-chk').checked) url += '&log=10';
+  flashFirmware(url, dispInput.files[0], dispLog, dispBtn, '\u26A1 Flash Display');
+});
+
+var dispLogBtn = document.getElementById('disp-log-btn');
+dispLogBtn.addEventListener('click', function(){
+  flashFirmware('/disp_log?secs=10', null, dispLog, dispLogBtn, '\uD83D\uDC41 Show display log');
 });
 
 /* ── Player FW ── */

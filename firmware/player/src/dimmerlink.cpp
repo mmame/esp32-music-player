@@ -25,6 +25,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
@@ -61,6 +63,15 @@ static const uint8_t k_switch_i2c_cmd[2] = { 0x02u, 0x5Bu };
 
 static i2c_master_bus_handle_t s_bus = nullptr;
 static i2c_master_dev_handle_t s_dev = nullptr;
+
+/* Serialises every use of s_bus / s_dev: the io task sets the level while the web server task may
+ * suspend / resume the bus around a display OTA (use-after-free otherwise). */
+static StaticSemaphore_t s_lock_buf;
+static SemaphoreHandle_t s_lock = nullptr;
+static bool              s_present_before_suspend = false;   /* resume only restores a device that was there */
+
+static inline void dl_lock(void)   { if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY); }
+static inline void dl_unlock(void) { if (s_lock) xSemaphoreGive(s_lock); }
 
 /* ── I2C helpers ───────────────────────────────────────────────────────── */
 
@@ -142,6 +153,8 @@ static bool uart_switch_to_i2c(void)
 
 bool dimmerlink_probe(void)
 {
+    if (!s_lock) s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+
     /* ── 1. Prepare I2C master bus config (reused on retry) ─────────────── */
     i2c_master_bus_config_t bus_cfg;
     memset(&bus_cfg, 0, sizeof(bus_cfg));
@@ -284,18 +297,37 @@ void dimmerlink_set_level(uint8_t pct)
         ESP_LOGI(TAG, "level=%3u%% [%s]%s", pct, bar, s_dev ? "" : "  (no hw)");
     //}
 
+    dl_lock();
     if (!s_dev)
     {
+        dl_unlock();
         ESP_LOGI(TAG, "error: dimmerlink_set_level called but no device handle (not probed?)");
         return;
     }
      
     uint8_t buf[2] = { REG_DIM0_LEVEL, pct };
-    ESP_ERROR_CHECK(i2c_master_transmit(s_dev, buf, sizeof(buf), /*timeout_ms=*/30));
+    esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), /*timeout_ms=*/30);
+    dl_unlock();
+
+    /* A failed lamp update (NACK, timeout, bus busy) must never take the player down: report it,
+     * at most once every 2 s, and try again with the next level update. */
+    if (err != ESP_OK) {
+        static int64_t s_last_warn_us = 0;
+        static uint32_t s_fail_count  = 0;
+        s_fail_count++;
+        const int64_t now = esp_timer_get_time();
+        if (now - s_last_warn_us > 2000000LL) {
+            s_last_warn_us = now;
+            ESP_LOGW(TAG, "I2C write of level %u%% failed: %s (%lu failures so far)",
+                     (unsigned)pct, esp_err_to_name(err), (unsigned long)s_fail_count);
+        }
+    }
 }
 
 void dimmerlink_suspend(void)
 {
+    dl_lock();
+    s_present_before_suspend = (s_dev != nullptr);
     if (s_dev) {
         i2c_master_bus_rm_device(s_dev);
         s_dev = nullptr;
@@ -308,12 +340,20 @@ void dimmerlink_suspend(void)
      * The external 4.7 kΩ pull-up will hold the line HIGH during the    *
      * brief window before disp_ota pulls it LOW for download mode.      */
     gpio_reset_pin((gpio_num_t)DIMMERLINK_SCL_PIN);
+    dl_unlock();
     ESP_LOGI(TAG, "dimmerlink suspended (I2C released for display OTA)");
 }
 
 void dimmerlink_resume(void)
 {
-    if (s_bus) return;   /* already running */
+    dl_lock();
+    if (s_bus || !s_present_before_suspend) {
+        /* already running, or no DimmerLink was detected at boot: do NOT invent a device handle
+         * (writes to a non-existent device fail and used to abort the player). */
+        dl_unlock();
+        return;
+    }
+    s_present_before_suspend = false;
 
     i2c_master_bus_config_t bus_cfg;
     memset(&bus_cfg, 0, sizeof(bus_cfg));
@@ -326,6 +366,7 @@ void dimmerlink_resume(void)
 
     if (i2c_new_master_bus(&bus_cfg, &s_bus) != ESP_OK) {
         ESP_LOGE(TAG, "dimmerlink_resume: failed to recreate I2C bus");
+        dl_unlock();
         return;
     }
 
@@ -339,7 +380,9 @@ void dimmerlink_resume(void)
         ESP_LOGE(TAG, "dimmerlink_resume: failed to re-add device");
         i2c_del_master_bus(s_bus);
         s_bus = nullptr;
+        dl_unlock();
         return;
     }
+    dl_unlock();
     ESP_LOGI(TAG, "dimmerlink resumed (I2C restored after display OTA)");
 }

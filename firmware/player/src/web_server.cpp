@@ -43,6 +43,7 @@
 #include "esp_http_server.h"
 
 #include "disp_ota.h"
+#include "uart_master.h"
 #include "crank_config.h"
 #include "buttons.h"
 #include "potis.h"
@@ -948,15 +949,27 @@ static esp_err_t about_get_handler(httpd_req_t *req)
         sprintf(&sha_short[i * 2], "%02x", (unsigned)desc->app_elf_sha256[i]);
     }
 
-    char buf[320];
+    /* Display firmware info (reported by the display over UART); ask for it if not known yet. */
+    char disp_json[256] = "null";
+    um_display_info_t di;
+    if (uart_master_get_display_info(&di)) {
+        snprintf(disp_json, sizeof(disp_json),
+                 "{\"project\":\"%s\",\"version\":\"%s\",\"build\":\"%s\",\"idf\":\"%s\",\"resolution\":\"%s\"}",
+                 di.project, di.version, di.build, di.idf, di.resolution);
+    } else {
+        uart_master_request_display_info();
+    }
+
+    char buf[640];
     snprintf(buf, sizeof(buf),
-             "{\"project\":\"%s\",\"version\":\"%s\",\"idf\":\"%s\",\"build_date\":\"%s\",\"build_time\":\"%s\",\"build_hash\":\"%s\"}",
+             "{\"project\":\"%s\",\"version\":\"%s\",\"idf\":\"%s\",\"build_date\":\"%s\",\"build_time\":\"%s\",\"build_hash\":\"%s\",\"display\":%s}",
              desc->project_name,
              desc->version,
              desc->idf_ver,
              desc->date,
              desc->time,
-             sha_short);
+             sha_short,
+             disp_json);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
@@ -1263,7 +1276,9 @@ static esp_err_t player_update_post_handler(httpd_req_t *req)
  * invoke disp_ota_flash() to reflash the display ESP32.
  *
  * The response is chunked plain-text so the browser can stream progress.
- * addr query parameter sets the target flash address (default 0x10000).
+ * addr query parameter sets the target flash address; "auto" (default) picks 0x1000 (ESP32) or
+ * 0x0 (ESP32-S3) from the detected chip, for a merged full image.
+ * log query parameter (seconds, 0-30) captures the display boot log after the flash.
  * Content-Length must be set by the client; max 4 MB accepted.
  */
 static esp_err_t disp_update_post_handler(httpd_req_t *req)
@@ -1276,11 +1291,18 @@ static esp_err_t disp_update_post_handler(httpd_req_t *req)
     }
 
     /* Parse optional flash address (hex or decimal). */
-    uint32_t flash_addr = 0x10000u;
+    uint32_t flash_addr = DISP_OTA_ADDR_AUTO;
     char addr_str[24] = {};
-    if (get_query_param(req, "addr", addr_str, sizeof(addr_str))) {
-        long v = strtol(addr_str, nullptr, 0);
-        if (v > 0 && v < 0x1000000L) flash_addr = (uint32_t)v;
+    if (get_query_param(req, "addr", addr_str, sizeof(addr_str)) && addr_str[0] && strcasecmp(addr_str, "auto") != 0) {
+        char *endp = nullptr;
+        long v = strtol(addr_str, &endp, 0);
+        if (endp != addr_str && v >= 0 && v < 0x1000000L) flash_addr = (uint32_t)v;
+    }
+    uint32_t log_ms = 0;
+    char log_str[8] = {};
+    if (get_query_param(req, "log", log_str, sizeof(log_str))) {
+        long v = strtol(log_str, nullptr, 10);
+        if (v > 0 && v <= 30) log_ms = (uint32_t)v * 1000u;
     }
 
     /* Set up streaming plain-text response. */
@@ -1332,13 +1354,16 @@ static esp_err_t disp_update_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    snprintf(log_buf, sizeof(log_buf),
-             "Saved %d bytes. Flashing at 0x%08lX...\n",
-             received, (unsigned long)flash_addr);
+    if (flash_addr == DISP_OTA_ADDR_AUTO) {
+        snprintf(log_buf, sizeof(log_buf), "Saved %d bytes. Flashing (address chosen from the chip)...\n", received);
+    } else {
+        snprintf(log_buf, sizeof(log_buf), "Saved %d bytes. Flashing at 0x%08lX...\n",
+                 received, (unsigned long)flash_addr);
+    }
     SEND_LOG(log_buf);
 
     /* Flash the display – progress is streamed directly into req. */
-    esp_err_t flash_ret = disp_ota_flash(DISP_FW_TMP_PATH, flash_addr, req);
+    esp_err_t flash_ret = disp_ota_flash(DISP_FW_TMP_PATH, flash_addr, req, log_ms);
 
     remove(DISP_FW_TMP_PATH);
 
@@ -1354,6 +1379,27 @@ static esp_err_t disp_update_post_handler(httpd_req_t *req)
 #undef DISP_FW_TMP_PATH
 
     return (flash_ret == ESP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+/* ── POST /disp_log?secs=<1-30> ─────────────────────────────────────── */
+
+/** Reset the display and stream its boot log (console UART) as chunked plain text. */
+static esp_err_t disp_log_post_handler(httpd_req_t *req)
+{
+    uint32_t secs = 10;
+    char s[8] = {};
+    if (get_query_param(req, "secs", s, sizeof(s))) {
+        long v = strtol(s, nullptr, 10);
+        if (v > 0 && v <= 30) secs = (uint32_t)v;
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+
+    disp_ota_capture_log(req, secs * 1000u);
+
+    httpd_resp_send_chunk(req, nullptr, 0);
+    return ESP_OK;
 }
 
 /* ── GET /api/song_settings?name=<file.wav> ────────────────────────── */
@@ -1712,6 +1758,7 @@ static httpd_handle_t start_webserver(void)
         { "/rename",             HTTP_POST,   rename_post_handler,           nullptr },
         { "/delete",             HTTP_DELETE, delete_handler,                nullptr },
         { "/disp_update",        HTTP_POST,   disp_update_post_handler,      nullptr },
+        { "/disp_log",           HTTP_POST,   disp_log_post_handler,         nullptr },
         { "/player_update",      HTTP_POST,   player_update_post_handler,    nullptr },
         { "/api/song_settings",  HTTP_GET,    song_settings_get_handler,     nullptr },
         { "/api/song_settings",  HTTP_POST,   song_settings_post_handler,    nullptr },

@@ -28,10 +28,12 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_md5.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 
@@ -54,6 +56,13 @@ static const uint8_t SLIP_END_BYTE    = 0xC0;
 #define ROM_FLASH_BEGIN 0x02u
 #define ROM_FLASH_DATA  0x03u
 #define ROM_FLASH_END   0x04u
+#define ROM_READ_REG    0x0Au
+#define ROM_SPI_FLASH_MD5 0x13u
+
+/* Chip identification: the value of the register at 0x40001000 (same as esptool). */
+#define CHIP_MAGIC_REG       0x40001000u
+#define CHIP_MAGIC_ESP32     0x00F01D83u
+#define CHIP_MAGIC_ESP32S3   0x00000009u
 
 #define FLASH_BLOCK_SIZE  0x400u    /* 1 KB per FLASH_DATA block (ROM loader; stub uses 0x4000) */
 #define OTA_BAUD_RATE     460800    /* baud after CHANGE_BAUDRATE                       */
@@ -214,6 +223,29 @@ static bool rom_wait_resp(uint8_t cmd, int timeout_ms)
     return false;
 }
 
+/**
+ * Like rom_wait_resp(), but also returns the response "value" field (header bytes 4..7),
+ * which carries the register content for READ_REG.
+ */
+static bool rom_wait_resp_value(uint8_t cmd, int timeout_ms, uint32_t *value)
+{
+    uint8_t frame[64];
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000LL;
+
+    while (esp_timer_get_time() < deadline) {
+        int remaining_ms = (int)((deadline - esp_timer_get_time()) / 1000LL);
+        if (remaining_ms <= 0) break;
+
+        int len = rom_recv_frame(frame, (int)sizeof(frame), remaining_ms);
+        if (len < 10 || frame[0] != 0x01 || frame[1] != cmd) continue;
+        if (frame[8] != 0x00) return false;
+        *value = (uint32_t)frame[4] | ((uint32_t)frame[5] << 8) |
+                 ((uint32_t)frame[6] << 16) | ((uint32_t)frame[7] << 24);
+        return true;
+    }
+    return false;
+}
+
 /* ── ROM bootloader commands ─────────────────────────────────────────── */
 
 static bool rom_sync(void)
@@ -265,6 +297,66 @@ static bool rom_sync(void)
     return false;
 }
 
+/**
+ * SPI_FLASH_MD5: ask the ROM loader for the MD5 of `size` bytes of flash at `addr`.
+ * The ROM returns it as 32 ASCII hex characters followed by 2 status bytes.
+ */
+static bool rom_flash_md5(uint32_t addr, uint32_t size, char hex[33])
+{
+    uint8_t payload[16] = {};
+    for (int i = 0; i < 4; i++) {
+        payload[i]     = (uint8_t)(addr >> (8 * i));
+        payload[4 + i] = (uint8_t)(size >> (8 * i));
+    }
+    rom_send_cmd(ROM_SPI_FLASH_MD5, payload, sizeof(payload), 0);
+
+    uint8_t frame[64];
+    const int64_t deadline = esp_timer_get_time() + 20LL * 1000000LL;
+    while (esp_timer_get_time() < deadline) {
+        int remaining_ms = (int)((deadline - esp_timer_get_time()) / 1000LL);
+        if (remaining_ms <= 0) break;
+        int len = rom_recv_frame(frame, (int)sizeof(frame), remaining_ms);
+        if (len < 10 || frame[0] != 0x01 || frame[1] != ROM_SPI_FLASH_MD5) continue;
+        const int dsz = frame[2] | (frame[3] << 8);          /* data + 2 status bytes */
+        if (dsz < 34 || len < 8 + dsz) return false;
+        if (frame[8 + dsz - 2] != 0x00) return false;         /* command reported an error */
+        memcpy(hex, &frame[8], 32);
+        hex[32] = '\0';
+        return true;
+    }
+    return false;
+}
+
+/** Chip families differ in the FLASH_BEGIN layout, so identify the connected chip first. */
+static bool s_flash_begin_has_encrypt_field = true;   /* newer chips (S3, ...): 20-byte payload */
+static int  s_chip_kind = 0;                          /* 0 unknown, 1 ESP32, 2 ESP32-S3 */
+
+static void rom_detect_chip(httpd_req_t *req)
+{
+    uint8_t payload[4] = { (uint8_t)(CHIP_MAGIC_REG), (uint8_t)(CHIP_MAGIC_REG >> 8),
+                           (uint8_t)(CHIP_MAGIC_REG >> 16), (uint8_t)(CHIP_MAGIC_REG >> 24) };
+    uint32_t magic = 0;
+    s_chip_kind = 0;
+    rom_send_cmd(ROM_READ_REG, payload, sizeof(payload), 0);
+    if (!rom_wait_resp_value(ROM_READ_REG, 1000, &magic)) {
+        progress(req, "Warning: chip detection failed - assuming ESP32-S3 style FLASH_BEGIN");
+        return;
+    }
+    if (magic == CHIP_MAGIC_ESP32) {
+        s_flash_begin_has_encrypt_field = false;   /* original ESP32: 16-byte FLASH_BEGIN */
+        s_chip_kind = 1;
+        progress(req, "Display chip: ESP32 (magic 0x%08lX)", (unsigned long)magic);
+    } else if (magic == CHIP_MAGIC_ESP32S3) {
+        s_flash_begin_has_encrypt_field = true;
+        s_chip_kind = 2;
+        progress(req, "Display chip: ESP32-S3 (magic 0x%08lX)", (unsigned long)magic);
+    } else {
+        s_flash_begin_has_encrypt_field = true;
+        progress(req, "Display chip: unknown (magic 0x%08lX) - assuming S3-style FLASH_BEGIN",
+                 (unsigned long)magic);
+    }
+}
+
 static bool rom_spi_attach(void)
 {
     static const uint8_t payload[8] = {0};   /* all zeros for standard SPI flash */
@@ -294,11 +386,11 @@ static bool rom_change_baud(uint32_t new_baud)
 /**
  * FLASH_BEGIN: erase the flash region and prepare for writing.
  *
- * For ESP32-S3 (and all non-ESP8266 chips), esp-serial-flasher sets
- * encryption_in_begin_flash_cmd = true, which means the payload is 20 bytes:
+ * ESP32-S3 and newer chips take a 20-byte payload:
  *   [erase_size][packet_count][packet_size][offset][encrypted]
- * Sending only 16 bytes (no encrypted field) causes the ROM to return
- * INVALID_COMMAND (0x05) because the size field in the header is wrong.
+ * (16 bytes there makes the ROM return INVALID_COMMAND 0x05).  The original ESP32
+ * ROM is the opposite: it only accepts the 16-byte form, so the payload length
+ * depends on the chip detected by rom_detect_chip().
  * erase_size = fw_size directly (not sector-aligned) — the ROM handles
  * alignment internally. calc_erase_size() in esp-serial-flasher confirms this.
  */
@@ -336,7 +428,7 @@ static bool rom_flash_begin(uint32_t fw_size, uint32_t addr)
     /* encrypted = 0 (already zero from = {}) — required for ESP32-S3 ROM  */
     /* payload[16..19] = 0x00000000                                         */
 
-    rom_send_cmd(ROM_FLASH_BEGIN, payload, 20, 0);   /* 20 bytes for ESP32-S3 */
+    rom_send_cmd(ROM_FLASH_BEGIN, payload, s_flash_begin_has_encrypt_field ? 20 : 16, 0);
     /* Erase can be slow: allow up to 60 s for a large region. */
     return rom_wait_resp(ROM_FLASH_BEGIN, 60000);
 }
@@ -443,7 +535,84 @@ void disp_ota_init(void)
     ESP_LOGI(TAG, "Display pins initialised: RST=HIGH (BOOT0 managed by I2C)");
 }
 
-esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req)
+/* ── Display boot-log capture ───────────────────────────────────────── */
+
+/**
+ * Read the display's console output (UART0 -> our UART1 RX, 115200 baud) for `duration_ms` and
+ * stream it line by line into the HTTP response / ESP log.  ANSI colour codes are stripped.
+ * The caller must have set the baud rate to 115200 and (re)started the display just before.
+ */
+static void stream_display_log(httpd_req_t *req, uint32_t duration_ms)
+{
+    progress(req, "--- Display boot log (115200 baud, %lu s) ---", (unsigned long)(duration_ms / 1000u));
+
+    char     line[160];
+    size_t   n = 0, total = 0, nonprint = 0;
+    int      esc = 0;                       /* 0 text, 1 after ESC, 2 inside CSI */
+    uint8_t  buf[64];
+    const int64_t end = esp_timer_get_time() + (int64_t)duration_ms * 1000LL;
+
+    while (esp_timer_get_time() < end) {
+        int got = uart_read_bytes(OTA_PORT, buf, sizeof(buf), pdMS_TO_TICKS(50));
+        for (int i = 0; i < got; i++) {
+            const uint8_t c = buf[i];
+            total++;
+            if (esc == 1) { esc = (c == '[') ? 2 : 0; continue; }
+            if (esc == 2) { if (c >= 0x40 && c <= 0x7E) esc = 0; continue; }
+            if (c == 0x1B) { esc = 1; continue; }
+            if (c == '\r') continue;
+            if (c == '\n') {
+                if (n) { line[n] = '\0'; progress(req, "%s", line); n = 0; }
+                continue;
+            }
+            if (c >= 0x20 && c < 0x7F) line[n++] = (char)c;
+            else { line[n++] = '.'; nonprint++; }
+            if (n >= sizeof(line) - 1) { line[n] = '\0'; progress(req, "%s", line); n = 0; }
+        }
+    }
+    if (n) { line[n] = '\0'; progress(req, "%s", line); }
+
+    if (total == 0) {
+        progress(req, "(no data received - display not booting, or its UART TX is not connected)");
+    } else if (nonprint * 4 > total) {
+        progress(req, "(mostly non-text bytes: wrong baud rate or the display is running at a different speed)");
+    }
+    progress(req, "--- end of display log (%lu bytes) ---", (unsigned long)total);
+}
+
+esp_err_t disp_ota_capture_log(httpd_req_t *req, uint32_t duration_ms)
+{
+    progress(req, "Pausing normal UART link...");
+    uart_master_pause();                       /* leaves UART1 at 115200 */
+
+    dimmerlink_suspend();
+    {
+        const gpio_config_t boot0_cfg = {
+            .pin_bit_mask = (1ULL << DISP_ESP32_BOOT0_PIN),
+            .mode         = GPIO_MODE_OUTPUT,
+            .pull_up_en   = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&boot0_cfg);
+    }
+    boot0_set(1);                              /* GPIO0 HIGH = normal boot */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    rst_set(0);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    uart_flush_input(OTA_PORT);
+    rst_set(1);                                /* display boots now */
+
+    stream_display_log(req, duration_ms);
+
+    gpio_reset_pin((gpio_num_t)DISP_ESP32_BOOT0_PIN);
+    dimmerlink_resume();
+    progress(req, "Resuming normal UART link...");
+    uart_master_resume();
+    return ESP_OK;
+}
+
+esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req, uint32_t log_ms)
 {
     esp_err_t result  = ESP_FAIL;
     uint8_t  *block   = nullptr;
@@ -567,6 +736,18 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
             goto cleanup_uart;
         }
         progress(req, "SPI_ATTACH OK");
+        rom_detect_chip(req);
+
+        if (flash_addr == DISP_OTA_ADDR_AUTO) {
+            if (s_chip_kind == 1)      flash_addr = 0x1000u;   /* ESP32: the full image starts at the bootloader */
+            else if (s_chip_kind == 2) flash_addr = 0x0u;      /* ESP32-S3 */
+            else {
+                progress(req, "ERROR: unknown display chip - cannot choose the flash address, enter it manually");
+                goto cleanup_uart;
+            }
+            progress(req, "Flash address (auto): 0x%08lX  [full image: bootloader + partition table + app]",
+                     (unsigned long)flash_addr);
+        }
 
         /* ── 7. CHANGE_BAUDRATE (optional speed-up) ──────────────────── */
         progress(req, "Switching to %d baud...", OTA_BAUD_RATE);
@@ -577,42 +758,73 @@ esp_err_t disp_ota_flash(const char *path, uint32_t flash_addr, httpd_req_t *req
             progress(req, "Baud rate changed to %d", OTA_BAUD_RATE);
         }
 
-        /* ── 8. FLASH_BEGIN (erase) ───────────────────────────────────── */
-        vTaskDelay(pdMS_TO_TICKS(50));   /* settle after baud change         */
-        progress(req, "Erasing flash: %lu bytes at 0x%08lX...",
-                 (unsigned long)fw_size, (unsigned long)flash_addr);
-        if (!rom_flash_begin(fw_size, flash_addr)) {
-            progress(req, "ERROR: FLASH_BEGIN / erase failed");
-            goto cleanup_uart;
-        }
-        progress(req, "Erase OK");
+        /* ── 8./9. FLASH_BEGIN (erase), FLASH_DATA blocks, MD5 verify (max. 2 attempts) ── */
+        bool verified;   /* no initializer here: gotos above jump past this declaration */
+        verified = false;
+        for (int attempt = 1; attempt <= 2 && !verified; attempt++) {
+            if (attempt > 1) progress(req, "Retrying erase + write (attempt %d of 2)...", attempt);
 
-        /* ── 9. FLASH_DATA blocks ──────────────────────────────────────── */
-        fw_file = fopen(path, "rb");
-        if (!fw_file) {
-            progress(req, "ERROR: Cannot reopen firmware file");
-            goto cleanup_uart;
-        }
+            vTaskDelay(pdMS_TO_TICKS(50));   /* settle after baud change         */
+            progress(req, "Erasing flash: %lu bytes at 0x%08lX...",
+                     (unsigned long)fw_size, (unsigned long)flash_addr);
+            if (!rom_flash_begin(fw_size, flash_addr)) {
+                progress(req, "ERROR: FLASH_BEGIN / erase failed");
+                goto cleanup_uart;
+            }
+            progress(req, "Erase OK");
 
-        for (uint32_t seq = 0; seq < num_blocks; seq++) {
-            memset(block, 0xFF, FLASH_BLOCK_SIZE);         /* pad with 0xFF  */
-            size_t rd = fread(block, 1, FLASH_BLOCK_SIZE, fw_file);
-            if (rd == 0 && seq < num_blocks - 1u) {
-                progress(req, "ERROR: Unexpected EOF at block %lu", (unsigned long)seq);
-                goto cleanup_file;
+            fw_file = fopen(path, "rb");
+            if (!fw_file) {
+                progress(req, "ERROR: Cannot reopen firmware file");
+                goto cleanup_uart;
             }
 
-            if (!rom_flash_data_block(block, seq)) {
-                progress(req, "ERROR: FLASH_DATA failed at block %lu", (unsigned long)seq);
-                goto cleanup_file;
-            }
+            md5_context_t md5ctx;
+            esp_rom_md5_init(&md5ctx);
 
-            int pct = (int)((seq + 1u) * 100u / num_blocks);
-            progress(req, "Writing: block %lu/%lu  (%d%%)",
-                     (unsigned long)(seq + 1u), (unsigned long)num_blocks, pct);
+            for (uint32_t seq = 0; seq < num_blocks; seq++) {
+                memset(block, 0xFF, FLASH_BLOCK_SIZE);         /* pad with 0xFF  */
+                size_t rd = fread(block, 1, FLASH_BLOCK_SIZE, fw_file);
+                if (rd == 0 && seq < num_blocks - 1u) {
+                    progress(req, "ERROR: Unexpected EOF at block %lu", (unsigned long)seq);
+                    goto cleanup_file;
+                }
+                esp_rom_md5_update(&md5ctx, block, (uint32_t)rd);
+
+                if (!rom_flash_data_block(block, seq)) {
+                    progress(req, "ERROR: FLASH_DATA failed at block %lu", (unsigned long)seq);
+                    goto cleanup_file;
+                }
+
+                int pct = (int)((seq + 1u) * 100u / num_blocks);
+                progress(req, "Writing: block %lu/%lu  (%d%%)",
+                         (unsigned long)(seq + 1u), (unsigned long)num_blocks, pct);
+            }
+            fclose(fw_file);
+            fw_file = nullptr;
+
+            uint8_t digest[16];
+            esp_rom_md5_final(digest, &md5ctx);
+            char want[33];
+            for (int i = 0; i < 16; i++) snprintf(&want[2 * i], 3, "%02x", digest[i]);
+
+            progress(req, "Verifying flash (MD5)...");
+            char got[33] = {};
+            if (!rom_flash_md5(flash_addr, fw_size, got)) {
+                progress(req, "WARNING: ROM did not return an MD5 - cannot verify, assuming OK");
+                verified = true;
+            } else if (strncasecmp(want, got, 32) == 0) {
+                progress(req, "Verify OK (MD5 %s)", got);
+                verified = true;
+            } else {
+                progress(req, "VERIFY FAILED: file MD5 %s, flash MD5 %s", want, got);
+            }
         }
-        fclose(fw_file);
-        fw_file = nullptr;
+        if (!verified) {
+            progress(req, "ERROR: flash verification failed twice - the display firmware is NOT valid. "
+                          "Try again (check wiring / power).");
+            goto cleanup_uart;
+        }
 
         /* ── 10. FLASH_END ───────────────────────────────────────────── */
         progress(req, "Finalising flash...");
@@ -627,15 +839,19 @@ cleanup_file:
 cleanup_uart:
         /* ── 11. Restore normal operation ───────────────────────────── */
         /* No uart_driver_delete needed – driver was kept alive.        */
+        uart_set_baudrate(OTA_PORT, 115200);   /* display console speed (boot log) */
         boot0_set(1);                    /* BOOT0 HIGH = normal boot     */
         vTaskDelay(pdMS_TO_TICKS(500));
         rst_set(0);
         vTaskDelay(pdMS_TO_TICKS(200));
+        uart_flush_input(OTA_PORT);
         rst_set(1);          /* display boots normally                  */
 
         /* Release BOOT0 pin so I2C can reclaim GPIO4.                  */
         gpio_reset_pin((gpio_num_t)DISP_ESP32_BOOT0_PIN);
         dimmerlink_resume();
+
+        if (log_ms > 0) stream_display_log(req, log_ms);
 
         progress(req, "Resuming normal UART link...");
         uart_master_resume();

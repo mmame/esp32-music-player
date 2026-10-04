@@ -378,6 +378,56 @@ void uart_master_send_encoder_btn(void)
     send_packet(CMD_ENCODER_BTN, nullptr, 0);
 }
 
+/* ── Display firmware info ─────────────────────────────────────────────────── */
+
+static um_display_info_t s_display_info;
+static volatile bool     s_display_info_valid = false;
+
+/** Copy one '|'-separated field into dst (sanitised for JSON); returns the pointer past the separator. */
+static const char *take_field(const char *src, char *dst, size_t dst_size)
+{
+    size_t n = 0;
+    while (*src && *src != '|') {
+        char c = *src++;
+        if (c == '"' || c == '\\' || (unsigned char)c < 0x20) c = '_';
+        if (n + 1 < dst_size) dst[n++] = c;
+    }
+    dst[n] = '\0';
+    return (*src == '|') ? src + 1 : src;
+}
+
+static void store_display_info(const uint8_t *payload, uint8_t len)
+{
+    char text[UM_MAX_PAYLOAD + 1];
+    memcpy(text, payload, len);
+    text[len] = '\0';
+
+    um_display_info_t info = {};
+    const char *p = text;
+    p = take_field(p, info.project,    sizeof(info.project));
+    p = take_field(p, info.version,    sizeof(info.version));
+    p = take_field(p, info.build,      sizeof(info.build));
+    p = take_field(p, info.idf,        sizeof(info.idf));
+    p = take_field(p, info.resolution, sizeof(info.resolution));
+
+    s_display_info       = info;
+    s_display_info_valid = true;
+    ESP_LOGI(TAG, "Display firmware: %s %s (%s, IDF %s, %s)",
+             info.project, info.version, info.build, info.idf, info.resolution);
+}
+
+bool uart_master_get_display_info(um_display_info_t *out)
+{
+    if (!s_display_info_valid) return false;
+    if (out) *out = s_display_info;
+    return true;
+}
+
+void uart_master_request_display_info(void)
+{
+    send_packet(CMD_DISPLAY_INFO_REQ, nullptr, 0);
+}
+
 /* ── CMD_BUTTON_PRESS ──────────────────────────────────────────────────────── */
 
 void uart_master_send_button_press(uint8_t target)
@@ -524,7 +574,12 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         if (s_on_resume) s_on_resume();
         break;
 
+    case CMD_DISPLAY_INFO:
+        store_display_info(payload, len);
+        break;
+
     case CMD_DISPLAY_READY:
+        s_display_info_valid = false;   /* a fresh CMD_DISPLAY_INFO follows */
         ESP_LOGI(TAG, "CMD_DISPLAY_READY received – display was reset");
         if (s_on_display_ready) s_on_display_ready();
         break;
