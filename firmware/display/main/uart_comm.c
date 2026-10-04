@@ -25,6 +25,8 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
+#include <stdio.h>
 #include <string.h>
 
 #include "uart_comm.h"
@@ -116,6 +118,23 @@ static void uart_task(void *arg);
 static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len);
 static void enqueue_pending_cmd(uint8_t cmd_id, const uint8_t *params, uint8_t param_len);
 static void send_response(void);
+
+/* ---------- Display firmware info (CMD_DISPLAY_INFO) ---------------------- */
+
+static char s_display_res[12] = "";   /* "800x480", cached in uart_comm_init() */
+
+/** Queue the build info of this firmware for the player: "project|version|build date time|idf|WxH". */
+static void queue_display_info(void)
+{
+    const esp_app_desc_t *d = esp_app_get_description();
+    char text[PENDING_CMD_MAX_PARAMS];
+    int n = snprintf(text, sizeof(text), "%.20s|%.30s|%.11s %.8s|%.12s|%.11s",
+                     d->project_name, d->version, d->date, d->time, d->idf_ver, s_display_res);
+    if (n < 0) return;
+    if (n >= (int)sizeof(text)) n = (int)sizeof(text) - 1;
+    enqueue_pending_cmd(CMD_DISPLAY_INFO, (const uint8_t *)text, (uint8_t)n);
+    ESP_LOGI(TAG, "CMD_DISPLAY_INFO queued: %s", text);
+}
 
 /* =========================================================================
  * Public API
@@ -295,6 +314,13 @@ void uart_comm_init(void)
      * CMD_ACK response (to CMD_SYNC or CMD_SET_STATE). */
     enqueue_pending_cmd(CMD_DISPLAY_READY, NULL, 0);
     ESP_LOGI(TAG, "CMD_DISPLAY_READY queued");
+
+    /* Cache the resolution for CMD_DISPLAY_INFO. The info itself is sent only when the player asks
+     * for it (CMD_DISPLAY_INFO_REQ), so the boot-time ACK stays identical to the old firmware. */
+    lv_lock();
+    snprintf(s_display_res, sizeof(s_display_res), "%dx%d",
+             (int)lv_display_get_horizontal_resolution(NULL), (int)lv_display_get_vertical_resolution(NULL));
+    lv_unlock();
 }
 
 void uart_comm_update_touch(bool active, int16_t x, int16_t y)
@@ -566,6 +592,10 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
     }
 
     /* ------------------------------------------------------------------ */
+    case CMD_DISPLAY_INFO_REQ:
+        queue_display_info();
+        break;
+
     case CMD_BUTTON_PRESS:
         /*
          * Payload: 1 byte – which player-screen button a physical press triggered

@@ -26,6 +26,8 @@
 #pragma once
 
 #include <stdint.h>
+#include "sdkconfig.h"
+#include "driver/gpio.h"
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -33,9 +35,16 @@ extern "C" {
 #endif
 
 /* ---------- Hardware configuration ---------- */
+#if CONFIG_DISPLAY_BOARD_8048S050C
+#define UART_COMM_TX_GPIO       GPIO_NUM_43   /* ESP32-8048S050C: UART0 header */
+#define UART_COMM_RX_GPIO       GPIO_NUM_44
+#else
+#define UART_COMM_TX_GPIO       GPIO_NUM_1    /* ESP32-2432S032: UART0 pins (U0TXD) - the ROM download */
+#define UART_COMM_RX_GPIO       GPIO_NUM_3    /* loader (player OTA) listens here, so the link shares them */
+#endif
 #define UART_COMM_PORT          UART_NUM_1
-#define UART_COMM_TX_PIN        GPIO_NUM_43
-#define UART_COMM_RX_PIN        GPIO_NUM_44
+#define UART_COMM_TX_PIN        UART_COMM_TX_GPIO
+#define UART_COMM_RX_PIN        UART_COMM_RX_GPIO
 #define UART_COMM_BAUD_RATE     921600
 #define UART_COMM_RX_BUF_SIZE   (2048)
 
@@ -80,6 +89,8 @@ static const uint8_t UART_MAGIC_BYTES[8] = {
 #define CMD_DOWNMIX_MODE        0x16  /* Display -> Host: set stereo->mono mode (0=mix,1=ch1,2=ch2) */
 #define CMD_SET_END_ACTION      0x17  /* Display -> Host: player-mode end-of-song action (0=stop,1=next,2=repeat) */
 #define CMD_BUTTON_PRESS        0x18  /* Host -> Display: flash an on-screen player button (physical press feedback) */
+#define CMD_DISPLAY_INFO        0x19  /* Display -> Host: display firmware info "project|version|build|idf|WxH" (text) */
+#define CMD_DISPLAY_INFO_REQ    0x1A  /* Host -> Display: request CMD_DISPLAY_INFO (no payload)  */
 #define CMD_ACK                 0xFF  /* Display -> Host: sync acknowledgement              */
 
 /* ---------- Global system state ---------- */

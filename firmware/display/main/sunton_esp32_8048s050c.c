@@ -19,6 +19,7 @@
 #include "driver/ledc.h"
 #include "lvgl.h"
 
+#include "display_board.h"
 #include "sunton_esp32_8048s050c.h"
 
 const esp_lcd_rgb_panel_config_t panel_config = {
@@ -71,7 +72,7 @@ static TaskHandle_t lvgl_port_task_handle = NULL;
 static esp_timer_handle_t lvgl_tick_timer_handle = NULL;
 static lv_indev_t * indev_touchpad = NULL;
 
-void sunton_esp32s3_backlight_init(void)
+void board_backlight_init(void)
 {
     ledc_timer_config_t ledc_timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
@@ -144,7 +145,7 @@ static void lvgl_tick(void *arg)
     lv_tick_inc(LVGL_TICK_PERIOD_MS);
 }
 
-lv_display_t *sunton_esp32s3_lcd_init(void)
+lv_display_t *board_lcd_init(void)
 {
     void *buf1 = NULL;
     void *buf2 = NULL;
@@ -192,7 +193,7 @@ lv_display_t *sunton_esp32s3_lcd_init(void)
     return disp;
 }
 
-i2c_master_bus_handle_t sunton_esp32s3_i2c_master(void)
+i2c_master_bus_handle_t board_i2c_master(void)
 {
     i2c_master_bus_handle_t touch_i2c_bus_handle = NULL;
     const i2c_master_bus_config_t touch_i2c_bus_config = {
@@ -364,7 +365,7 @@ static esp_lcd_touch_handle_t touch_init(i2c_master_bus_handle_t i2c_master)
     return touch_handle;
 }
 
-void sunton_esp32s3_touch_init(i2c_master_bus_handle_t i2c_master)
+void board_touch_init(i2c_master_bus_handle_t i2c_master)
 {
     indev_touchpad = lv_indev_create();
     lv_indev_set_type(indev_touchpad, LV_INDEV_TYPE_POINTER);

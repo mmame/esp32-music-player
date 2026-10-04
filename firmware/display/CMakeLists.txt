@@ -5,4 +5,9 @@
 cmake_minimum_required(VERSION 3.12)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(ESP32-8048S050C)
+# Binary name follows the board (IDF_TARGET is already known here): esp32 = 2432S032, esp32s3 = 8048S050C
+if(IDF_TARGET STREQUAL "esp32")
+    project(ESP32-2432S032C)
+else()
+    project(ESP32-8048S050C)
+endif()

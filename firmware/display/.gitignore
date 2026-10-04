@@ -2,3 +2,7 @@ build/
 managed_components/
 sdkconfig
 sdkconfig.old
+build_*/
+sdkconfig.2432s032*
+sdkconfig.8048s050c*
+release/

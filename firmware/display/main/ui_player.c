@@ -21,6 +21,7 @@
 #include "lvgl.h"
 #include "ui_player.h"
 #include "ui_songlist.h"
+#include "ui_layout.h"
 #include "uart_comm.h"
 
 static const char *TAG = "ui_player";
@@ -28,57 +29,71 @@ static const char *TAG = "ui_player";
 /* =========================================================================
  * Layout constants
  * ========================================================================= */
-#define SPLIT_X          600    /* left / right panel boundary              */
-#define RIGHT_W          200    /* right panel width                        */
-#define SCREEN_H         480
+/* Layout values are chosen at runtime from the display resolution (see
+ * layout_init()); the macros keep the rest of the file readable.            */
+typedef struct {
+    bool compact;
+    int32_t split_x, right_w, screen_h;
+    int32_t title_y, nowplay_y, progress_y, progress_h, pad_x;
+    int32_t time_y, status_y, next_song_y;
+    int32_t stop_y, stop_w, stop_h, next_w, gear_w, gear_h, btn_gap, shift_x;
+    int32_t pm_side_w, pm_pp_w, pm_gap, pm_prev_x;
+    int32_t pm_end_x, pm_end_cap_y, pm_end_btn_y, pm_end_w, pm_end_h;
+    int32_t dmx_x, dmx_y, dmx_w, dmx_h, dmx_dx, dmx_dy;
+    const lv_font_t *f_title, *f_time, *f_end;
+} layout_t;
+static layout_t L;
 
-/* Left panel */
-#define TITLE_Y          28     /* song title top edge                      */
-#define NOWPLAY_Y        82     /* "NOW PLAYING" label top edge             */
-#define PROGRESS_Y       130    /* progress bar top edge                    */
-#define PROGRESS_H       44     /* progress bar height                      */
-#define PROGRESS_PAD_X   30     /* horizontal padding inside left panel     */
-#define STOP_Y           370    /* button row top edge                      */
-#define STOP_W           110    /* icon-only STOP button width              */
-#define STOP_H           80     /* button height (shared)                   */
-#define NEXT_BTN_W       110    /* icon-only NEXT button width              */
-#define BTN_GAP          20     /* gap between adjacent buttons             */
-#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass (1.0x) label row          */
-#define HOLD_LBL_Y       (VAL_LABEL_Y + 24) /* "HOLD" label row (under TMP bar)  */
-#define TIME_LABEL_Y     (PROGRESS_Y + PROGRESS_H + 8)  /* elapsed/total label */
-#define STATUS_LBL_Y     (TIME_LABEL_Y + 36)  /* loop / 1.0x indicator row (left panel) */
-#define NEXT_SONG_LBL_Y  (STATUS_LBL_Y + 24)  /* next-song name label              */
-#define GEAR_BTN_W       80
-#define GEAR_BTN_H       80
-#define BTN_ROW_SHIFT_X  90
+#define SPLIT_X          (L.split_x)    /* left / right panel boundary       */
+#define RIGHT_W          (L.right_w)    /* right panel width (0 = compact)   */
+#define SCREEN_H         (L.screen_h)
+#define TITLE_Y          (L.title_y)
+#define NOWPLAY_Y        (L.nowplay_y)
+#define PROGRESS_Y       (L.progress_y)
+#define PROGRESS_H       (L.progress_h)
+#define PROGRESS_PAD_X   (L.pad_x)
+#define STOP_Y           (L.stop_y)
+#define STOP_W           (L.stop_w)
+#define STOP_H           (L.stop_h)
+#define NEXT_BTN_W       (L.next_w)
+#define BTN_GAP          (L.btn_gap)
+#define TIME_LABEL_Y     (L.time_y)
+#define STATUS_LBL_Y     (L.status_y)
+#define NEXT_SONG_LBL_Y  (L.next_song_y)
+#define GEAR_BTN_W       (L.gear_w)
+#define GEAR_BTN_H       (L.gear_h)
+#define BTN_ROW_SHIFT_X  (L.shift_x)
+#define BYPASS_CHECK_Y_R (VAL_LABEL_Y + 24) /* bypass (1.0x) label row (full layout) */
+#define HOLD_LBL_Y       (VAL_LABEL_Y + 24) /* "HOLD" label row (full layout)        */
 /* Centered button row [STOP][gap][NEXT][gap][GEAR] */
 #define STOP_BTN_X       (((SPLIT_X - STOP_W - BTN_GAP - NEXT_BTN_W - BTN_GAP - GEAR_BTN_W) / 2) + BTN_ROW_SHIFT_X)
 #define NEXT_BTN_X       (STOP_BTN_X + STOP_W + BTN_GAP)
 #define GEAR_BTN_X       (NEXT_BTN_X + NEXT_BTN_W + BTN_GAP)
 
 /* Player mode: [PREV][PLAY/PAUSE][NEXT][STOP] row + end-of-song toggle */
-#define PM_SIDE_W        80
-#define PM_PP_W          120
-#define PM_GAP           16
-#define PM_PREV_X        160
+#define PM_SIDE_W        (L.pm_side_w)
+#define PM_PP_W          (L.pm_pp_w)
+#define PM_GAP           (L.pm_gap)
+#define PM_PREV_X        (L.pm_prev_x)
 #define PM_PP_X          (PM_PREV_X + PM_SIDE_W + PM_GAP)
 #define PM_NEXT_X        (PM_PP_X + PM_PP_W + PM_GAP)
 #define PM_STOP_X        (PM_NEXT_X + PM_SIDE_W + PM_GAP)
-#define PM_END_X         430
-#define PM_END_CAP_Y     278
-#define PM_END_BTN_Y     298
-#define PM_END_BTN_W     140
-#define PM_END_BTN_H     56
+#define PM_END_X         (L.pm_end_x)
+#define PM_END_CAP_Y     (L.pm_end_cap_y)
+#define PM_END_BTN_Y     (L.pm_end_btn_y)
+#define PM_END_BTN_W     (L.pm_end_w)
+#define PM_END_BTN_H     (L.pm_end_h)
 #define PM_TAP_HOLD_MS   1500   /* ignore player state for this long after a local tap */
 
-/* Left-side downmix selector (3 stacked buttons) */
-#define DOWNMIX_COL_X    34
-#define DOWNMIX_COL_Y    288
-#define DOWNMIX_COL_W    92
-#define DOWNMIX_BTN_H    50
-#define DOWNMIX_BTN_GAP  10
+/* Downmix selector (3 buttons: stacked on the full layout, in a row on compact) */
+#define DOWNMIX_COL_X    (L.dmx_x)
+#define DOWNMIX_COL_Y    (L.dmx_y)
+#define DOWNMIX_COL_W    (L.dmx_w)
+#define DOWNMIX_BTN_H    (L.dmx_h)
+#define DOWNMIX_DX       (L.dmx_dx)
+#define DOWNMIX_DY       (L.dmx_dy)
 
-/* Right panel – two indicator columns */
+/* Right panel – two indicator columns (full layout only) */
 #define COL_W            (RIGHT_W / 2)   /* 100 px per column               */
 #define BAR_W            34              /* indicator bar width              */
 #define BAR_LIVE_W       8               /* slim live-speed overlay bar      */
@@ -86,6 +101,41 @@ static const char *TAG = "ui_player";
 #define BAR_TOP_Y        55              /* bar top edge inside right panel  */
 #define COLLABEL_Y       12              /* column name label top edge       */
 #define VAL_LABEL_Y      (BAR_TOP_Y + BAR_H + 10) /* value text top edge   */
+
+static void layout_init(void)
+{
+    const int32_t w = lv_display_get_horizontal_resolution(NULL);
+    const int32_t h = lv_display_get_vertical_resolution(NULL);
+    L.compact  = ui_is_compact();
+    L.screen_h = h;
+
+    if (!L.compact) {
+        /* 800x480 */
+        L.split_x = 600; L.right_w = w - 600;
+        L.title_y = 28; L.nowplay_y = 82; L.progress_y = 130; L.progress_h = 44; L.pad_x = 30;
+        L.time_y = L.progress_y + L.progress_h + 8; L.status_y = L.time_y + 36; L.next_song_y = L.status_y + 24;
+        L.stop_y = 370; L.stop_w = 110; L.stop_h = 80; L.next_w = 110; L.gear_w = 80; L.gear_h = 80;
+        L.btn_gap = 20; L.shift_x = 90;
+        L.pm_side_w = 80; L.pm_pp_w = 120; L.pm_gap = 16; L.pm_prev_x = 160;
+        L.pm_end_x = 430; L.pm_end_cap_y = 278; L.pm_end_btn_y = 298; L.pm_end_w = 140; L.pm_end_h = 56;
+        L.dmx_x = 34; L.dmx_y = 288; L.dmx_w = 92; L.dmx_h = 50; L.dmx_dx = 0; L.dmx_dy = 60;
+        L.f_end = &lv_font_montserrat_20;
+    } else {
+        /* 320x240: full-width player, no VOL/TMP bars, bigger title and time */
+        L.split_x = w; L.right_w = 0;
+        L.pad_x = 8;
+        L.title_y = 8; L.nowplay_y = 50; L.progress_y = 68; L.progress_h = 22;
+        L.time_y = 92; L.status_y = L.nowplay_y; L.next_song_y = 134;
+        L.stop_y = 198; L.stop_w = 90; L.stop_h = 38; L.next_w = 90; L.gear_w = 90; L.gear_h = 38;
+        L.btn_gap = 8; L.shift_x = 0;
+        L.pm_side_w = 66; L.pm_pp_w = 80; L.pm_gap = 8; L.pm_prev_x = 9;
+        L.pm_end_x = 212; L.pm_end_cap_y = 0; L.pm_end_btn_y = 160; L.pm_end_w = 100; L.pm_end_h = 34;
+        L.dmx_x = 8; L.dmx_y = 160; L.dmx_w = 62; L.dmx_h = 34; L.dmx_dx = 68; L.dmx_dy = 0;
+        L.f_end = &lv_font_montserrat_14;
+    }
+    L.f_title = ui_font_song();
+    L.f_time  = ui_font_time();
+}
 
 /* Accent colours */
 #define COLOR_BG         0x1A1A2E
@@ -105,6 +155,11 @@ static const char *TAG = "ui_player";
 static lv_obj_t *s_screen         = NULL;
 static lv_obj_t *s_title_lbl      = NULL;
 static lv_obj_t *s_progress_bar   = NULL;
+static lv_obj_t *s_left_panel     = NULL;  /* title / progress / buttons (width follows the operating mode) */
+static lv_obj_t *s_right_panel    = NULL;  /* VOL / TMP bars (full layout only)    */
+static lv_obj_t *s_sep            = NULL;  /* vertical separator (full layout only) */
+static lv_obj_t *s_divline        = NULL;  /* thin line above the progress bar      */
+static lv_point_precise_t s_div_pts[2];
 static lv_obj_t *s_time_lbl       = NULL;  /* "elapsed / total" below progress bar */
 
 /* Two poti bars + value labels */
@@ -365,6 +420,48 @@ static void refresh_pm_widgets(void)
     if (s_pm_end_lbl) lv_label_set_text(s_pm_end_lbl, k_end_txt[s_end_action <= 2u ? s_end_action : 0u]);
 }
 
+/**
+ * Player mode on the full (800x480) layout has no use for the VOL / TMP bars, so the right panel is
+ * hidden and the left content (title, progress bar, time, buttons) uses the full display width.
+ * Crank mode restores the 600 px content area next to the bar panel.  No-op on the compact layout.
+ */
+static void apply_panel_layout(void)
+{
+    if (L.compact) return;
+
+    const bool    pm     = s_player_mode;
+    const int32_t w      = pm ? (L.split_x + L.right_w) : L.split_x;   /* content width */
+    const int32_t inner  = w - 2 * PROGRESS_PAD_X;
+
+    set_hidden(s_right_panel, pm);
+    set_hidden(s_sep,         pm);
+
+    if (s_left_panel)     lv_obj_set_width(s_left_panel, w);
+    if (s_title_lbl)      lv_obj_set_width(s_title_lbl, inner);
+    if (s_progress_bar)   lv_obj_set_width(s_progress_bar, inner);
+    if (s_time_lbl)       lv_obj_set_width(s_time_lbl, inner);
+    if (s_next_song_lbl)  lv_obj_set_width(s_next_song_lbl, inner);
+    if (s_divline) {
+        s_div_pts[1].x = w - PROGRESS_PAD_X;
+        lv_line_set_points(s_divline, s_div_pts, 2);
+        lv_obj_invalidate(s_divline);
+    }
+
+    /* Player-mode button row: centered in the content area; end-of-song toggle right-aligned to it */
+    const int32_t row_w  = 3 * PM_SIDE_W + PM_PP_W + 3 * PM_GAP;
+    const int32_t prev_x = pm ? (w - row_w) / 2 : PM_PREV_X;
+    const int32_t pp_x   = prev_x + PM_SIDE_W + PM_GAP;
+    const int32_t next_x = pp_x + PM_PP_W + PM_GAP;
+    const int32_t stop_x = next_x + PM_SIDE_W + PM_GAP;
+    const int32_t end_x  = pm ? (prev_x + row_w - PM_END_BTN_W) : PM_END_X;
+    if (s_pm_prev)    lv_obj_set_x(s_pm_prev, prev_x);
+    if (s_pm_pp)      lv_obj_set_x(s_pm_pp,   pp_x);
+    if (s_pm_next)    lv_obj_set_x(s_pm_next, next_x);
+    if (s_pm_stop)    lv_obj_set_x(s_pm_stop, stop_x);
+    if (s_pm_end_cap) lv_obj_set_x(s_pm_end_cap, end_x);
+    if (s_pm_end_btn) lv_obj_set_x(s_pm_end_btn, end_x);
+}
+
 /** Show the widget set of the current operating mode. */
 static void apply_mode_visibility(void)
 {
@@ -395,6 +492,7 @@ static void apply_mode_visibility(void)
     set_hidden(s_pm_end_cap, !pm);
     set_hidden(s_pm_end_btn, !pm);
 
+    apply_panel_layout();
     refresh_pm_widgets();
 }
 
@@ -460,6 +558,8 @@ static lv_obj_t *make_pm_button(lv_obj_t *parent, lv_coord_t x, lv_coord_t w,
  * ========================================================================= */
 void ui_player_create(void)
 {
+    layout_init();
+
     /* ---- Screen -------------------------------------------------------- */
     s_screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(COLOR_BG), 0);
@@ -469,6 +569,7 @@ void ui_player_create(void)
 
     /* ---- Left panel (transparent overlay on the screen) --------------- */
     lv_obj_t *left = lv_obj_create(s_screen);
+    s_left_panel = left;
     lv_obj_set_size(left, SPLIT_X, SCREEN_H);
     lv_obj_set_pos(left, 0, 0);
     lv_obj_set_style_bg_opa(left, LV_OPA_TRANSP, 0);
@@ -481,7 +582,7 @@ void ui_player_create(void)
     lv_label_set_text(s_title_lbl, LV_SYMBOL_AUDIO "  ---");
     lv_label_set_long_mode(s_title_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_width(s_title_lbl, SPLIT_X - 2 * PROGRESS_PAD_X);
-    lv_obj_set_style_text_font(s_title_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(s_title_lbl, L.f_title, 0);
     lv_obj_set_style_text_color(s_title_lbl, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_set_pos(s_title_lbl, PROGRESS_PAD_X, TITLE_Y);
 
@@ -494,14 +595,15 @@ void ui_player_create(void)
     s_np_lbl = np_lbl;
 
     /* Horizontal divider line -------------------------------------------- */
-    static lv_point_precise_t div_pts[2] = {
-        {PROGRESS_PAD_X,             PROGRESS_Y - 14},
-        {SPLIT_X - PROGRESS_PAD_X,  PROGRESS_Y - 14}
-    };
-    lv_obj_t *divline = lv_line_create(left);
-    lv_line_set_points(divline, div_pts, 2);
-    lv_obj_set_style_line_color(divline, lv_color_hex(COLOR_DIVIDER), 0);
-    lv_obj_set_style_line_width(divline, 1, 0);
+    s_div_pts[0].x = PROGRESS_PAD_X;            s_div_pts[0].y = PROGRESS_Y - 14;
+    s_div_pts[1].x = SPLIT_X - PROGRESS_PAD_X;  s_div_pts[1].y = PROGRESS_Y - 14;
+    if (!L.compact) {
+        lv_obj_t *divline = lv_line_create(left);
+        s_divline = divline;
+        lv_line_set_points(divline, s_div_pts, 2);
+        lv_obj_set_style_line_color(divline, lv_color_hex(COLOR_DIVIDER), 0);
+        lv_obj_set_style_line_width(divline, 1, 0);
+    }
 
     /* Progress bar (indeterminate animation) ----------------------------- */
     s_progress_bar = lv_bar_create(left);
@@ -529,7 +631,7 @@ void ui_player_create(void)
     /* Time label: "elapsed / total" right-aligned below the progress bar -- */
     s_time_lbl = lv_label_create(left);
     lv_label_set_text(s_time_lbl, "0:00 / 0:00");
-    lv_obj_set_style_text_font(s_time_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(s_time_lbl, L.f_time, 0);
     lv_obj_set_style_text_color(s_time_lbl, lv_color_hex(COLOR_ACCENT), 0);
     lv_obj_set_width(s_time_lbl, SPLIT_X - 2 * PROGRESS_PAD_X);
     lv_obj_set_style_text_align(s_time_lbl, LV_TEXT_ALIGN_RIGHT, 0);
@@ -540,7 +642,8 @@ void ui_player_create(void)
     lv_label_set_text(s_loop_lbl, LV_SYMBOL_REFRESH "  LOOP");
     lv_obj_set_style_text_font(s_loop_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_loop_lbl, lv_color_hex(COLOR_ACCENT), 0);
-    lv_obj_set_pos(s_loop_lbl, PROGRESS_PAD_X, STATUS_LBL_Y);
+    if (L.compact) lv_obj_align(s_loop_lbl, LV_ALIGN_TOP_RIGHT, -PROGRESS_PAD_X, STATUS_LBL_Y);
+    else           lv_obj_set_pos(s_loop_lbl, PROGRESS_PAD_X, STATUS_LBL_Y);
     lv_obj_add_flag(s_loop_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
 
     /* Next-song name label – smaller text below the loop indicator row ---- */
@@ -620,11 +723,13 @@ void ui_player_create(void)
                                LV_SYMBOL_STOP, on_stop_clicked, NULL);
 
     /* End-of-song behaviour toggle (Stop -> Next -> Repeat). */
-    s_pm_end_cap = lv_label_create(left);
-    lv_label_set_text(s_pm_end_cap, "AT END OF SONG");
-    lv_obj_set_style_text_font(s_pm_end_cap, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_pm_end_cap, lv_color_hex(0xA0A0C0), 0);
-    lv_obj_set_pos(s_pm_end_cap, PM_END_X, PM_END_CAP_Y);
+    if (!L.compact) {   /* no room for the caption on the compact layout */
+        s_pm_end_cap = lv_label_create(left);
+        lv_label_set_text(s_pm_end_cap, "AT END OF SONG");
+        lv_obj_set_style_text_font(s_pm_end_cap, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(s_pm_end_cap, lv_color_hex(0xA0A0C0), 0);
+        lv_obj_set_pos(s_pm_end_cap, PM_END_X, PM_END_CAP_Y);
+    }
 
     s_pm_end_btn = lv_button_create(left);
     lv_obj_set_size(s_pm_end_btn, PM_END_BTN_W, PM_END_BTN_H);
@@ -640,7 +745,7 @@ void ui_player_create(void)
     style_pressed(s_pm_end_btn);
     s_pm_end_lbl = lv_label_create(s_pm_end_btn);
     lv_label_set_text(s_pm_end_lbl, "");
-    lv_obj_set_style_text_font(s_pm_end_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_pm_end_lbl, L.f_end, 0);
     lv_obj_set_style_text_color(s_pm_end_lbl, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_center(s_pm_end_lbl);
 
@@ -650,8 +755,8 @@ void ui_player_create(void)
         lv_obj_t *btn = lv_button_create(left);
         s_downmix_btns[i] = btn;
         lv_obj_set_size(btn, DOWNMIX_COL_W, DOWNMIX_BTN_H);
-        lv_obj_set_pos(btn, DOWNMIX_COL_X,
-                       DOWNMIX_COL_Y + (lv_coord_t)i * (DOWNMIX_BTN_H + DOWNMIX_BTN_GAP));
+        lv_obj_set_pos(btn, DOWNMIX_COL_X + (lv_coord_t)i * DOWNMIX_DX,
+                       DOWNMIX_COL_Y + (lv_coord_t)i * DOWNMIX_DY);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(btn, 8, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
@@ -668,69 +773,74 @@ void ui_player_create(void)
     }
     refresh_downmix_buttons();
 
-    /* ---- Vertical separator between left and right panels -------------- */
-    lv_obj_t *sep = lv_obj_create(s_screen);
-    lv_obj_set_size(sep, 2, SCREEN_H);
-    lv_obj_set_pos(sep, SPLIT_X - 2, 0);
-    lv_obj_set_style_bg_color(sep, lv_color_hex(COLOR_DIVIDER), 0);
-    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(sep, 0, 0);
-    lv_obj_set_style_pad_all(sep, 0, 0);
+    /* Right panel (VOL / TMP bars, FIX / HOLD) exists on the full layout only. */
+    if (!L.compact) {
+        /* ---- Vertical separator between left and right panels -------------- */
+        lv_obj_t *sep = lv_obj_create(s_screen);
+        s_sep = sep;
+        lv_obj_set_size(sep, 2, SCREEN_H);
+        lv_obj_set_pos(sep, SPLIT_X - 2, 0);
+        lv_obj_set_style_bg_color(sep, lv_color_hex(COLOR_DIVIDER), 0);
+        lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(sep, 0, 0);
+        lv_obj_set_style_pad_all(sep, 0, 0);
 
-    /* ---- Right panel (VOL / TMP / EXP bars) ---------------------------- */
-    lv_obj_t *right = lv_obj_create(s_screen);
-    lv_obj_set_size(right, RIGHT_W, SCREEN_H);
-    lv_obj_set_pos(right, SPLIT_X, 0);
-    lv_obj_set_style_bg_color(right, lv_color_hex(COLOR_PANEL_R), 0);
-    lv_obj_set_style_bg_opa(right, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(right, 0, 0);
-    lv_obj_set_style_pad_all(right, 0, 0);
-    lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
+        /* ---- Right panel (VOL / TMP / EXP bars) ---------------------------- */
+        lv_obj_t *right = lv_obj_create(s_screen);
+        s_right_panel = right;
+        lv_obj_set_size(right, RIGHT_W, SCREEN_H);
+        lv_obj_set_pos(right, SPLIT_X, 0);
+        lv_obj_set_style_bg_color(right, lv_color_hex(COLOR_PANEL_R), 0);
+        lv_obj_set_style_bg_opa(right, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(right, 0, 0);
+        lv_obj_set_style_pad_all(right, 0, 0);
+        lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
 
-    create_indicator_col(right, 0, "VOL");
-    create_indicator_col(right, 1, "TMP");
+        create_indicator_col(right, 0, "VOL");
+        create_indicator_col(right, 1, "TMP");
 
-    /* Slim live TMP bar next to the main TMP bar.
-     * In HOLD mode, the main bar shows the locked value while this bar shows
-     * incoming live tempo updates for comparison. */
-    {
-        lv_coord_t col_x = COL_W; /* TMP column */
-        lv_coord_t bar_x = col_x + (lv_coord_t)((COL_W - BAR_W) / 2);
-        lv_coord_t live_x = bar_x + BAR_W + 3;
+        /* Slim live TMP bar next to the main TMP bar.
+         * In HOLD mode, the main bar shows the locked value while this bar shows
+         * incoming live tempo updates for comparison. */
+        {
+            lv_coord_t col_x = COL_W; /* TMP column */
+            lv_coord_t bar_x = col_x + (lv_coord_t)((COL_W - BAR_W) / 2);
+            lv_coord_t live_x = bar_x + BAR_W + 3;
 
-        s_tmp_live_bar = lv_bar_create(right);
-        lv_obj_set_size(s_tmp_live_bar, BAR_LIVE_W, BAR_H);
-        lv_obj_set_pos(s_tmp_live_bar, live_x, BAR_TOP_Y);
-        lv_bar_set_range(s_tmp_live_bar, 0, 100);
-        lv_bar_set_value(s_tmp_live_bar, 0, LV_ANIM_OFF);
+            s_tmp_live_bar = lv_bar_create(right);
+            lv_obj_set_size(s_tmp_live_bar, BAR_LIVE_W, BAR_H);
+            lv_obj_set_pos(s_tmp_live_bar, live_x, BAR_TOP_Y);
+            lv_bar_set_range(s_tmp_live_bar, 0, 100);
+            lv_bar_set_value(s_tmp_live_bar, 0, LV_ANIM_OFF);
 
-        lv_obj_set_style_bg_opa(s_tmp_live_bar, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(s_tmp_live_bar, 0, LV_PART_MAIN);
-        lv_obj_set_style_radius(s_tmp_live_bar, 3, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(s_tmp_live_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(s_tmp_live_bar, LV_OPA_60, LV_PART_INDICATOR);
-        lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_bg_opa(s_tmp_live_bar, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(s_tmp_live_bar, 0, LV_PART_MAIN);
+            lv_obj_set_style_radius(s_tmp_live_bar, 3, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(s_tmp_live_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+            lv_obj_set_style_bg_opa(s_tmp_live_bar, LV_OPA_60, LV_PART_INDICATOR);
+            lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        /* 1.0x indicator label – read-only, shown when fixed-speed is configured
+         * for the current song.  Replaces the old interactive bypass checkbox. -- */
+        s_bypass_lbl = lv_label_create(right);
+        lv_label_set_text(s_bypass_lbl, "FIX");
+        lv_obj_set_style_text_font(s_bypass_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(s_bypass_lbl, lv_color_hex(COLOR_LOCKED), 0);
+        lv_obj_set_width(s_bypass_lbl, COL_W);
+        lv_obj_set_style_text_align(s_bypass_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(s_bypass_lbl, COL_W, BYPASS_CHECK_Y_R + 24);
+        lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
+
+        /* "HOLD" speed-lock indicator – always visible under TMP bar, greyed when inactive */
+        s_hold_lbl = lv_label_create(right);
+        lv_label_set_text(s_hold_lbl, "HOLD");
+        lv_obj_set_style_text_font(s_hold_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(s_hold_lbl, lv_color_hex(0x445566), 0);  /* greyed out by default */
+        lv_obj_set_width(s_hold_lbl, COL_W);
+        lv_obj_set_style_text_align(s_hold_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(s_hold_lbl, COL_W, HOLD_LBL_Y);
     }
-
-    /* 1.0x indicator label – read-only, shown when fixed-speed is configured
-     * for the current song.  Replaces the old interactive bypass checkbox. -- */
-    s_bypass_lbl = lv_label_create(right);
-    lv_label_set_text(s_bypass_lbl, "FIX");
-    lv_obj_set_style_text_font(s_bypass_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_bypass_lbl, lv_color_hex(COLOR_LOCKED), 0);
-    lv_obj_set_width(s_bypass_lbl, COL_W);
-    lv_obj_set_style_text_align(s_bypass_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_bypass_lbl, COL_W, BYPASS_CHECK_Y_R + 24);
-    lv_obj_add_flag(s_bypass_lbl, LV_OBJ_FLAG_HIDDEN);  /* hidden until settings arrive */
-
-    /* "HOLD" speed-lock indicator – always visible under TMP bar, greyed when inactive */
-    s_hold_lbl = lv_label_create(right);
-    lv_label_set_text(s_hold_lbl, "HOLD");
-    lv_obj_set_style_text_font(s_hold_lbl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_hold_lbl, lv_color_hex(0x445566), 0);  /* greyed out by default */
-    lv_obj_set_width(s_hold_lbl, COL_W);
-    lv_obj_set_style_text_align(s_hold_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(s_hold_lbl, COL_W, HOLD_LBL_Y);
 
     apply_mode_visibility(); /* crank mode until the player reports otherwise */
 

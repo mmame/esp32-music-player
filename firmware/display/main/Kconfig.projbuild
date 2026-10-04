@@ -1,3 +1,20 @@
+menu "Display board"
+
+    choice DISPLAY_BOARD
+        prompt "Display board / firmware variant"
+        default DISPLAY_BOARD_8048S050C if IDF_TARGET_ESP32S3
+        default DISPLAY_BOARD_2432S032 if IDF_TARGET_ESP32
+
+        config DISPLAY_BOARD_8048S050C
+            bool "ESP32-8048S050C (ESP32-S3, 800x480 RGB, GT911)"
+            depends on IDF_TARGET_ESP32S3
+
+        config DISPLAY_BOARD_2432S032
+            bool "ESP32-2432S032C (ESP32, 320x240 SPI ST7789, GT911) - compact UI"
+            depends on IDF_TARGET_ESP32
+    endchoice
+endmenu
+
 menu "Sunton ESP32-S3 based display LVGL Package config"
 
     config SUNTON_ESP32_DOUBLE_FB

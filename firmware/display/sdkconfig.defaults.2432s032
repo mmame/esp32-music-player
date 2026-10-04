@@ -1,0 +1,25 @@
+# ESP32-2432S032 (ESP32-WROOM-32, 4 MB flash, no PSRAM, 320x240 SPI display).
+# Build (separate sdkconfig/build dir so it never mixes with the S3 build):
+#   idf.py -B build_2432s032 -D SDKCONFIG=sdkconfig.2432s032 \
+#          -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults.2432s032" set-target esp32
+#   idf.py -B build_2432s032 -D SDKCONFIG=sdkconfig.2432s032 \
+#          -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults.2432s032" build flash monitor
+CONFIG_IDF_TARGET="esp32"
+CONFIG_DISPLAY_BOARD_2432S032=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+# app_main builds both LVGL screens
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+CONFIG_LV_CONF_SKIP=y
+# Draw buffers come from the heap: a static 128 KB LVGL pool would not fit in ESP32 DRAM
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CHART=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_36=y
+
+CONFIG_LV_OS_FREERTOS=y
