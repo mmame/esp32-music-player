@@ -72,6 +72,13 @@ static inline StCtx *ctx_of(audio_element_handle_t self)
     return static_cast<StCtx *>(audio_element_getdata(self));
 }
 
+/* Equal-power mix (CH1&CH2): 1/sqrt(2) per channel.  Unrelated channels (e.g. one instrument per
+ * channel) then keep about the level of a single channel instead of dropping by 3 dB, which a plain
+ * (L+R)/2 mix did (and each instrument by 6 dB).  A mix of two full-scale channels can exceed full
+ * scale (up to x1.41), so the mix path saturates. */
+#define DOWNMIX_MIX_GAIN        0.70710678f
+#define DOWNMIX_MIX_GAIN_Q15    23170          /* DOWNMIX_MIX_GAIN * 32768, rounded */
+
 static inline void mode_to_gain(uint8_t mode, float *gl, float *gr)
 {
     if (mode == 1u) {
@@ -79,7 +86,7 @@ static inline void mode_to_gain(uint8_t mode, float *gl, float *gr)
     } else if (mode == 2u) {
         *gl = 0.0f; *gr = 1.0f;
     } else {
-        *gl = 0.5f; *gr = 0.5f;
+        *gl = DOWNMIX_MIX_GAIN; *gr = DOWNMIX_MIX_GAIN;
     }
 }
 
@@ -145,7 +152,7 @@ static audio_element_err_t _process(audio_element_handle_t self,
     uint8_t mode = ctx->downmix_mode_target;
     if (mode > 2u) mode = 0u;
     if (mode != ctx->downmix_mode_active) {
-        float to_l = 0.5f, to_r = 0.5f;
+        float to_l = DOWNMIX_MIX_GAIN, to_r = DOWNMIX_MIX_GAIN;
         mode_to_gain(mode, &to_l, &to_r);
         if (ctx->downmix_fade_armed && ctx->downmix_fade_ms > 0u) {
             uint32_t fs = ((uint32_t)ctx->samplerate * (uint32_t)ctx->downmix_fade_ms) / 1000u;
@@ -182,7 +189,10 @@ static audio_element_err_t _process(audio_element_handle_t self,
             for (int i = 0; i < frames_in; ++i) {
                 int32_t l = ctx->pcm_in[i * 2 + 0];
                 int32_t r = ctx->pcm_in[i * 2 + 1];
-                ctx->mono_in[i] = (int16_t)((l + r) >> 1);
+                int32_t m = ((l + r) * DOWNMIX_MIX_GAIN_Q15) >> 15;   /* equal-power mix, saturating */
+                if (m > 32767)  m = 32767;
+                if (m < -32768) m = -32768;
+                ctx->mono_in[i] = (int16_t)m;
             }
         }
     } else {
@@ -325,8 +335,8 @@ audio_element_handle_t soundtouch_el_init(const soundtouch_el_cfg_t *cfg)
     ctx->downmix_fade_ms         = 1000u;
     ctx->downmix_fade_armed      = false;
     ctx->downmix_fading          = false;
-    ctx->dm_cur_l                = 0.5f;
-    ctx->dm_cur_r                = 0.5f;
+    ctx->dm_cur_l                = DOWNMIX_MIX_GAIN;
+    ctx->dm_cur_r                = DOWNMIX_MIX_GAIN;
     ctx->dm_step_l               = 0.0f;
     ctx->dm_step_r               = 0.0f;
     ctx->dm_fade_left            = 0u;
