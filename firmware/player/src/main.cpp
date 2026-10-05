@@ -663,8 +663,12 @@ static void pipeline_stop_and_reset(void)
 
 /* start_pipeline=false: load song metadata and enter paused-at-0 state
  * without running the pipeline.  do_resume() will start it when ready.
- * This avoids a start→immediate-stop race that confuses the WAV decoder. */
-static void play_song_idx(uint16_t idx, bool start_pipeline = true)
+ * This avoids a start→immediate-stop race that confuses the WAV decoder.
+ *
+ * keep_downmix_mode=true (loop restart of the same song): keep the downmix mode that is currently
+ * active, which may have been changed manually on the display / web page while the song was
+ * playing, instead of reloading the song's saved default. */
+static void play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_downmix_mode = false)
 {
     if (idx >= g_song_count) {
         ESP_LOGW(TAG, "play_song_idx: index %u out of range", idx);
@@ -690,9 +694,11 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true)
     g_song_dimmer_fadein_s   = (float)settings.dimmer_fadein_s;
     g_song_light_organ       = settings.light_organ;
     g_song_gain_db           = settings.gain_db;
-    g_downmix_mode           = (settings.downmix_mode <= 2u) ? settings.downmix_mode : 0u;
+    if (!keep_downmix_mode) {
+        g_downmix_mode       = (settings.downmix_mode <= 2u) ? settings.downmix_mode : 0u;
+    }
     g_song_downmix_fade_ms   = (uint16_t)settings.downmix_fade_s * 1000u;
-    g_downmix_fade_armed     = false;
+    g_downmix_fade_armed     = false;   /* no fade: the mode is unchanged on a loop restart */
     apply_downmix_to_soundtouch(false);
 #ifdef HAVE_ADF
     if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
@@ -1148,7 +1154,7 @@ static void audio_task(void *arg)
                      * harmless since the pipeline is already stopped. */
                     uint16_t loop_idx = (uint16_t)g_current_song;
                     ESP_LOGI(TAG, "Loop: restarting song %u", loop_idx);
-                    play_song_idx(loop_idx, false); /* load at pos 0, pipeline not started */
+                    play_song_idx(loop_idx, false, true); /* load at pos 0, pipeline not started; keep the current downmix mode */
                     do_resume();                    /* start immediately                   */
                 } else if (eff_next && g_current_song >= 0 && g_song_count > 0) {
                     uint16_t next_idx = (uint16_t)g_current_song + 1u;
