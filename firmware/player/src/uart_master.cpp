@@ -258,11 +258,13 @@ void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  pitch_influence_pct,
                                     uint8_t  downmix_mode,
                                     uint8_t  downmix_fade_s,
-                                    int8_t   gain_db)
+                                    int8_t   gain_db,
+                                    uint8_t  crossfade_s)
 {
     if (downmix_mode > 2u) downmix_mode = 0u;
-    if (downmix_fade_s > 10u) downmix_fade_s = 10u;
-    uint8_t payload[13];
+    if (downmix_fade_s > 20u) downmix_fade_s = 20u;
+    if (crossfade_s > 20u) crossfade_s = 20u;
+    uint8_t payload[14];
     payload[0] = (uint8_t)(song_id & 0xFF);
     payload[1] = (uint8_t)(song_id >> 8);
     payload[2] = flags;
@@ -276,7 +278,8 @@ void uart_master_send_song_settings(uint16_t song_id,
     payload[10] = downmix_mode;
     payload[11] = downmix_fade_s;
     payload[12] = (uint8_t)gain_db;
-    send_packet(CMD_SONG_SETTINGS, payload, 13);
+    payload[13] = crossfade_s;
+    send_packet(CMD_SONG_SETTINGS, payload, 14);
     ESP_LOGI(TAG, "TX CMD_SONG_SETTINGS id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u dfad=%u pitch=%u dmx=%u dmx_fade=%u gain=%d",
              song_id, flags, fixed_speed_x100, dimmer_max, dimmer_min, dimmer_rps_ref_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_influence_pct,
              (unsigned)downmix_mode, (unsigned)downmix_fade_s, (int)gain_db);
@@ -677,8 +680,10 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             uint8_t  downmix_mode     = (len >= 11) ? payload[10] : 0u;
             uint8_t  downmix_fade_s   = (len >= 12) ? payload[11] : 1u;
             int8_t   gain_db          = (len >= 13) ? (int8_t)payload[12] : 0;
+            uint8_t  crossfade_s      = (len >= 14) ? payload[13] : 0xFFu;   /* 0xFF: keep stored value */
+            if (crossfade_s > 20u && crossfade_s != 0xFFu) crossfade_s = 20u;
             if (downmix_mode > 2u) downmix_mode = 0u;
-            if (downmix_fade_s > 10u) downmix_fade_s = 10u;
+            if (downmix_fade_s > 20u) downmix_fade_s = 20u;
             if (gain_db < -6) gain_db = -6;
             if (gain_db >  6) gain_db =  6;
             ESP_LOGI(TAG, "CMD_SET_SONG_SETTINGS: id=%u flags=0x%02X spd=%u dmax=%u dmin=%u drps=%u dhld=%u dfad=%u pitch=%u dmx=%u dmx_fade=%u gain=%d",
@@ -687,7 +692,7 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
             if (s_on_set_song_settings)
                 s_on_set_song_settings(song_id, flags, fixed_speed_x100,
                                        dimmer_max, dimmer_min, dimmer_rps_x10, dimmer_holdoff_s, dimmer_fadein_s, pitch_infl_pct, downmix_mode,
-                                       downmix_fade_s, gain_db);
+                                       downmix_fade_s, gain_db, crossfade_s);
         }
         break;
 

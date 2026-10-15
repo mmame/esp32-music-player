@@ -1,0 +1,73 @@
+ESP32 music player - release notes
+==================================
+Newest first. 
+
+20261015
+--------
+Player (musicplayer-20261015.bin)
+  * Crossfade now keeps each song's own downmix: the outgoing song keeps its current downmix mode, the
+    incoming song uses its configured one (previously the new song's mode was applied to both at once).
+    The new mode is switched in (with the song's downmix fade) when the fade has passed.
+  * Downmix change fade: maximum raised from 10 s to 20 s (web page and touch display).
+  * Crossfade length: maximum raised from 10 s to 20 s (web page and touch display).
+  * Volume knob: the potentiometer reading is linearized (the rheostat circuit is hyperbolic, which made
+    the lower half of the travel far too quiet) and the volume curve is now linear in dB, i.e. roughly
+    linear in perceived loudness. 0-2 % is muted, 2-5 % ramps up from mute.
+  * New setting "Volume range (dB)" (web config tab, 20-60 dB, default 40): level at the bottom of the
+    knob. A smaller range makes the whole knob louder / the volume rise earlier.
+  * Backup & Restore (web page, Files tab): download a ZIP with the settings (config, playlists, button
+    map, per-song settings), optionally with all songs; the estimated download time (~1 MB/s) is shown
+    before downloading. Restore from such a ZIP in the browser: files with the same name are overwritten,
+    then the player restarts. Uploads accept .json settings files now.
+  * The 15-minute WiFi auto-off no longer cuts a running backup, restore, download, upload or firmware
+    update: it is postponed (re-checked every minute) while a transfer is active and for at least
+    a minute after the last one finished. (A manual WiFi off is still honoured immediately.)
+  * Crank mode speed range is configurable (min 0.2-1.0, max 1.0-2.0, default 0.7 ... 1.4); per-song
+    fixed speed covers 0.2 ... 2.0.
+
+Display (ESP32-8048S050C-full / ESP32-2432S032C-full 20261015)
+  * Downmix fade in the song settings dialog goes up to 20 s.
+  * No other display changes since 20261008; the player is compatible with the older display images.
+
+
+20261008
+--------
+Player (musicplayer-20261008.bin)
+  * Crossfade: pressing Next or Prev while a song is playing blends into the other song instead of
+    cutting. Length is a PER-SONG setting (0-10 s, default 0 = off), taken from the song being left.
+    Set it on the web page (song settings) or on the touch display (song settings dialog, "Crossfade").
+    Songs are streamed with an "unbounded" WAV header now; the reader stops at the end of the audio data,
+    so chunks after the audio (e.g. LIST) are no longer played.
+  * Crank mode speed range is configurable (web config tab): minimum 0.2-1.0, maximum 1.0-2.0,
+    default still 0.7 ... 1.4.
+  * Per-song fixed speed now covers 0.2 ... 2.0 (was 0.7 ... 1.4), on the web page and the display.
+  * SD card reading is about 4x faster (own file reader with an internal DMA buffer).
+  * Watchdog: if the audio pipeline dies (e.g. SD timeout), playback is stopped cleanly instead of
+    hanging silently.
+  * About tab: SD card info (type, bus width, negotiated clock) and a diagnostics box
+    (SD test, CPU test, raw SD test).
+
+Display (ESP32-8048S050C-full / ESP32-2432S032C-full 20261008)
+  * Song settings dialog: new "Crossfade" row; fixed speed adjustable from 0.20x to 2.00x.
+  * Fix: after Next/Prev on the player screen and Stop, the song list now highlights the song that
+    was playing last (it used to select the song you started with).
+  * UART protocol: CMD_SONG_SETTINGS / CMD_SET_SONG_SETTINGS carry one more byte (crossfade_s).
+    An older display that does not send it leaves the stored crossfade value untouched.
+
+Known limits
+  * A crossfade needs both songs in the same format (sample rate / channels / bit depth), canonical
+    16-bit PCM WAV with a 44-byte header; otherwise Next/Prev is a normal hard cut.
+  * Pressing Next/Prev again, or pausing, during a fade ends it and jumps to the newest song.
+
+
+20261005
+--------
+Player
+  * Equal-power CH1&CH2 downmix (0.707 per channel instead of 0.5).
+  * The manually chosen downmix mode is kept when a looped song restarts.
+  * Display firmware OTA: verify + automatic flash address, display log / info, DimmerLink crash fix.
+
+Display
+  * Support for the 320x240 ESP32-2432S032 (large song names, no volume / speed bars, bigger time);
+    the display size is detected automatically.
+  * Releases contain only the "full" images (flash with the player update page, address: auto).

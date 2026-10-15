@@ -112,6 +112,15 @@ esp_err_t soundtouch_el_set_downmix_mode(audio_element_handle_t self, uint8_t mo
 /**
  * @brief Set downmix transition fade duration in milliseconds.
  */
+/**
+ * @brief Schedule two downmix-mode changes relative to the input consumed from now on (used for crossfades).
+ *        At @p after0_frames input frames the mode becomes @p mode0 (immediately), at @p after1_frames it becomes
+ *        @p mode1 (with the configured downmix fade if @p arm1).  Cleared when the element is opened.
+ */
+esp_err_t soundtouch_el_schedule_downmix(audio_element_handle_t self,
+                                         uint8_t mode0, uint32_t after0_frames,
+                                         uint8_t mode1, uint32_t after1_frames, bool arm1);
+
 esp_err_t soundtouch_el_set_downmix_fade_ms(audio_element_handle_t self, uint16_t fade_ms);
 
 /**
@@ -120,6 +129,21 @@ esp_err_t soundtouch_el_set_downmix_fade_ms(audio_element_handle_t self, uint16_
  * When armed=true and mode changes, transition is faded. Otherwise it is instant.
  */
 esp_err_t soundtouch_el_arm_downmix_fade(audio_element_handle_t self, bool armed);
+
+/* ---------------------------------------------------------------------------
+ * Benchmark helper (diagnostics): an independent SoundTouch instance configured like the element's
+ * (mono, same quality settings), used to measure what a SECOND concurrent stream (crossfade) costs.
+ * It has to live in this component because SoundTouch is compiled here with SOUNDTOUCH_INTEGER_SAMPLES.
+ * ------------------------------------------------------------------------- */
+typedef struct soundtouch_sim *soundtouch_sim_handle_t;
+
+/** Create a mono instance (NULL on out-of-memory). */
+soundtouch_sim_handle_t soundtouch_sim_create(int samplerate, float tempo);
+
+/** Feed up to 16384 mono int16 frames and discard whatever comes out; returns the number of frames produced. */
+int soundtouch_sim_process(soundtouch_sim_handle_t h, const int16_t *mono, int frames);
+
+void soundtouch_sim_destroy(soundtouch_sim_handle_t h);
 
 #ifdef __cplusplus
 }

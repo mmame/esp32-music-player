@@ -59,6 +59,14 @@ struct StCtx {
     float             dm_step_r;
     uint32_t          dm_fade_left;
 
+    /* Scheduled downmix mode changes (crossfade): two steps, each due after a number of input frames. */
+    uint32_t          frames_total;          /* input frames consumed since the element was opened */
+    volatile bool     sched_active;
+    uint8_t           sched_stage;           /* next step to run (0 or 1) */
+    uint8_t           sched_mode[2];
+    uint32_t          sched_due[2];
+    bool              sched_arm[2];
+
     /* int16 buffers - interface to ADF ring buffers and SoundTouch        */
     int16_t *pcm_in;   /* ST_CHUNK_FRAMES x in_channels                    */
     int16_t *mono_in;  /* ST_CHUNK_FRAMES x 1                              */
@@ -110,6 +118,8 @@ static void drain(audio_element_handle_t self, StCtx *ctx)
 static esp_err_t _open(audio_element_handle_t self)
 {
     ctx_of(self)->st->clear();
+    ctx_of(self)->frames_total = 0;
+    ctx_of(self)->sched_active = false;
     return ESP_OK;
 }
 
@@ -147,6 +157,16 @@ static audio_element_err_t _process(audio_element_handle_t self,
     }
 
     int frames_in = bytes_in / (ctx->in_channels * (int)sizeof(int16_t));
+
+    /* Scheduled downmix steps (crossfade): switch the mode once enough input has been consumed. */
+    if (ctx->sched_active) {
+        while (ctx->sched_active && (int32_t)(ctx->frames_total - ctx->sched_due[ctx->sched_stage]) >= 0) {
+            ctx->downmix_mode_target = ctx->sched_mode[ctx->sched_stage];
+            ctx->downmix_fade_armed  = ctx->sched_arm[ctx->sched_stage];
+            if (++ctx->sched_stage >= 2u) ctx->sched_active = false;
+        }
+    }
+    ctx->frames_total += (uint32_t)frames_in;
 
     /* Detect downmix mode changes and optionally start fade. */
     uint8_t mode = ctx->downmix_mode_target;
@@ -300,6 +320,25 @@ esp_err_t soundtouch_el_set_downmix_mode(audio_element_handle_t self, uint8_t mo
     return ESP_OK;
 }
 
+esp_err_t soundtouch_el_schedule_downmix(audio_element_handle_t self,
+                                         uint8_t mode0, uint32_t after0_frames,
+                                         uint8_t mode1, uint32_t after1_frames, bool arm1)
+{
+    StCtx *ctx = ctx_of(self);
+    if (!ctx) return ESP_ERR_INVALID_ARG;
+    ctx->sched_active = false;
+    const uint32_t now = ctx->frames_total;
+    ctx->sched_mode[0] = (mode0 <= 2u) ? mode0 : 0u;
+    ctx->sched_mode[1] = (mode1 <= 2u) ? mode1 : 0u;
+    ctx->sched_due[0]  = now + after0_frames;
+    ctx->sched_due[1]  = now + after1_frames;
+    ctx->sched_arm[0]  = false;
+    ctx->sched_arm[1]  = arm1;
+    ctx->sched_stage   = 0;
+    ctx->sched_active  = true;
+    return ESP_OK;
+}
+
 esp_err_t soundtouch_el_set_downmix_fade_ms(audio_element_handle_t self, uint16_t fade_ms)
 {
     StCtx *ctx = ctx_of(self);
@@ -404,4 +443,61 @@ fail:
         audio_free(ctx);
     }
     return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * Benchmark helper (see soundtouch_el.h)
+ * ------------------------------------------------------------------------- */
+
+struct soundtouch_sim {
+    soundtouch::SoundTouch *st;
+    int16_t                *out;
+};
+
+static constexpr int SIM_OUT_FRAMES = 32768;
+
+extern "C" soundtouch_sim_handle_t soundtouch_sim_create(int samplerate, float tempo)
+{
+    soundtouch_sim *h = static_cast<soundtouch_sim *>(audio_calloc(1, sizeof(soundtouch_sim)));
+    if (!h) return NULL;
+    h->out = static_cast<int16_t *>(audio_calloc(SIM_OUT_FRAMES, sizeof(int16_t)));
+    h->st  = new(std::nothrow) soundtouch::SoundTouch();
+    if (!h->out || !h->st) {
+        delete h->st;
+        audio_free(h->out);
+        audio_free(h);
+        return NULL;
+    }
+    /* identical to the element's settings */
+    h->st->setSampleRate((uint)samplerate);
+    h->st->setChannels(1);
+    h->st->setTempo((double)tempo);
+    h->st->setSetting(SETTING_USE_AA_FILTER,    1);
+    h->st->setSetting(SETTING_AA_FILTER_LENGTH, 32);
+    h->st->setSetting(SETTING_USE_QUICKSEEK,    1);
+    h->st->setSetting(SETTING_SEQUENCE_MS,      0);
+    h->st->setSetting(SETTING_SEEKWINDOW_MS,    0);
+    h->st->setSetting(SETTING_OVERLAP_MS,       0);
+    return h;
+}
+
+extern "C" int soundtouch_sim_process(soundtouch_sim_handle_t h, const int16_t *mono, int frames)
+{
+    if (!h || frames <= 0) return 0;
+    h->st->putSamples(mono, (uint)frames);
+    int total = 0;
+    for (;;) {
+        uint n = h->st->receiveSamples(h->out, (uint)SIM_OUT_FRAMES);
+        if (n == 0) break;
+        total += (int)n;
+    }
+    return total;
+}
+
+extern "C" void soundtouch_sim_destroy(soundtouch_sim_handle_t h)
+{
+    if (!h) return;
+    delete h->st;
+    audio_free(h->out);
+    audio_free(h);
 }

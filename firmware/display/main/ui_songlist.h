@@ -100,8 +100,9 @@ void ui_songlist_encoder_btn_async(void);
  * @param dimmer_fadein_s      Fade-in duration (s) after holdoff expires.
  * @param pitch_influence_pct  Pitch blend factor 0-100.
  * @param downmix_mode         0=L+R mix, 1=CH1 only, 2=CH2 only.
- * @param downmix_fade_s       Downmix transition fade duration in seconds (0-10).
+ * @param downmix_fade_s       Downmix transition fade duration in seconds (0-20).
  * @param gain_db              Per-song gain -6..+6 dB.
+ * @param crossfade_s          Crossfade length on next/prev, 0-20 s.
  */
 void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  flags,
@@ -114,7 +115,8 @@ void ui_songlist_song_settings_async(uint16_t song_id,
                                      uint8_t  pitch_influence_pct,
                                      uint8_t  downmix_mode,
                                      uint8_t  downmix_fade_s,
-                                     int8_t   gain_db);
+                                     int8_t   gain_db,
+                                     uint8_t  crossfade_s);
 
 /**
  * @brief Update the BT enable/disable button state from the player's flags.
@@ -175,6 +177,9 @@ uint16_t ui_songlist_get_next_song_id(uint16_t current_id);
  * @return previous song_id (> 0), or 0 if the song list is empty.
  */
 uint16_t ui_songlist_get_prev_song_id(uint16_t current_id);
+
+/** Move the list focus to the given song (call from the LVGL task). Unknown ids are ignored. */
+void ui_songlist_focus_song(uint16_t song_id);
 
 #ifdef __cplusplus
 }

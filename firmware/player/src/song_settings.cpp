@@ -36,6 +36,7 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
     out->downmix_mode     = 0u;
         out->downmix_fade_s   = 1u; /* Default downmix fade seconds */
     out->gain_db          = 0;
+    out->crossfade_s      = 0u;
 
     if (!wav_path) return;
 
@@ -183,12 +184,19 @@ void song_settings_load(const char *wav_path, song_settings_t *out)
         out->downmix_mode = (uint8_t)((v < 0) ? 0 : (v > 2) ? 2 : v);
     }
 
-        /* "downmix_fade_s": fade duration for live downmix toggles, 0-10 s */
+        /* "downmix_fade_s": fade duration for live downmix toggles, 0-20 s */
         const cJSON *dmx_fade_item = cJSON_GetObjectItemCaseSensitive(root, "downmix_fade_s");
         if (cJSON_IsNumber(dmx_fade_item)) {
             int v = dmx_fade_item->valueint;
-            out->downmix_fade_s = (uint8_t)((v < 0) ? 0 : (v > 10) ? 10 : v);
+            out->downmix_fade_s = (uint8_t)((v < 0) ? 0 : (v > 20) ? 20 : v);
         }
+
+    /* "crossfade_s": crossfade length on next/prev, 0-20 s */
+    const cJSON *xf_item = cJSON_GetObjectItemCaseSensitive(root, "crossfade_s");
+    if (cJSON_IsNumber(xf_item)) {
+        int v = xf_item->valueint;
+        out->crossfade_s = (uint8_t)((v < 0) ? 0 : (v > 20) ? 20 : v);
+    }
 
     /* "gain_db": per-song gain, -6..+6 dB */
     const cJSON *gain_item = cJSON_GetObjectItemCaseSensitive(root, "gain_db");

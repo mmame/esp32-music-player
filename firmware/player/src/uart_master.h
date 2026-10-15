@@ -139,8 +139,9 @@ typedef void (*um_on_song_settings_req_cb_t)(uint16_t song_id);
  * @param dimmer_fadein_s    Fade-in duration (s) from 0 to full brightness after holdoff.
  * @param pitch_influence_pct Pitch blend factor 0-100 (0=time-stretch, 100=tape effect).
  * @param downmix_mode        0=L+R mix (default), 1=CH1 only, 2=CH2 only.
- * @param downmix_fade_s      Downmix transition fade duration in seconds (0-10).
+ * @param downmix_fade_s      Downmix transition fade duration in seconds (0-20).
  * @param gain_db             Per-song gain -6..+6 dB (added to the global output gain).
+ * @param crossfade_s         Crossfade length 0-20 s; 0xFF = not sent by the display (keep the stored value).
  */
 typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  flags,
@@ -153,7 +154,8 @@ typedef void (*um_on_set_song_settings_cb_t)(uint16_t song_id,
                                              uint8_t  pitch_influence_pct,
                                              uint8_t  downmix_mode,
                                              uint8_t  downmix_fade_s,
-                                             int8_t   gain_db);
+                                             int8_t   gain_db,
+                                             uint8_t  crossfade_s);
 
 /**
  * @brief Called when the display requests switching the active playlist.
@@ -268,8 +270,9 @@ void uart_master_send_playlists(const char *active_name,
  *   [8]    dimmer_fadein_s    : fade-in duration (s) from 0 to full brightness after holdoff
  *   [9]    pitch_influence_pct: pitch blend factor 0-100
  *   [10]   downmix_mode       : 0=L+R mix, 1=CH1 only, 2=CH2 only
- *   [11]   downmix_fade_s     : downmix transition fade in seconds (0-10)
+ *   [11]   downmix_fade_s     : downmix transition fade in seconds (0-20)
  *   [12]   gain_db            : per-song gain, int8_t, -6..+6 dB
+ *   [13]   crossfade_s        : crossfade length on next/prev, 0-20 s
  */
 void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  flags,
@@ -282,7 +285,8 @@ void uart_master_send_song_settings(uint16_t song_id,
                                     uint8_t  pitch_influence_pct,
                                     uint8_t  downmix_mode,
                                     uint8_t  downmix_fade_s,
-                                    int8_t   gain_db);
+                                    int8_t   gain_db,
+                                    uint8_t  crossfade_s);
 
 /* ── Outgoing packet helpers ──────────────────────────────────────────────── */
 

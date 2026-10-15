@@ -27,7 +27,8 @@ extern "C" {
  *   "dimmer_fadein_s"   : number  – seconds to fade from 0 to full brightness when holdoff expires (default 0).
  *   "light_organ"       : boolean – drive dimmer brightness from audio FFT energy instead of crank speed.
  *   "downmix_mode"      : number  – stereo->mono mode: 0=mix, 1=CH1 only, 2=CH2 only.
- *   "downmix_fade_s"    : number  – fade time in seconds for live downmix-mode changes (0-10).
+ *   "downmix_fade_s"    : number  – fade time in seconds for live downmix-mode changes (0-20).
+ *   "crossfade_s"       : number  – crossfade length in seconds when leaving this song with next/prev (0-20, default 0 = off).
  *   "gain_db"           : number  – per-song gain in dB, -6..+6 (default 0); added to the global output gain.
  */
 
@@ -43,7 +44,8 @@ typedef struct {
     uint8_t dimmer_fadein_s; /**< seconds to fade from 0→full brightness after holdoff expires  */
     bool    light_organ;     /**< true: dimmer driven by FFT audio energy instead of crank speed */
     uint8_t downmix_mode;    /**< 0=L+R mix (default), 1=CH1 only, 2=CH2 only                    */
-    uint8_t downmix_fade_s;  /**< live downmix fade duration in seconds (0-10)                    */
+    uint8_t downmix_fade_s;  /**< live downmix fade duration in seconds (0-20)                    */
+    uint8_t crossfade_s;     /**< crossfade length (0-20 s) when leaving this song via next/prev; 0 = off */
     int8_t  gain_db;         /**< per-song gain -6..+6 dB, added to the global output gain        */
 } song_settings_t;
 

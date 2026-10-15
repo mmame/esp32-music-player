@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "fatfs_dma_stream.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        audio_pipeline
+        audio_sal
+        audio_stream
+        log
+)

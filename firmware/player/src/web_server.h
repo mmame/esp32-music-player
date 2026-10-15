@@ -67,6 +67,9 @@ void web_server_disable(void);
  */
 bool web_server_is_running(void);
 
+/** True while a backup / restore / download / upload / firmware update is running (or ended < 60 s ago). */
+bool web_server_transfer_active(void);
+
 #ifdef __cplusplus
 }
 #endif

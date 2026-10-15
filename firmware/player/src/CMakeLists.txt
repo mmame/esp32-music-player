@@ -28,6 +28,8 @@ if(DEFINED ENV{ADF_PATH})
         audio_stream
         # Codecs + processing: wav_decoder, audio_alc, …
         esp-adf-libs
+        # SD file reader that reads through an internal DMA buffer (faster than ADF's fatfs_stream into PSRAM)
+        fatfs_dma_stream
         # SoundTouch time-stretching element (replaces audio_sonic)
         soundtouch
         # Static gain + peak limiter element (esp_audio_effects DRC)
@@ -42,6 +44,7 @@ idf_component_register(
         "buttons.cpp"
         "crank_config.cpp"
         "dimmerlink.cpp"
+        "diag.cpp"
         "disp_ota.cpp"
         "encoder.cpp"
         "encoder2.cpp"

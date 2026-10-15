@@ -45,7 +45,22 @@ static uint16_t s_cal_hi  = 3071;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
-/* Piecewise-linear mapping using 3-point calibration. */
+/* Knob position 0..1 from the raw ADC value.
+ *
+ * The rheostat sits in a voltage divider (see the circuit above), so raw = hi / (1 + k * (1 - a)) with
+ * k = hi / lo - 1 and a = knob position: hyperbolic, not linear.  A piecewise-linear map of raw would make
+ * the lower half of the travel far too quiet.  Inverting the model gives a ~linear knob position; the
+ * calibrated centre value then warps it so that "mid" is exactly 50 %, which also absorbs a pot taper that
+ * differs from the model. */
+static float raw_to_pos(float raw, float lo, float hi)
+{
+    const float k = hi / lo - 1.0f;
+    float a = 1.0f - (hi / raw - 1.0f) / k;
+    if (a < 0.0f) a = 0.0f;
+    if (a > 1.0f) a = 1.0f;
+    return a;
+}
+
 static uint8_t raw_to_pct(uint32_t avg_raw)
 {
     float raw = (float)avg_raw;
@@ -55,7 +70,19 @@ static uint8_t raw_to_pct(uint32_t avg_raw)
     if (raw <= lo) return 0;
     if (raw >= hi) return 100;
     float pct;
-    if (raw <= mid) {
+    if (lo > 0.0f && hi > lo * 1.05f && mid > lo && mid < hi) {
+        const float a     = raw_to_pos(raw, lo, hi);
+        const float a_mid = raw_to_pos(mid, lo, hi);
+        float pos;
+        if (a_mid < 0.05f || a_mid > 0.95f) {
+            pos = a;                                                   /* implausible centre: model only */
+        } else if (a <= a_mid) {
+            pos = 0.5f * a / a_mid;
+        } else {
+            pos = 0.5f + 0.5f * (a - a_mid) / (1.0f - a_mid);
+        }
+        pct = 100.0f * pos;
+    } else if (raw <= mid) {                                           /* degenerate calibration: old mapping */
         pct = 50.0f * (raw - lo) / (mid - lo);
     } else {
         pct = 50.0f + 50.0f * (raw - mid) / (hi - mid);

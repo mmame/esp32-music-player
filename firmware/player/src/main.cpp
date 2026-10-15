@@ -3,7 +3,7 @@
  * @brief Music Player firmware – ESP-ADF pipeline implementation.
  *
  * Audio pipeline (when HAVE_ADF is defined via CMakeLists):
- *   SD card -> fatfs_stream -> wav_decoder -> downmix(2->1 selectable) -> audio_sonic -> alc_volume_setup -> limiter(gain) -> i2s_stream -> DAC
+ *   SD card -> fatfs_dma_stream -> wav_decoder -> downmix(2->1 selectable) -> audio_sonic -> alc_volume_setup -> limiter(gain) -> i2s_stream -> DAC
  *
  * Architecture:
  *   Core 1 (audio_task, high priority) - pipeline management, event loop, command dispatch
@@ -47,6 +47,7 @@
 #include "encoder2.h"
 #include "potis.h"
 #include "uart_master.h"
+#include "diag.h"
 #include "web_server.h"
 #include "song_settings.h"
 #include "crank_config.h"
@@ -63,6 +64,7 @@
 #include "ringbuf.h"
 #include "i2s_stream.h"
 #include "fatfs_stream.h"
+#include "fatfs_dma_stream.h"
 #include "soundtouch_el.h"
 #include "limiter_el.h"
 #include "audio_alc.h"
@@ -82,8 +84,9 @@ static const char *TAG = "musicplayer";
 #define WAV_HDR_BYTES  44u
 #define PLAYLISTS_PATH MOUNT_POINT "/playlists.json"
 
-#define SPEED_MIN  0.7f
-#define SPEED_MAX  1.4f
+/* crank-mode speed range: configurable on the web page (g_crank_cfg), default 0.7 ... 1.4 */
+#define SPEED_MIN  ((float)g_crank_cfg.speed_min_x10 / 10.0f)
+#define SPEED_MAX  ((float)g_crank_cfg.speed_max_x10 / 10.0f)
 
 /* ======================================================================
  * Global state
@@ -151,6 +154,7 @@ static volatile bool    s_cmd_tempo_lock_pending = false;
 static volatile bool    s_cmd_tempo_lock_value   = false;
 static volatile uint8_t s_cmd_locked_tempo_raw   = 50;
 static volatile bool    s_cmd_wifi_enable        = false; /* set by on_wifi_ctrl(true)  */
+static volatile bool    s_wifi_disable_is_auto   = false; /* the pending disable comes from the 15-min timer */
 static volatile bool    s_cmd_wifi_disable       = false; /* set by on_wifi_ctrl(false) or on_play_song */
 static volatile bool    s_cmd_new_song_loaded    = false;
 
@@ -590,6 +594,7 @@ static float get_current_pos_s_locked(void)
     if (!g_is_playing || g_is_paused) return g_audio_pos_s;
     int64_t now = esp_timer_get_time();
     float eff_speed = g_bypass_active ? 1.0f : g_speed;
+    if (now <= g_wall_ref_us) return g_audio_pos_s;   /* wall_ref in the future: crossfade latency */
     return g_audio_pos_s + (float)(now - g_wall_ref_us) * 1e-6f * eff_speed;
 }
 
@@ -609,9 +614,16 @@ static int8_t total_gain_db(void)
 
 static void apply_volume_locked(uint8_t vol)
 {
-    /* Power-law taper (γ=0.5): stretches the bottom quarter from –64…–48 dB to –64…–32 dB. */
-    float norm = sqrtf((float)vol / 100.0f);
-    int db = (int)(norm * 64.0f) - 64;
+    /* Linear in dB (-range ... 0 dB over the knob travel, range from the web config) = roughly linear in
+     * perceived loudness, since the ear judges level logarithmically.  The bottom (0-2 %) is muted, 2-5 % ramps up from
+     * mute to the level the line reaches at 5 %. */
+    const float range = (float)g_crank_cfg.vol_range_db;
+    float pos = (float)vol / 100.0f;
+    float dbf;
+    if (vol <= 2)         dbf = -64.0f;                                          /* 0-2 %: mute */
+    else if (pos < 0.05f) dbf = -64.0f + (64.0f - 0.95f * range) * ((pos - 0.02f) / 0.03f);
+    else                  dbf = -range * (1.0f - pos);
+    int db = (int)lroundf(dbf);
     if (db < -64) db = -64;
     if (db >  63) db =  63;
     alc_volume_setup_set_volume(g_alc_el, db);
@@ -620,8 +632,9 @@ static void apply_volume_locked(uint8_t vol)
 
 static void apply_speed_locked(float speed)
 {
-    if (speed < SPEED_MIN) speed = SPEED_MIN;
-    if (speed > SPEED_MAX) speed = SPEED_MAX;
+    /* absolute limits only: the crank range is applied by the callers, a per-song fixed speed may lie outside it */
+    if (speed < 0.2f) speed = 0.2f;
+    if (speed > 2.0f) speed = 2.0f;
 
     if (g_is_playing && !g_is_paused) {
         int64_t now   = esp_timer_get_time();
@@ -668,11 +681,12 @@ static void pipeline_stop_and_reset(void)
  * keep_downmix_mode=true (loop restart of the same song): keep the downmix mode that is currently
  * active, which may have been changed manually on the display / web page while the song was
  * playing, instead of reloading the song's saved default. */
-static void play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_downmix_mode = false)
+static bool play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_downmix_mode = false,
+                          uint32_t xfade_s = 0)
 {
     if (idx >= g_song_count) {
         ESP_LOGW(TAG, "play_song_idx: index %u out of range", idx);
-        return;
+        return false;
     }
 
     char path[8 + UM_MAX_SONG_NAME + 5];
@@ -681,6 +695,9 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_do
     /* Load optional per-song JSON settings before touching the pipeline. */
     song_settings_t settings;
     song_settings_load(path, &settings);
+    /* A crossfade applies the new song's downmix later, when its audio reaches SoundTouch. */
+    const uint8_t old_dmx    = g_downmix_mode;
+    const bool    defer_dmx  = xfade_s > 0 && g_is_playing && !g_is_paused && !keep_downmix_mode;
     g_song_loop           = settings.loop;
     g_song_autoplay_next  = settings.autoplay_next;
     g_song_fixed_speed_en = (settings.fixed_speed > 0.0f);
@@ -699,7 +716,7 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_do
     }
     g_song_downmix_fade_ms   = (uint16_t)settings.downmix_fade_s * 1000u;
     g_downmix_fade_armed     = false;   /* no fade: the mode is unchanged on a loop restart */
-    apply_downmix_to_soundtouch(false);
+    if (!defer_dmx) apply_downmix_to_soundtouch(false);
 #ifdef HAVE_ADF
     if (s_lo_file) { fclose(s_lo_file); s_lo_file = nullptr; }
     if (g_song_light_organ) s_lo_file = fopen(path, "rb");
@@ -715,9 +732,56 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_do
         }
     }
 
+    /* Crossfade into the new song without touching the pipeline (manual "next" while playing). */
+    if (xfade_s > 0 && g_is_playing && !g_is_paused &&
+        sr == g_sample_rate && ch == g_channels && bps == g_bps && data_bytes > 0) {
+        const uint32_t byte_rate = sr * (uint32_t)ch * (uint32_t)bps;
+        uint32_t fade_bytes = xfade_s * byte_rate;
+        if (fade_bytes > data_bytes) fade_bytes = data_bytes;
+        if (fatfs_dma_stream_crossfade(g_fatfs_el, path, fade_bytes, WAV_HDR_BYTES + g_song_bytes,
+                                       WAV_HDR_BYTES, WAV_HDR_BYTES + data_bytes,
+                                       old_dmx, g_downmix_mode, ch == 2) == ESP_OK) {
+            /* what is buffered between the reader and the speaker still belongs to the old song */
+            uint32_t buffered = 0;
+            ringbuf_handle_t rb = audio_element_get_output_ringbuf(g_fatfs_el);
+            if (rb) buffered += (uint32_t)rb_bytes_filled(rb);
+            rb = audio_element_get_output_ringbuf(g_wav_el);
+            if (rb) buffered += (uint32_t)rb_bytes_filled(rb);
+            /* SoundTouch: old downmix for what is still buffered, then pass-through (CH1 = identity on the
+             * per-song pre-downmixed fade), then the new song's mode.  Counted in input frames; the reader's
+             * block that is being read right now is estimated as half a block. */
+            if (ch == 2) {
+                const uint32_t frame_bytes = (uint32_t)ch * bps;
+                const uint32_t lead = (buffered + 8192u) / frame_bytes;
+                soundtouch_el_set_downmix_fade_ms(g_sonic_el, g_song_downmix_fade_ms);
+                soundtouch_el_schedule_downmix(g_sonic_el, 1u, lead, g_downmix_mode,
+                                               lead + fade_bytes / frame_bytes, g_song_downmix_fade_ms > 0u);
+            } else {
+                apply_downmix_to_soundtouch(false);
+            }
+            const float eff_speed = g_bypass_active ? 1.0f : g_speed;
+            const int64_t lat_us = (int64_t)((float)buffered / (float)byte_rate / (eff_speed > 0.1f ? eff_speed : 0.1f) * 1e6f);
+            xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+            g_current_song = (int16_t)idx;
+            g_song_bytes   = data_bytes;
+            g_audio_pos_s  = 0.0f;
+            g_wall_ref_us  = esp_timer_get_time() + lat_us;
+            xSemaphoreGive(s_state_mutex);
+            ESP_LOGI(TAG, "Crossfade [%u]: %s  (%u s, ~%d ms until audible)", idx, g_song_names[idx],
+                     (unsigned)xfade_s, (int)(lat_us / 1000));
+            return true;
+        }
+        ESP_LOGW(TAG, "crossfade not possible - normal song change");
+    }
+    if (defer_dmx) apply_downmix_to_soundtouch(false);
+
     if (g_is_playing || g_is_paused) {
         pipeline_stop_and_reset();
     }
+
+    /* Unbounded header: the stream may change songs mid-way (crossfade); the reader stops at the end of the PCM. */
+    fatfs_dma_stream_set_unbounded_header(g_fatfs_el, true);
+    fatfs_dma_stream_set_limit(g_fatfs_el, WAV_HDR_BYTES + data_bytes);
 
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     g_current_song = (int16_t)idx;
@@ -750,6 +814,7 @@ static void play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_do
 
     ESP_LOGI(TAG, "Playing [%u]: %s  (%u B, %uHz, %uch, %ubps)",
              idx, g_song_names[idx], data_bytes, sr, ch, bps);
+    return false;
 }
 
 static void do_stop(void)
@@ -800,6 +865,7 @@ static void inject_wav_header(uint32_t pcm_remaining)
     uint32_t bits_per_sample    = (uint32_t)g_bps * 8u;
     uint32_t byte_rate          = g_sample_rate * (uint32_t)g_channels * (uint32_t)g_bps;
     uint16_t block_align        = (uint16_t)(g_channels * g_bps);
+    pcm_remaining = 0x7FFFF000u;   /* unbounded: the reader ends the stream (see fatfs_dma_stream_set_limit) */
     uint32_t riff_size          = pcm_remaining + 36u;
 
     /* RIFF chunk descriptor */
@@ -957,9 +1023,9 @@ static void create_pipeline(void)
 
     fatfs_stream_cfg_t fatfs_cfg = FATFS_STREAM_CFG_DEFAULT();
     fatfs_cfg.type        = AUDIO_STREAM_READER;
-    fatfs_cfg.buf_sz      =  8 * 1024;  /*  8 KB SD read burst – fewer SPI transactions  */
+    fatfs_cfg.buf_sz      = 16 * 1024;  /* 16 KB SD read burst (read via an internal DMA buffer of the same size) */
     fatfs_cfg.out_rb_size = 64 * 1024;  /* 64 KB PSRAM – keeps WAV decoder well fed      */
-    g_fatfs_el = fatfs_stream_init(&fatfs_cfg);
+    g_fatfs_el = fatfs_dma_stream_init(&fatfs_cfg);   /* reads via an internal DMA buffer: ~4x faster than ADF's fatfs_stream into PSRAM */
     configASSERT(g_fatfs_el);
 
     wav_decoder_cfg_t wav_cfg = DEFAULT_WAV_DECODER_CONFIG();
@@ -1039,6 +1105,33 @@ static void create_pipeline(void)
  * Audio task (Core 1) – only compiled with ADF
  * ====================================================================== */
 
+/* A failed pipeline element (e.g. an SD read that timed out) goes into AEL_STATE_ERROR and stays there; nothing else
+ * reports it, so the player would keep "playing" in silence.  Poll for it and stop playback cleanly. */
+static uint32_t s_pipe_err_count = 0;
+static char     s_pipe_err_last[80] = "";
+
+static void check_pipeline_health(void)
+{
+    static uint8_t err_ticks = 0;
+    const audio_element_handle_t els[] = { g_fatfs_el, g_wav_el, g_sonic_el, g_alc_el, g_lim_el, g_i2s_el };
+    const char *bad = nullptr;
+
+    if (g_is_playing && !g_is_paused) {
+        for (audio_element_handle_t e : els) {
+            if (e && audio_element_get_state(e) == AEL_STATE_ERROR) { bad = audio_element_get_tag(e); break; }
+        }
+    }
+    if (!bad) { err_ticks = 0; return; }
+    if (++err_ticks < 10) return;                     /* ~0.5 s of persistent error, not a transient */
+
+    err_ticks = 0;
+    s_pipe_err_count++;
+    snprintf(s_pipe_err_last, sizeof(s_pipe_err_last), "element '%s' failed at %.0f s of song %d",
+             bad ? bad : "?", (double)g_audio_pos_s, (int)g_current_song);
+    ESP_LOGE(TAG, "Pipeline %s - stopping playback", s_pipe_err_last);
+    do_stop();
+}
+
 static void audio_task(void *arg)
 {
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
@@ -1048,6 +1141,8 @@ static void audio_task(void *arg)
     ESP_LOGI(TAG, "Audio task running on core %d", xPortGetCoreID());
 
     while (true) {
+        check_pipeline_health();
+
         /* Process UART commands */
         if (s_cmd_stop) {
             s_cmd_stop = false;
@@ -1061,9 +1156,24 @@ static void audio_task(void *arg)
                 /* Always load the song in paused state at position 0.
                  * The crank rising edge in io_task sends s_cmd_resume,
                  * which calls do_resume() and starts the pipeline. */
-                play_song_idx((uint16_t)play_id, false);
-                s_cmd_new_song_loaded = true; /* force enc2 rising-edge even if crank is already spinning */
-                if (player_mode()) s_virtual_crank_on = true; /* player mode: start playing right away */
+                /* Next/Prev while playing: crossfade with the length set for the song being left. */
+                uint32_t xf = 0;
+                if (g_song_count > 1 && g_current_song >= 0 && g_is_playing && !g_is_paused &&
+                    (play_id == (int16_t)((g_current_song + 1) % g_song_count) ||
+                     play_id == (int16_t)((g_current_song + g_song_count - 1) % g_song_count))) {
+                    char cur[8 + UM_MAX_SONG_NAME + 5];
+                    snprintf(cur, sizeof(cur), "%s/%s.wav", MOUNT_POINT, g_song_names[g_current_song]);
+                    song_settings_t cs;
+                    song_settings_load(cur, &cs);
+                    xf = cs.crossfade_s;
+                }
+                if (xf > 0 && play_song_idx((uint16_t)play_id, false, false, xf)) {
+                    /* crossfading: playback simply continues */
+                } else {
+                    play_song_idx((uint16_t)play_id, false);
+                    s_cmd_new_song_loaded = true; /* force enc2 rising-edge even if crank is already spinning */
+                    if (player_mode()) s_virtual_crank_on = true; /* player mode: start playing right away */
+                }
             }
         }
 
@@ -1174,7 +1284,62 @@ static void audio_task(void *arg)
     }
 }
 
+/* ---- Diagnostics (diag.cpp): snapshot of the player state and pipeline handles ---- */
+static const char *diag_song_name(int idx)
+{
+    return (idx >= 0 && idx < (int)g_song_count) ? g_song_names[idx] : nullptr;
+}
+
+void diag_get_context(diag_ctx_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    o->song_count       = g_song_count;
+    o->current_idx      = g_current_song;
+    o->playing          = g_is_playing && !g_is_paused;
+    o->bypass           = g_bypass_active;
+    o->speed            = g_speed;
+    o->pipe_err_count   = s_pipe_err_count;
+    o->pipe_err_last    = s_pipe_err_last;
+    o->song_pos_s       = g_audio_pos_s;
+    o->song_len_s       = (g_sample_rate && g_channels && g_bps) ? (float)g_song_bytes / (float)(g_sample_rate * g_channels * g_bps) : 0.0f;
+    o->sample_rate      = g_sample_rate;
+    o->channels         = g_channels;
+    o->bytes_per_sample = g_bps;
+    o->fatfs = g_fatfs_el;
+    o->wav   = g_wav_el;
+    o->sonic = g_sonic_el;
+    o->alc   = g_alc_el;
+    o->lim   = g_lim_el;
+    o->i2s   = g_i2s_el;
+    o->song_name = diag_song_name;
+}
+
 #endif /* HAVE_ADF */
+
+void *diag_get_sd_card(void)
+{
+    return s_sdcard;
+}
+
+bool diag_get_sd_info(sd_info_t *o)
+{
+    const sdmmc_card_t *c = s_sdcard;
+    if (!c || !o) return false;
+    memset(o, 0, sizeof(*o));
+    for (int i = 0; i < 7 && c->cid.name[i]; i++) {
+        const char ch = c->cid.name[i];
+        o->name[i] = (ch >= 0x20 && ch < 0x7F && ch != '"' && ch != '\\') ? ch : '_';
+    }
+    strlcpy(o->type, c->is_mmc ? "MMC" : ((c->ocr & (1u << 30) /* OCR bit 30: card capacity status, set for SDHC/SDXC */) ? "SDHC/SDXC" : "SDSC"), sizeof(o->type));
+    o->size_mb         = (uint32_t)(((uint64_t)c->csd.capacity * (uint64_t)c->csd.sector_size) >> 20);
+    o->bus_bits        = (c->host.flags & SDMMC_HOST_FLAG_8BIT) ? 8 : ((c->host.flags & SDMMC_HOST_FLAG_4BIT) ? 4 : 1);
+    o->freq_khz        = (uint32_t)c->real_freq_khz;
+    o->card_limit_khz  = c->max_freq_khz;
+    o->host_max_khz    = (uint32_t)c->host.max_freq_khz;
+    static const char *const spec_names[] = { "1.0x", "1.10", "2.0/3.0", "?" };
+    strlcpy(o->spec, spec_names[c->scr.sd_spec < 3 ? c->scr.sd_spec : 3], sizeof(o->spec));
+    return true;
+}
 
 /* ======================================================================
  * UART callbacks (Core 0, uart_master rx_task)
@@ -1222,7 +1387,7 @@ static void on_wifi_ctrl(bool enable)
         /* Start/restart 15-minute auto-off timer */
         if (!s_wifi_auto_off_timer) {
             const esp_timer_create_args_t ta = {
-                .callback         = [](void *) { s_cmd_wifi_disable = true; ESP_LOGI("wifi", "WiFi auto-disabled after 15 min"); },
+                .callback         = [](void *) { s_wifi_disable_is_auto = true; s_cmd_wifi_disable = true; },
                 .arg              = nullptr,
                 .dispatch_method  = ESP_TIMER_TASK,
                 .name             = "wifi_auto_off",
@@ -1233,6 +1398,7 @@ static void on_wifi_ctrl(bool enable)
         esp_timer_stop(s_wifi_auto_off_timer);
         esp_timer_start_once(s_wifi_auto_off_timer, (int64_t)15 * 60 * 1000 * 1000);
     } else {
+        s_wifi_disable_is_auto = false;   /* explicit request */
         s_cmd_wifi_disable = true;
         s_cmd_wifi_enable  = false;
         if (s_wifi_auto_off_timer) esp_timer_stop(s_wifi_auto_off_timer);
@@ -1361,11 +1527,11 @@ static void on_song_settings_req(uint16_t song_id)
     uint8_t d_holdoff     = s.dimmer_holdoff_s;
     uint8_t d_fadein      = s.dimmer_fadein_s;
     uint8_t downmix_mode  = (s.downmix_mode <= 2u) ? s.downmix_mode : 0u;
-    uint8_t downmix_fade_s = (s.downmix_fade_s <= 10u) ? s.downmix_fade_s : 1u;
+    uint8_t downmix_fade_s = (s.downmix_fade_s <= 20u) ? s.downmix_fade_s : 1u;
 
     uart_master_send_song_settings(song_id, flags, spd_x100,
                                    d_max, d_min, d_rps_x10, d_holdoff, d_fadein, s.pitch_influence,
-                                   downmix_mode, downmix_fade_s, s.gain_db);
+                                   downmix_mode, downmix_fade_s, s.gain_db, s.crossfade_s);
 }
 
 /**
@@ -1384,7 +1550,8 @@ static void on_set_song_settings(uint16_t song_id,
                                  uint8_t  pitch_influence_pct,
                                  uint8_t  downmix_mode,
                                  uint8_t  downmix_fade_s,
-                                 int8_t   gain_db)
+                                 int8_t   gain_db,
+                                 uint8_t  crossfade_s)
 {
     if (song_id == 0 || song_id > g_song_count) {
         ESP_LOGW("main", "set_song_settings: id %u out of range", song_id);
@@ -1400,11 +1567,19 @@ static void on_set_song_settings(uint16_t song_id,
     memcpy(json_path, wav_path, wav_len - 4);
     memcpy(json_path + wav_len - 4, ".json", 6);
 
+    /* 0xFF = an older display that does not send the crossfade length: keep what is stored. */
+    if (crossfade_s == 0xFFu) {
+        song_settings_t old_s;
+        song_settings_load(wav_path, &old_s);
+        crossfade_s = old_s.crossfade_s;
+    }
+    if (crossfade_s > 20u) crossfade_s = 20u;
+
     /* If all settings are default: remove the sidecar file */
     if (gain_db < SONG_GAIN_DB_MIN) gain_db = SONG_GAIN_DB_MIN;
     if (gain_db > SONG_GAIN_DB_MAX) gain_db = SONG_GAIN_DB_MAX;
     if (flags == 0 && dimmer_holdoff_s == 0 && dimmer_fadein_s == 0 && pitch_influence_pct == 0
-        && downmix_mode == 0u && downmix_fade_s == 1u && gain_db == 0
+        && downmix_mode == 0u && downmix_fade_s == 1u && gain_db == 0 && crossfade_s == 0
         && dimmer_max == 100u && dimmer_min == 0u && dimmer_rps_ref_x10 == 14u) {
         remove(json_path);
         ESP_LOGI("main", "Removed settings for song %u (all default)", song_id);
@@ -1430,7 +1605,7 @@ static void on_set_song_settings(uint16_t song_id,
     bool  autoplay_next= (flags & 0x04u) != 0;
     bool  light_organ  = (flags & 0x10u) != 0;
     if (downmix_mode > 2u) downmix_mode = 0u;
-    if (downmix_fade_s > 10u) downmix_fade_s = 10u;
+    if (downmix_fade_s > 20u) downmix_fade_s = 20u;
     if (loop && autoplay_next) autoplay_next = false;
     float spd          = (fixed_speed_x100 > 0) ? ((float)fixed_speed_x100 / 100.0f) : 1.0f;
     float d_rps_ref    = (dimmer_rps_ref_x10 > 0) ? ((float)dimmer_rps_ref_x10 / 10.0f) : 1.4f;
@@ -1464,6 +1639,9 @@ static void on_set_song_settings(uint16_t song_id,
     }
     if (downmix_fade_s != 1u) {
         cJSON_AddNumberToObject(root, "downmix_fade_s", downmix_fade_s);
+    }
+    if (crossfade_s > 0u) {
+        cJSON_AddNumberToObject(root, "crossfade_s", crossfade_s);
     }
     if (gain_db != 0) {
         cJSON_AddNumberToObject(root, "gain_db", gain_db);
@@ -1558,7 +1736,7 @@ static void on_web_song_settings_saved(const char *wav_path,
     g_song_dimmer_rps_ref   = (dimmer_rps_ref > 0.0f) ? dimmer_rps_ref : 1.4f;
     g_song_dimmer_holdoff_s = (float)dimmer_holdoff_s;
     g_song_dimmer_fadein_s  = (float)dimmer_fadein_s;
-    if (downmix_fade_s > 10u) downmix_fade_s = 10u;
+    if (downmix_fade_s > 20u) downmix_fade_s = 20u;
     g_song_downmix_fade_ms  = (uint16_t)downmix_fade_s * 1000u;
     g_song_gain_db          = gain_db;
     g_downmix_mode          = (downmix_mode <= 2u) ? downmix_mode : 0u;
@@ -1629,8 +1807,8 @@ static void io_task(void *arg)
     uint8_t vol = g_crank_cfg.vol_full ? 100 : pot_vol;
 
     uart_master_send_poti_update(vol, 0, 0,
-                                 (uint8_t)(SPEED_MIN * 10.0f),
-                                 (uint8_t)(SPEED_MAX * 10.0f));
+                                 g_crank_cfg.speed_min_x10,
+                                 g_crank_cfg.speed_max_x10);
 
 #ifdef HAVE_ADF
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
@@ -1674,8 +1852,8 @@ static void io_task(void *arg)
                 xSemaphoreGive(s_state_mutex);
 #endif
                 uart_master_send_poti_update(vol, 0, 0,
-                                             (uint8_t)(SPEED_MIN * 10.0f),
-                                             (uint8_t)(SPEED_MAX * 10.0f));
+                                             g_crank_cfg.speed_min_x10,
+                                             g_crank_cfg.speed_max_x10);
             }
         }
 
@@ -2047,6 +2225,8 @@ static void io_task(void *arg)
                 : (g_tempo_locked
                     ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
                     : speed_target);
+            if (disp_speed < SPEED_MIN) disp_speed = SPEED_MIN;   /* fixed speed may be outside the crank range: pin the bar */
+            if (disp_speed > SPEED_MAX) disp_speed = SPEED_MAX;
             float live_speed = enc2_spd;
             if (live_speed < SPEED_MIN) live_speed = SPEED_MIN;
             if (live_speed > SPEED_MAX) live_speed = SPEED_MAX;
@@ -2062,8 +2242,8 @@ static void io_task(void *arg)
                 s_last_live_sent  = live_tb;
                 s_last_tempo_tick = now;
                 uart_master_send_poti_update(vol, tb, live_tb,
-                                             (uint8_t)(SPEED_MIN * 10.0f),
-                                             (uint8_t)(SPEED_MAX * 10.0f));
+                                             g_crank_cfg.speed_min_x10,
+                                             g_crank_cfg.speed_max_x10);
             }
         }
 
@@ -2148,7 +2328,16 @@ static void io_task(void *arg)
         /* WiFi enable / disable commands */
         if (s_cmd_wifi_disable) {
             s_cmd_wifi_disable = false;
-            web_server_disable();
+            const bool by_timer = s_wifi_disable_is_auto;
+            s_wifi_disable_is_auto = false;
+            if (by_timer && web_server_transfer_active()) {
+                /* backup / restore / download / update in progress: try again in a minute */
+                ESP_LOGI("wifi", "WiFi auto-off postponed: transfer in progress");
+                if (s_wifi_auto_off_timer) esp_timer_start_once(s_wifi_auto_off_timer, (int64_t)60 * 1000 * 1000);
+            } else {
+                if (by_timer) ESP_LOGI("wifi", "WiFi auto-disabled after 15 min");
+                web_server_disable();
+            }
         } else if (s_cmd_wifi_enable) {
             s_cmd_wifi_enable = false;
             web_server_enable();

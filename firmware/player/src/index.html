@@ -173,6 +173,21 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <div id="pl-cards"></div>
   <div id="pl-empty" class="pl-empty" style="display:none">No playlists yet. Create one and add songs from the SD card list.</div>
 </section>
+<section>
+  <h2>Backup &amp; Restore</h2>
+  <div style="font-size:13px;color:#9fa6d4;margin-bottom:8px">Backup: one ZIP with the settings (configuration, playlists, buttons, per-song settings), optionally the songs too. Restore: choose such a ZIP; matching files on the player are <b>overwritten</b>, then the player restarts.</div>
+  <label style="font-size:13px"><input type="checkbox" id="bk-songs" onchange="updateBackupEstimate()"> Include songs (WAV) <span id="bk-songs-info" style="color:#a78bfa"></span></label>
+  <div id="bk-est" style="font-size:12px;color:#a78bfa;margin:6px 0"></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a class="btn btn-sm btn-primary" id="bk-dl" href="/api/backup?songs=0" download>&#8595; Download backup</a>
+    <button class="btn btn-sm btn-ghost" onclick="document.getElementById('bk-file').click()">&#8593; Restore from ZIP&hellip;</button>
+    <input type="file" id="bk-file" accept=".zip,application/zip" style="display:none" onchange="restoreFromZip(this)">
+  </div>
+  <div id="bk-prog" style="display:none;margin-top:10px">
+    <div class="p-label"><span id="bk-prog-label"></span><span id="bk-prog-pct"></span></div>
+    <div class="p-track"><div class="p-fill p-file" id="bk-prog-bar" style="width:0%"></div></div>
+  </div>
+</section>
 </div><!-- /tab-files -->
 
 <div id="tab-config" style="display:none">
@@ -233,6 +248,21 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
       <option value="1">Always 100%</option>
     </select>
     <p class="cfg-desc">Always 100%: the volume potentiometer is ignored and the volume is fixed at maximum (the output gain below still applies). Applies live. Default: Potentiometer</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Crank mode: minimum speed</span><span class="cfg-val" id="vv-speed_min_x10">0.7</span></div>
+    <input type="range" class="cfg-slider" id="sl-speed_min_x10" min="2" max="10" step="1" value="7" oninput="document.getElementById('vv-speed_min_x10').textContent=(this.value/10).toFixed(1)">
+    <p class="cfg-desc">Lowest playback speed when cranking slowly (1.0 = normal). Range 0.2&ndash;1.0. Default: 0.7</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Crank mode: maximum speed</span><span class="cfg-val" id="vv-speed_max_x10">1.4</span></div>
+    <input type="range" class="cfg-slider" id="sl-speed_max_x10" min="10" max="20" step="1" value="14" oninput="document.getElementById('vv-speed_max_x10').textContent=(this.value/10).toFixed(1)">
+    <p class="cfg-desc">Highest playback speed when cranking fast. Range 1.0&ndash;2.0. Default: 1.4</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Volume range (dB)</span><span class="cfg-val" id="vv-vol_range_db">40</span></div>
+    <input type="range" class="cfg-slider" id="sl-vol_range_db" min="20" max="60" step="1" value="40" oninput="document.getElementById('vv-vol_range_db').textContent=this.value">
+    <p class="cfg-desc">How quiet the bottom of the volume knob is: the knob is linear in dB from this level up to full volume (0&nbsp;dB). A smaller range (e.g. 25) makes the whole knob louder and the volume rises earlier; a larger range gives finer control at low volumes. Has no effect with &ldquo;Always 100%&rdquo;. Applies at the next knob movement. Default: 40&thinsp;dB</p>
   </div>
   <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Output gain (dB)</span><span class="cfg-val" id="vv-gain_db">+6</span></div>
@@ -329,11 +359,20 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     <div class="about-meta-line" id="about-version">Player firmware: loading...</div>
     <div class="about-meta-line" id="about-build">Build: loading...</div>
     <div class="about-meta-line" id="about-idf">ESP-IDF: loading...</div>
+    <div class="about-meta-line" id="about-sd">SD card: loading...</div>
   </div>
   <div class="about-meta" id="about-display-meta" style="margin-top:10px">
     <div class="about-meta-line" id="about-disp-version">Display firmware: loading...</div>
     <div class="about-meta-line" id="about-disp-build">Build: loading...</div>
     <div class="about-meta-line" id="about-disp-idf">ESP-IDF: loading...</div>
+  </div>
+  <div class="about-meta" id="diag-box" style="margin-top:10px">
+    <div class="about-meta-line" style="margin-bottom:6px"><b>Diagnostics</b> &ndash; SD card and CPU load (for judging crossfade headroom).
+      Start a song first for realistic numbers; each test takes about 20&ndash;30 s and blocks the web UI meanwhile.</div>
+    <button class="btn btn-ghost btn-sm" id="diag-sd-btn" onclick="runDiag('sd')">SD test</button>
+    <button class="btn btn-ghost btn-sm" id="diag-cpu-btn" onclick="runDiag('cpu')">CPU test</button>
+    <button class="btn btn-ghost btn-sm" id="diag-raw-btn" onclick="runDiag('sdraw')" title="stop playback first">SD raw test (stop playback)</button>
+    <pre id="diag-log" style="display:none;margin-top:8px;max-height:340px;overflow:auto;font-size:11px;color:#7cbb7c;white-space:pre-wrap"></pre>
   </div>
 </section>
 </div><!-- /tab-about -->
@@ -592,6 +631,123 @@ var g_files=[];
 var g_playlists={active:'',playlists:[]};
 var g_playlistDirty=false;
 
+var g_wavBytes=0;
+var BK_RATE=1048576;   /* measured WiFi download rate, ~1 MB/s */
+function fmtDur(s){
+  s=Math.max(1,Math.round(s));
+  if(s<90)return s+' s';
+  var m=Math.round(s/60);
+  if(m<90)return m+' min';
+  return Math.floor(m/60)+' h '+(m%60)+' min';
+}
+function updateBackupEstimate(){
+  var cb=document.getElementById('bk-songs');if(!cb)return;
+  var songs=cb.checked;
+  document.getElementById('bk-dl').href='/api/backup?songs='+(songs?1:0);
+  var el=document.getElementById('bk-est');
+  document.getElementById('bk-songs-info').textContent=g_wavBytes>0?'– '+fmtSize(g_wavBytes)+', ≈ '+fmtDur(g_wavBytes/BK_RATE)+' download':'';
+  if(songs){
+    el.textContent='Backup size \u2248 '+fmtSize(g_wavBytes)+' \u2192 estimated download time \u2248 '+fmtDur(g_wavBytes/BK_RATE)+' (at ~1 MB/s). Stop playback meanwhile.';
+  } else {
+    el.textContent='Settings only: a few KB, takes a few seconds.';
+  }
+}
+
+/* ---- Restore: read the ZIP in the browser, upload each entry ---- */
+function zipRd(file,pos,len){return file.slice(pos,pos+len).arrayBuffer().then(function(b){return new DataView(b);});}
+function zipEntries(file){
+  var tail=Math.min(file.size,65557+22);
+  return zipRd(file,file.size-tail,tail).then(function(dv){
+    var e=-1;
+    for(var i=tail-22;i>=0;i--){if(dv.getUint32(i,true)===0x06054b50){e=i;break;}}
+    if(e<0)throw new Error('Not a ZIP file');
+    var count=dv.getUint16(e+10,true),cdSize=dv.getUint32(e+12,true),cdOff=dv.getUint32(e+16,true);
+    if(cdOff===0xFFFFFFFF||count===0xFFFF||cdSize===0xFFFFFFFF){
+      var l=e-20;
+      if(l<0||dv.getUint32(l,true)!==0x07064b50)throw new Error('ZIP64 locator missing');
+      var z64=Number(dv.getBigUint64(l+8,true));
+      return zipRd(file,z64,56).then(function(d2){
+        return {count:Number(d2.getBigUint64(32,true)),cdSize:Number(d2.getBigUint64(40,true)),cdOff:Number(d2.getBigUint64(48,true))};
+      });
+    }
+    return {count:count,cdSize:cdSize,cdOff:cdOff};
+  }).then(function(info){
+    return zipRd(file,info.cdOff,info.cdSize).then(function(dv){
+      var list=[],p=0,dec=new TextDecoder();
+      for(var i=0;i<info.count&&p+46<=dv.byteLength;i++){
+        if(dv.getUint32(p,true)!==0x02014b50)throw new Error('Corrupt ZIP directory');
+        var flags=dv.getUint16(p+8,true),method=dv.getUint16(p+10,true);
+        var csize=dv.getUint32(p+20,true),usize=dv.getUint32(p+24,true);
+        var nl=dv.getUint16(p+28,true),xl=dv.getUint16(p+30,true),cl=dv.getUint16(p+32,true);
+        var loff=dv.getUint32(p+42,true);
+        var name=dec.decode(new Uint8Array(dv.buffer,dv.byteOffset+p+46,nl));
+        var xp=p+46+nl,xe=xp+xl;
+        while(xp+4<=xe){
+          var id=dv.getUint16(xp,true),sz=dv.getUint16(xp+2,true),q=xp+4;
+          if(id===1){
+            if(usize===0xFFFFFFFF){usize=Number(dv.getBigUint64(q,true));q+=8;}
+            if(csize===0xFFFFFFFF){csize=Number(dv.getBigUint64(q,true));q+=8;}
+            if(loff===0xFFFFFFFF){loff=Number(dv.getBigUint64(q,true));q+=8;}
+          }
+          xp+=4+sz;
+        }
+        list.push({name:name,method:method,csize:csize,usize:usize,loff:loff});
+        p+=46+nl+xl+cl;
+      }
+      return list;
+    });
+  });
+}
+function zipEntryBlob(file,en){
+  return zipRd(file,en.loff,30).then(function(dv){
+    if(dv.getUint32(0,true)!==0x04034b50)throw new Error('Corrupt entry '+en.name);
+    var start=en.loff+30+dv.getUint16(26,true)+dv.getUint16(28,true);
+    var raw=file.slice(start,start+en.csize);
+    if(en.method===0)return raw;
+    if(en.method===8&&typeof DecompressionStream!=='undefined'){
+      return new Response(raw.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
+    }
+    throw new Error('Unsupported compression in '+en.name+' (use a ZIP without compression)');
+  });
+}
+function restoreFromZip(inp){
+  var file=inp.files&&inp.files[0];inp.value='';
+  if(!file)return;
+  var prog=document.getElementById('bk-prog'),lbl=document.getElementById('bk-prog-label'),
+      pct=document.getElementById('bk-prog-pct'),bar=document.getElementById('bk-prog-bar');
+  zipEntries(file).then(function(all){
+    var list=all.filter(function(en){
+      var b=en.name.split('/').pop();
+      en.base=b;
+      return b&&en.name.slice(-1)!=='/'&&/\.(wav|json)$/i.test(b)&&b.indexOf('..')<0&&b.charAt(0)!=='.';
+    });
+    if(!list.length)throw new Error('No song or settings files found in this ZIP');
+    var total=list.reduce(function(s,en){return s+en.usize;},0);
+    if(!confirm('Restore '+list.length+' file(s) ('+fmtSize(total)+') from "'+file.name+'"?\n\nExisting files with the same name are OVERWRITTEN and the player restarts afterwards.'))return;
+    prog.style.display='block';
+    var done=0,doneBytes=0;
+    function step(){
+      if(done>=list.length){
+        lbl.textContent='Restore complete \u2013 the player is restarting\u2026';pct.textContent='';bar.style.width='100%';
+        return fetch('/api/restart',{method:'POST'}).catch(function(){}).then(function(){
+          setTimeout(function(){location.reload();},12000);
+        });
+      }
+      var en=list[done];
+      lbl.textContent=(done+1)+'/'+list.length+'  '+en.base;
+      return zipEntryBlob(file,en).then(function(blob){
+        return uploadOne(blob,en.base,function(p){
+          pct.textContent=p+'%';
+          bar.style.width=Math.round((doneBytes+en.usize*p/100)/Math.max(total,1)*100)+'%';
+        },true);
+      }).then(function(){doneBytes+=en.usize;done++;return step();});
+    }
+    return step();
+  }).catch(function(err){
+    prog.style.display='block';lbl.textContent='Restore failed: '+err.message;pct.textContent='';
+  });
+}
+
 function loadFiles(){
   fetch('/api/files').then(function(r){
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -610,6 +766,8 @@ function loadFiles(){
 
 function renderFiles(files){
   tbody.innerHTML='';
+  g_wavBytes=(files||[]).reduce(function(s,f){return s+(f.size||0);},0);
+  updateBackupEstimate();
   if(!files||!files.length){
     g_files=[];
     renderPlaylists();
@@ -958,6 +1116,20 @@ window.duplicateSong=duplicateSong;
 window.setActivePlaylist=setActivePlaylist;
 window.setActivePlaylistByIndex=setActivePlaylistByIndex;
 
+function runDiag(test){
+  var log=document.getElementById('diag-log'),b1=document.getElementById('diag-sd-btn'),b2=document.getElementById('diag-cpu-btn'),b3=document.getElementById('diag-raw-btn');
+  log.style.display='block';log.textContent='Running '+test+' test...\n';b1.disabled=b2.disabled=b3.disabled=true;
+  fetch('/api/diag?test='+test+'&secs=6',{method:'POST'}).then(function(r){
+    var rd=r.body.getReader(),dec=new TextDecoder();
+    function pump(){return rd.read().then(function(c){
+      if(c.done)return;
+      log.textContent+=dec.decode(c.value,{stream:true});log.scrollTop=log.scrollHeight;return pump();});}
+    return pump();
+  }).catch(function(e){log.textContent+='\nConnection closed ('+e.message+')\n';})
+    .then(function(){b1.disabled=b2.disabled=b3.disabled=false;});
+}
+window.runDiag=runDiag;
+
 var g_aboutLoaded=false,g_aboutTries=0;
 function showDisplayInfo(d){
   var v=document.getElementById('about-disp-version'),b=document.getElementById('about-disp-build'),i=document.getElementById('about-disp-idf');
@@ -985,6 +1157,13 @@ function loadAboutInfo(){
     document.getElementById('about-version').textContent='Player firmware: v'+ver;
     document.getElementById('about-build').textContent='Build: '+bdate+' '+btime+'  ('+hash+')';
     document.getElementById('about-idf').textContent='ESP-IDF: '+idf;
+    var sd=a.sd, sdEl=document.getElementById('about-sd');
+    if(sd){
+      var mhz=function(k){return (k/1000).toFixed(1)+' MHz';};
+      sdEl.textContent='SD card: '+sd.name+' ('+sd.type+', '+sd.size_mb+' MB, SD spec '+sd.spec+'), '+sd.bus_bits+'-bit bus, running at '+mhz(sd.freq_khz)+
+        ' (card limit '+mhz(sd.card_limit_khz)+', host allows '+mhz(sd.host_max_khz)+')'+
+        (sd.card_limit_khz<=20000&&sd.host_max_khz>20000?' - standard speed, the card does not use high-speed mode':'');
+    }else{sdEl.textContent='SD card: not mounted';}
     if(a.display){showDisplayInfo(a.display);g_aboutLoaded=true;}
     else if(++g_aboutTries<4){   /* the display answers the request a moment later: retry */
       document.getElementById('about-disp-version').textContent='Display firmware: querying display...';
@@ -1108,6 +1287,9 @@ function loadConfig(){
     if(c.ui_mode!==undefined){document.getElementById('sl-ui_mode').value=String(c.ui_mode);}
     if(c.player_end_action!==undefined){document.getElementById('sl-player_end_action').value=String(c.player_end_action);}
     if(c.vol_full!==undefined){document.getElementById('sl-vol_full').value=String(c.vol_full);}
+    if(c.vol_range_db!==undefined){document.getElementById('sl-vol_range_db').value=c.vol_range_db;document.getElementById('vv-vol_range_db').textContent=c.vol_range_db;}
+    if(c.speed_min_x10!==undefined){document.getElementById('sl-speed_min_x10').value=c.speed_min_x10;document.getElementById('vv-speed_min_x10').textContent=(c.speed_min_x10/10).toFixed(1);}
+    if(c.speed_max_x10!==undefined){document.getElementById('sl-speed_max_x10').value=c.speed_max_x10;document.getElementById('vv-speed_max_x10').textContent=(c.speed_max_x10/10).toFixed(1);}
     if(c.crank_dir!==undefined){document.getElementById('sl-crank_dir').value=String(c.crank_dir);}
     if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
     if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
@@ -1132,6 +1314,9 @@ function saveConfig(){
   var um =parseInt(document.getElementById('sl-ui_mode').value);
   var pea=parseInt(document.getElementById('sl-player_end_action').value);
   var vfl=parseInt(document.getElementById('sl-vol_full').value);
+  var vrd=parseInt(document.getElementById('sl-vol_range_db').value);
+  var smin=parseInt(document.getElementById('sl-speed_min_x10').value);
+  var smax=parseInt(document.getElementById('sl-speed_max_x10').value);
   var lbw=parseFloat(document.getElementById('sl-lo_bass_weight').value);
   var lmw=parseFloat(document.getElementById('sl-lo_mid_weight').value);
   var ldr=parseFloat(document.getElementById('sl-lo_decay_rate').value);
@@ -1140,7 +1325,7 @@ function saveConfig(){
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,vol_full:vfl,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,vol_full:vfl,vol_range_db:vrd,speed_min_x10:smin,speed_max_x10:smax,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -1159,6 +1344,9 @@ function resetConfig(){
   document.getElementById('sl-ui_mode').value='0';
   document.getElementById('sl-player_end_action').value='0';
   document.getElementById('sl-vol_full').value='0';
+  document.getElementById('sl-vol_range_db').value='40';document.getElementById('vv-vol_range_db').textContent='40';
+  document.getElementById('sl-speed_min_x10').value='7';document.getElementById('vv-speed_min_x10').textContent='0.7';
+  document.getElementById('sl-speed_max_x10').value='14';document.getElementById('vv-speed_max_x10').textContent='1.4';
   document.getElementById('sl-crank_dir').value='-1';
   setSlider('lo_bass_weight', 45,   0);
   setSlider('lo_mid_weight',  5,    1);
@@ -1245,9 +1433,13 @@ function openSongSettings(name){
       if(isNaN(dmx)||dmx<0||dmx>2)dmx=0;
       document.getElementById('ss-downmix').value=String(dmx);
       var dmxFade=(s.downmix_fade_s!==undefined)?parseInt(s.downmix_fade_s,10):1;
-      if(isNaN(dmxFade)||dmxFade<0||dmxFade>10)dmxFade=1;
+      if(isNaN(dmxFade)||dmxFade<0||dmxFade>20)dmxFade=1;
       document.getElementById('ss-downmix-fade').value=dmxFade;
       document.getElementById('ss-downmix-fade-val').textContent=dmxFade+'s';
+      var xfs=(s.crossfade_s!==undefined)?parseInt(s.crossfade_s,10):0;
+      if(isNaN(xfs)||xfs<0||xfs>20)xfs=0;
+      document.getElementById('ss-xfade').value=xfs;
+      document.getElementById('ss-xfade-val').textContent=xfs==0?'Off':xfs+'s';
       var ho=s.dimmer_holdoff_s||0;
       document.getElementById('ss-holdoff').value=ho;
       document.getElementById('ss-holdoff-val').textContent=ho+'s';
@@ -1279,6 +1471,7 @@ function ssSave(){
     gain_db:parseInt(document.getElementById('ss-gain').value,10),
     downmix_mode:parseInt(document.getElementById('ss-downmix').value,10),
     downmix_fade_s:parseInt(document.getElementById('ss-downmix-fade').value,10),
+    crossfade_s:parseInt(document.getElementById('ss-xfade').value,10),
     dimmer_holdoff_s:parseInt(document.getElementById('ss-holdoff').value),
     dimmer_fadein_s:parseInt(document.getElementById('ss-fadein').value),
     dimmer_max:parseInt(document.getElementById('ss-dmax').value),
@@ -1326,7 +1519,7 @@ loadPlaylists();
     <div id="ss-fixed-sub" class="ss-sub" style="display:none">
       <div class="ss-sr">
         <div class="ss-sl"><span class="ss-sn">Speed multiplier</span><span class="ss-sv" id="ss-fixed-val">1.00&times;</span></div>
-        <input type="range" class="cfg-slider" id="ss-fixed-spd" min="0.70" max="1.40" step="0.01" value="1.00"
+        <input type="range" class="cfg-slider" id="ss-fixed-spd" min="0.20" max="2.00" step="0.01" value="1.00"
           oninput="document.getElementById('ss-fixed-val').textContent=parseFloat(this.value).toFixed(2)+'\u00d7'">
       </div>
     </div>
@@ -1354,9 +1547,15 @@ loadPlaylists();
     </div>
     <div class="ss-sr">
       <div class="ss-sl"><span class="ss-sn">Downmix change fade</span><span class="ss-sv" id="ss-downmix-fade-val">1s</span></div>
-      <input type="range" class="cfg-slider" id="ss-downmix-fade" min="0" max="10" step="1" value="1"
+      <input type="range" class="cfg-slider" id="ss-downmix-fade" min="0" max="20" step="1" value="1"
         oninput="document.getElementById('ss-downmix-fade-val').textContent=this.value+'s'">
       <p class="ss-hint">Fade time used when changing downmix while this song is playing. 0 = immediate.</p>
+    </div>
+    <div class="ss-sr">
+      <div class="ss-sl"><span class="ss-sn">Crossfade to next/previous song</span><span class="ss-sv" id="ss-xfade-val">Off</span></div>
+      <input type="range" class="cfg-slider" id="ss-xfade" min="0" max="20" step="1" value="0"
+        oninput="document.getElementById('ss-xfade-val').textContent=this.value==0?'Off':this.value+'s'">
+      <p class="ss-hint">Pressing Next/Prev while this song plays blends into the other song over this time. 0 = off (hard cut).</p>
     </div>
     <hr class="ss-sep">
     <div class="ss-sr">

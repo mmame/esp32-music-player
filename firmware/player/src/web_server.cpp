@@ -36,7 +36,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <time.h>
+#include "esp_heap_caps.h"
+#include "esp_rom_crc.h"
+#include "esp_system.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -44,6 +49,7 @@
 
 #include "disp_ota.h"
 #include "uart_master.h"
+#include "diag.h"
 #include "crank_config.h"
 #include "buttons.h"
 #include "potis.h"
@@ -75,6 +81,23 @@ static bool           s_running   = false;
 /* Reusable transfer buffer – lives in BSS; HTTP server is single-task so
  * it is never accessed from two handlers simultaneously.                 */
 static char s_xfer_buf[XFER_BUF_SIZE];
+
+/* Transfer tracking: the WiFi auto-off timer must not cut a backup / restore / download / update.
+ * A restore is a series of uploads with short gaps, so "active" also covers a grace period after the
+ * last transfer ended. */
+#define XFER_GRACE_US (60LL * 1000 * 1000)
+static volatile int     s_xfer_active  = 0;
+static volatile int64_t s_xfer_last_us = 0;
+
+struct XferGuard {
+    XferGuard()  { s_xfer_active = s_xfer_active + 1; s_xfer_last_us = esp_timer_get_time(); }
+    ~XferGuard() { s_xfer_active = s_xfer_active - 1; s_xfer_last_us = esp_timer_get_time(); }
+};
+
+bool web_server_transfer_active(void)
+{
+    return s_xfer_active > 0 || (esp_timer_get_time() - s_xfer_last_us) < XFER_GRACE_US;
+}
 
 /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -118,6 +141,26 @@ static bool fname_valid(const char *name)
             (e[1] == 'w' || e[1] == 'W') &&
             (e[2] == 'a' || e[2] == 'A') &&
             (e[3] == 'v' || e[3] == 'V'));
+}
+
+/** Upload / restore accept song files (.wav) and settings files (.json), plain names only. */
+static bool fname_valid_json(const char *name)
+{
+    if (!name || name[0] == '\0') return false;
+    size_t len = strlen(name);
+    if (len < 6 || len > MAX_FNAME_LEN) return false;
+    if (strstr(name, "..") != nullptr) return false;
+    for (const char *p = name; *p; p++) {
+        if (*p == '/' || *p == '\\') return false;
+    }
+    const char *e = name + len - 5;
+    return (e[0] == '.' && (e[1] == 'j' || e[1] == 'J') && (e[2] == 's' || e[2] == 'S') &&
+            (e[3] == 'o' || e[3] == 'O') && (e[4] == 'n' || e[4] == 'N'));
+}
+
+static bool fname_is_json(const char *name)
+{
+    return fname_valid_json(name);
 }
 
 static int ascii_tolower(int c)
@@ -441,6 +484,7 @@ static esp_err_t files_get_handler(httpd_req_t *req)
 
 static esp_err_t download_get_handler(httpd_req_t *req)
 {
+    XferGuard xfer_guard;
     char fname[MAX_FNAME_LEN + 1] = {};
     if (!get_query_param(req, "name", fname, sizeof(fname)) || !fname_valid(fname)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing filename");
@@ -485,18 +529,212 @@ static esp_err_t download_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* ── GET /api/backup?songs=0|1  → streaming ZIP (stored, no compression) ───────────
+ *
+ * Contains every .json settings file in the SD root (crank_config, playlists, button map, per-song
+ * settings) and, with songs=1, every .wav.  The size of the archive is known in advance (stored entries),
+ * so Content-Length is sent and the browser can show progress.  Entries use a data descriptor (CRC after
+ * the data), so nothing is buffered or written to the SD card.  Offsets beyond 4 GB use ZIP64.        */
+
+#define BK_MAX_ENTRIES 1024
+
+struct BkEntry {
+    char     name[MAX_FNAME_LEN + 1];
+    uint32_t size;
+    uint32_t crc;
+    uint64_t offset;
+    uint16_t dtime, ddate;
+};
+
+static inline void bk_p16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static inline void bk_p32(uint8_t *p, uint32_t v) { bk_p16(p, (uint16_t)v); bk_p16(p + 2, (uint16_t)(v >> 16)); }
+static inline void bk_p64(uint8_t *p, uint64_t v) { bk_p32(p, (uint32_t)v); bk_p32(p + 4, (uint32_t)(v >> 32)); }
+
+static bool bk_send(httpd_req_t *req, const void *buf, size_t len)
+{
+    const char *p = (const char *)buf;
+    while (len > 0) {
+        int r = httpd_send(req, p, len);
+        if (r <= 0) return false;
+        p += r;
+        len -= (size_t)r;
+    }
+    return true;
+}
+
+static bool name_has_ext_ci(const char *name, const char *ext)   /* ext incl. dot, lower case */
+{
+    size_t nl = strlen(name), el = strlen(ext);
+    if (nl <= el) return false;
+    for (size_t i = 0; i < el; i++) {
+        if (ascii_tolower((unsigned char)name[nl - el + i]) != ext[i]) return false;
+    }
+    return true;
+}
+
+static esp_err_t backup_get_handler(httpd_req_t *req)
+{
+    XferGuard xfer_guard;
+    char q[4] = {};
+    const bool songs = get_query_param(req, "songs", q, sizeof(q)) && q[0] == '1';
+
+    BkEntry *ent = (BkEntry *)heap_caps_calloc(BK_MAX_ENTRIES, sizeof(BkEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ent) ent = (BkEntry *)calloc(BK_MAX_ENTRIES, sizeof(BkEntry));
+    if (!ent) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory"); return ESP_FAIL; }
+
+    /* 1. collect */
+    int n = 0;
+    DIR *dir = opendir(MOUNT_POINT);
+    if (!dir) {
+        free(ent);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD card error");
+        return ESP_FAIL;
+    }
+    struct dirent *de;
+    while ((de = readdir(dir)) != nullptr && n < BK_MAX_ENTRIES) {
+        const char *nm = de->d_name;
+        if (strlen(nm) > MAX_FNAME_LEN || nm[0] == '.') continue;
+        const bool is_wav = name_has_ext_ci(nm, ".wav");
+        if (!(is_wav ? songs : name_has_ext_ci(nm, ".json"))) continue;
+        char path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
+        build_path(path, sizeof(path), nm);
+        struct stat st = {};
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size >= 0xFFFFFFFFLL) continue;
+        BkEntry &e = ent[n++];
+        strlcpy(e.name, nm, sizeof(e.name));
+        e.size = (uint32_t)st.st_size;
+        struct tm tmv = {};
+        time_t mt = st.st_mtime;
+        gmtime_r(&mt, &tmv);
+        int yr = tmv.tm_year + 1900;
+        if (yr < 1980) { yr = 1980; tmv.tm_mon = 0; tmv.tm_mday = 1; tmv.tm_hour = tmv.tm_min = tmv.tm_sec = 0; }
+        e.ddate = (uint16_t)(((yr - 1980) << 9) | ((tmv.tm_mon + 1) << 5) | tmv.tm_mday);
+        e.dtime = (uint16_t)((tmv.tm_hour << 11) | (tmv.tm_min << 5) | (tmv.tm_sec / 2));
+    }
+    closedir(dir);
+
+    /* 2. layout: every size is known, so the archive length is too */
+    uint64_t off = 0;
+    for (int i = 0; i < n; i++) {
+        ent[i].offset = off;
+        off += 30u + strlen(ent[i].name) + ent[i].size + 16u;
+    }
+    const uint64_t cd_start = off;
+    uint64_t cd_len = 0;
+    for (int i = 0; i < n; i++) cd_len += 46u + strlen(ent[i].name) + (ent[i].offset >= 0xFFFFFFFFull ? 12u : 0u);
+    const bool z64 = (cd_start + cd_len >= 0xFFFFFFFFull) || n >= 0xFFFF;
+    const uint64_t total = cd_start + cd_len + (z64 ? 56u + 20u : 0u) + 22u;
+
+    char hdr[300];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: %llu\r\n"
+                      "Content-Disposition: attachment; filename=\"musicplayer-backup%s.zip\"\r\n"
+                      "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                      (unsigned long long)total, songs ? "" : "-settings");
+    if (!bk_send(req, hdr, (size_t)hl)) { free(ent); return ESP_FAIL; }
+    ESP_LOGI(TAG, "Backup: %d files, %llu bytes%s", n, (unsigned long long)total, songs ? " (with songs)" : "");
+
+    /* 3. stream */
+    bool ok = true;
+    uint8_t h[64];
+    for (int i = 0; i < n && ok; i++) {
+        BkEntry &e = ent[i];
+        const uint16_t nl = (uint16_t)strlen(e.name);
+        bk_p32(h, 0x04034b50); bk_p16(h + 4, 20); bk_p16(h + 6, 0x0808); bk_p16(h + 8, 0);
+        bk_p16(h + 10, e.dtime); bk_p16(h + 12, e.ddate);
+        bk_p32(h + 14, 0); bk_p32(h + 18, 0); bk_p32(h + 22, 0);
+        bk_p16(h + 26, nl); bk_p16(h + 28, 0);
+        ok = bk_send(req, h, 30) && bk_send(req, e.name, nl);
+        if (!ok) break;
+
+        char path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
+        build_path(path, sizeof(path), e.name);
+        FILE *f = fopen(path, "rb");
+        uint32_t crc = 0, left = e.size;
+        while (left > 0 && ok) {
+            size_t want = left < sizeof(s_xfer_buf) ? left : sizeof(s_xfer_buf);
+            size_t got = f ? fread(s_xfer_buf, 1, want, f) : 0;
+            if (got < want) memset(s_xfer_buf + got, 0, want - got);   /* file shrank / unreadable: keep the length */
+            crc = esp_rom_crc32_le(crc, (const uint8_t *)s_xfer_buf, (uint32_t)want);
+            ok = bk_send(req, s_xfer_buf, want);
+            left -= (uint32_t)want;
+        }
+        if (f) fclose(f);
+        if (!ok) break;
+        e.crc = crc;
+        bk_p32(h, 0x08074b50); bk_p32(h + 4, crc); bk_p32(h + 8, e.size); bk_p32(h + 12, e.size);
+        ok = bk_send(req, h, 16);
+    }
+
+    /* central directory */
+    for (int i = 0; i < n && ok; i++) {
+        BkEntry &e = ent[i];
+        const uint16_t nl = (uint16_t)strlen(e.name);
+        const bool big = e.offset >= 0xFFFFFFFFull;
+        bk_p32(h, 0x02014b50); bk_p16(h + 4, 20); bk_p16(h + 6, 20); bk_p16(h + 8, 0x0808); bk_p16(h + 10, 0);
+        bk_p16(h + 12, e.dtime); bk_p16(h + 14, e.ddate);
+        bk_p32(h + 16, e.crc); bk_p32(h + 20, e.size); bk_p32(h + 24, e.size);
+        bk_p16(h + 28, nl); bk_p16(h + 30, big ? 12 : 0); bk_p16(h + 32, 0);
+        bk_p16(h + 34, 0); bk_p16(h + 36, 0); bk_p32(h + 38, 0);
+        bk_p32(h + 42, big ? 0xFFFFFFFFu : (uint32_t)e.offset);
+        ok = bk_send(req, h, 46) && bk_send(req, e.name, nl);
+        if (ok && big) {
+            bk_p16(h, 0x0001); bk_p16(h + 2, 8); bk_p64(h + 4, e.offset);
+            ok = bk_send(req, h, 12);
+        }
+    }
+    if (ok && z64) {
+        bk_p32(h, 0x06064b50); bk_p64(h + 4, 44); bk_p16(h + 12, 45); bk_p16(h + 14, 45);
+        bk_p32(h + 16, 0); bk_p32(h + 20, 0); bk_p64(h + 24, (uint64_t)n); bk_p64(h + 32, (uint64_t)n);
+        bk_p64(h + 40, cd_len); bk_p64(h + 48, cd_start);
+        ok = bk_send(req, h, 56);
+        if (ok) {
+            bk_p32(h, 0x07064b50); bk_p32(h + 4, 0); bk_p64(h + 8, cd_start + cd_len); bk_p32(h + 16, 1);
+            ok = bk_send(req, h, 20);
+        }
+    }
+    if (ok) {
+        bk_p32(h, 0x06054b50); bk_p16(h + 4, 0); bk_p16(h + 6, 0);
+        bk_p16(h + 8, n >= 0xFFFF ? 0xFFFF : (uint16_t)n); bk_p16(h + 10, n >= 0xFFFF ? 0xFFFF : (uint16_t)n);
+        bk_p32(h + 12, z64 ? 0xFFFFFFFFu : (uint32_t)cd_len);
+        bk_p32(h + 16, z64 ? 0xFFFFFFFFu : (uint32_t)cd_start);
+        bk_p16(h + 20, 0);
+        ok = bk_send(req, h, 22);
+    }
+    free(ent);
+    if (!ok) ESP_LOGW(TAG, "Backup aborted (client disconnected?)");
+    return ok ? ESP_OK : ESP_FAIL;
+}
+
+/* ── POST /api/restart  (after a restore, so the player re-reads all its settings) ── */
+
+static void restart_task(void *)
+{
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+}
+
+static esp_err_t restart_post_handler(httpd_req_t *req)
+{
+    httpd_resp_sendstr(req, "OK");
+    xTaskCreate(restart_task, "restart", 2048, nullptr, 5, nullptr);
+    return ESP_OK;
+}
+
 /* ── POST /upload?name=<file.wav> ────────────────────────────────────── */
 
 static esp_err_t upload_post_handler(httpd_req_t *req)
 {
+    XferGuard xfer_guard;
     char fname[MAX_FNAME_LEN + 1] = {};
-    if (!get_query_param(req, "name", fname, sizeof(fname)) || !fname_valid(fname)) {
+    if (!get_query_param(req, "name", fname, sizeof(fname)) || !(fname_valid(fname) || fname_valid_json(fname))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing filename");
         return ESP_FAIL;
     }
+    const bool is_json = fname_is_json(fname);
 
     /* Trim basename to MAX_BASENAME_LEN characters (keep .wav extension). */
-    {
+    if (!is_json) {
         size_t total = strlen(fname);
         if (total > 4) {
             size_t base_len = total - 4; /* length without ".wav" */
@@ -561,7 +799,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", fname, written);
-    if (s_rescan_cb) s_rescan_cb();
+    if (s_rescan_cb && !is_json) s_rescan_cb();
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
@@ -908,7 +1146,7 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              "\"dimmer_start_fade_ms\":%u,\"dimmer_stop_fade_ms\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
              "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
-             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u,\"vol_full\":%u}",
+             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u,\"vol_full\":%u,\"vol_range_db\":%u,\"speed_min_x10\":%u,\"speed_max_x10\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
              (double)g_crank_cfg.stop_thresh,
@@ -928,7 +1166,10 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (unsigned)g_crank_cfg.gain_db,
              (unsigned)g_crank_cfg.ui_mode,
              (unsigned)g_crank_cfg.player_end_action,
-             (unsigned)g_crank_cfg.vol_full);
+             (unsigned)g_crank_cfg.vol_full,
+             (unsigned)g_crank_cfg.vol_range_db,
+             (unsigned)g_crank_cfg.speed_min_x10,
+             (unsigned)g_crank_cfg.speed_max_x10);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     return httpd_resp_sendstr(req, buf);
@@ -960,16 +1201,28 @@ static esp_err_t about_get_handler(httpd_req_t *req)
         uart_master_request_display_info();
     }
 
-    char buf[640];
+    /* SD card as negotiated at mount time */
+    char sd_json[256] = "null";
+    sd_info_t sd;
+    if (diag_get_sd_info(&sd)) {
+        snprintf(sd_json, sizeof(sd_json),
+                 "{\"name\":\"%s\",\"type\":\"%s\",\"size_mb\":%lu,\"bus_bits\":%u,\"freq_khz\":%lu,"
+                 "\"card_limit_khz\":%lu,\"host_max_khz\":%lu,\"spec\":\"%s\"}",
+                 sd.name, sd.type, (unsigned long)sd.size_mb, (unsigned)sd.bus_bits, (unsigned long)sd.freq_khz,
+                 (unsigned long)sd.card_limit_khz, (unsigned long)sd.host_max_khz, sd.spec);
+    }
+
+    char buf[960];
     snprintf(buf, sizeof(buf),
-             "{\"project\":\"%s\",\"version\":\"%s\",\"idf\":\"%s\",\"build_date\":\"%s\",\"build_time\":\"%s\",\"build_hash\":\"%s\",\"display\":%s}",
+             "{\"project\":\"%s\",\"version\":\"%s\",\"idf\":\"%s\",\"build_date\":\"%s\",\"build_time\":\"%s\",\"build_hash\":\"%s\",\"display\":%s,\"sd\":%s}",
              desc->project_name,
              desc->version,
              desc->idf_ver,
              desc->date,
              desc->time,
              sha_short,
-             disp_json);
+             disp_json,
+             sd_json);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
@@ -1035,6 +1288,9 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_u8(root, "ui_mode", 0, 1, &nc.ui_mode);
     read_u8(root, "player_end_action", 0, 2, &nc.player_end_action);
     read_u8(root, "vol_full", 0, 1, &nc.vol_full);
+    read_u8(root, "vol_range_db", 20, 60, &nc.vol_range_db);
+    read_u8(root, "speed_min_x10", 2, 10, &nc.speed_min_x10);
+    read_u8(root, "speed_max_x10", 10, 20, &nc.speed_max_x10);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
@@ -1145,6 +1401,7 @@ static esp_err_t pot_cal_post_handler(httpd_req_t *req)
  */
 static esp_err_t player_update_post_handler(httpd_req_t *req)
 {
+    XferGuard xfer_guard;
     int total = (int)req->content_len;
     ESP_LOGI(TAG, "player_update: content_len=%d", total);
     if (total <= 0 || total > 4 * 1024 * 1024) {
@@ -1283,6 +1540,7 @@ static esp_err_t player_update_post_handler(httpd_req_t *req)
  */
 static esp_err_t disp_update_post_handler(httpd_req_t *req)
 {
+    XferGuard xfer_guard;
     int total = (int)req->content_len;
     if (total <= 0 || total > 4 * 1024 * 1024) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -1402,6 +1660,32 @@ static esp_err_t disp_log_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── POST /api/diag?test=sd|cpu|all&secs=<2-20>&core=<0|1> ─────────────── */
+
+/** SD throughput / CPU load tests (see diag.h); streams the report as chunked plain text. */
+static esp_err_t diag_post_handler(httpd_req_t *req)
+{
+    char test[8] = "all";
+    char s[8] = {};
+    uint32_t secs = 6;
+    int core = 1;
+    get_query_param(req, "test", test, sizeof(test));
+    if (get_query_param(req, "secs", s, sizeof(s))) {
+        long v = strtol(s, nullptr, 10);
+        if (v >= 2 && v <= 20) secs = (uint32_t)v;
+    }
+    if (get_query_param(req, "core", s, sizeof(s))) core = (s[0] == '0') ? 0 : 1;
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+
+    diag_run(req, test, secs, core);
+
+    httpd_resp_send_chunk(req, nullptr, 0);
+    return ESP_OK;
+}
+
 /* ── GET /api/song_settings?name=<file.wav> ────────────────────────── */
 
 static esp_err_t song_settings_get_handler(httpd_req_t *req)
@@ -1420,13 +1704,13 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
 
     const char *end_action = s.loop ? "loop" : (s.autoplay_next ? "next" : "none");
 
-    char buf[480];
+    char buf[520];
     snprintf(buf, sizeof(buf),
              "{\"end_action\":\"%s\",\"loop\":%s,\"autoplay_next\":%s,\"fixed_speed_en\":%s,\"fixed_speed\":%.2f,"
              "\"pitch_influence\":%u,"
              "\"dimmer_max\":%u,\"dimmer_min\":%u,"
              "\"dimmer_rps_ref\":%.2f,\"dimmer_holdoff_s\":%u,\"dimmer_fadein_s\":%u,"
-             "\"light_organ\":%s,\"downmix_mode\":%u,\"downmix_fade_s\":%u,\"gain_db\":%d}",
+             "\"light_organ\":%s,\"downmix_mode\":%u,\"downmix_fade_s\":%u,\"crossfade_s\":%u,\"gain_db\":%d}",
              end_action,
              s.loop ? "true" : "false",
              s.autoplay_next ? "true" : "false",
@@ -1441,6 +1725,7 @@ static esp_err_t song_settings_get_handler(httpd_req_t *req)
              s.light_organ ? "true" : "false",
              (unsigned)s.downmix_mode,
              (unsigned)s.downmix_fade_s,
+             (unsigned)s.crossfade_s,
              (int)s.gain_db);
 
     httpd_resp_set_type(req, "application/json");
@@ -1486,6 +1771,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     uint8_t downmix_mode = 0;
     uint8_t downmix_fade_s = 1;
     int8_t  gain_db = 0;
+    uint8_t crossfade_s = 0;
 
     cJSON *it;
     it = cJSON_GetObjectItemCaseSensitive(root, "end_action");
@@ -1510,7 +1796,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     it = cJSON_GetObjectItemCaseSensitive(root, "fixed_speed_en");
     if (cJSON_IsBool(it)) fixed_en = cJSON_IsTrue(it);
     it = cJSON_GetObjectItemCaseSensitive(root, "fixed_speed");
-    if (cJSON_IsNumber(it)) { float v = (float)it->valuedouble; if (v >= 0.5f && v <= 2.0f) fixed_spd = v; }
+    if (cJSON_IsNumber(it)) { float v = (float)it->valuedouble; if (v >= 0.2f && v <= 2.0f) fixed_spd = v; }
     it = cJSON_GetObjectItemCaseSensitive(root, "pitch_influence");
     if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; pitch = (uint8_t)(v < 0 ? 0 : v > 100 ? 100 : v); }
     it = cJSON_GetObjectItemCaseSensitive(root, "dimmer_max");
@@ -1530,7 +1816,9 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     it = cJSON_GetObjectItemCaseSensitive(root, "downmix_mode");
     if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_mode = (uint8_t)(v < 0 ? 0 : v > 2 ? 2 : v); }
     it = cJSON_GetObjectItemCaseSensitive(root, "downmix_fade_s");
-    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_fade_s = (uint8_t)(v < 0 ? 0 : v > 10 ? 10 : v); }
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; downmix_fade_s = (uint8_t)(v < 0 ? 0 : v > 20 ? 20 : v); }
+    it = cJSON_GetObjectItemCaseSensitive(root, "crossfade_s");
+    if (cJSON_IsNumber(it)) { int v = (int)it->valuedouble; crossfade_s = (uint8_t)(v < 0 ? 0 : v > 20 ? 20 : v); }
     it = cJSON_GetObjectItemCaseSensitive(root, "gain_db");
     if (cJSON_IsNumber(it)) {
         int v = (int)(it->valuedouble < 0 ? it->valuedouble - 0.5 : it->valuedouble + 0.5);
@@ -1544,7 +1832,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     wav_to_json_path(wav_path, json_path, sizeof(json_path));
 
     bool dimmer_default = (d_max == 100 && d_min == 0 && fabsf(d_rps - 1.4f) <= 0.05f);
-    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ && downmix_mode == 0u && gain_db == 0) {
+    if (!loop && !autoplay_next && !fixed_en && pitch == 0 && dimmer_default && d_hoff == 0 && d_fadein == 0 && !light_organ && downmix_mode == 0u && gain_db == 0 && crossfade_s == 0) {
         if (downmix_fade_s == 1u) {
         remove(json_path);
         ESP_LOGI(TAG, "Song settings cleared via web for %s", fname);
@@ -1571,6 +1859,7 @@ static esp_err_t song_settings_post_handler(httpd_req_t *req)
     if (light_organ) cJSON_AddBoolToObject(out, "light_organ", true);
     if (downmix_mode > 0u) cJSON_AddNumberToObject(out, "downmix_mode", downmix_mode);
     if (downmix_fade_s != 1u) cJSON_AddNumberToObject(out, "downmix_fade_s", downmix_fade_s);
+    if (crossfade_s > 0u) cJSON_AddNumberToObject(out, "crossfade_s", crossfade_s);
     if (gain_db != 0) cJSON_AddNumberToObject(out, "gain_db", gain_db);
 
     char *js = cJSON_PrintUnformatted(out);
@@ -1732,7 +2021,7 @@ static httpd_handle_t start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size        = 16384; /* OTA end/SHA256 verification needs more than default 4K */
-    cfg.max_uri_handlers  = 24;
+    cfg.max_uri_handlers  = 30;
     cfg.recv_wait_timeout = 60;    /* seconds – generous for large OTA uploads */
     cfg.send_wait_timeout = 60;
     cfg.lru_purge_enable  = true;
@@ -1755,10 +2044,13 @@ static httpd_handle_t start_webserver(void)
         { "/api/pot_cal",        HTTP_POST,   pot_cal_post_handler,          nullptr },
         { "/download",           HTTP_GET,    download_get_handler,          nullptr },
         { "/upload",             HTTP_POST,   upload_post_handler,           nullptr },
+        { "/api/backup",         HTTP_GET,    backup_get_handler,            nullptr },
+        { "/api/restart",        HTTP_POST,   restart_post_handler,          nullptr },
         { "/rename",             HTTP_POST,   rename_post_handler,           nullptr },
         { "/delete",             HTTP_DELETE, delete_handler,                nullptr },
         { "/disp_update",        HTTP_POST,   disp_update_post_handler,      nullptr },
         { "/disp_log",           HTTP_POST,   disp_log_post_handler,         nullptr },
+        { "/api/diag",           HTTP_POST,   diag_post_handler,             nullptr },
         { "/player_update",      HTTP_POST,   player_update_post_handler,    nullptr },
         { "/api/song_settings",  HTTP_GET,    song_settings_get_handler,     nullptr },
         { "/api/song_settings",  HTTP_POST,   song_settings_post_handler,    nullptr },

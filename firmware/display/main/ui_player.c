@@ -871,6 +871,7 @@ static void async_cb_show(void *user_data)
     /* Store current song context */
     strlcpy(s_current_song_name, p->song_name, MAX_SONG_NAME_LEN);
     s_current_song_id = p->song_id;
+    ui_songlist_focus_song(p->song_id);   /* so the list shows the song now playing when the player screen is left */
 
     /* Reset indicators until settings response arrives */
     s_bypass_active = false;
