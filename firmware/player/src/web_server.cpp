@@ -577,6 +577,13 @@ static esp_err_t backup_get_handler(httpd_req_t *req)
     XferGuard xfer_guard;
     char q[4] = {};
     const bool songs = get_query_param(req, "songs", q, sizeof(q)) && q[0] == '1';
+    /* ts = browser time (yyyymmddHHMM) for the file name; digits only, the player has no clock */
+    char ts[16] = {};
+    if (get_query_param(req, "ts", ts, sizeof(ts))) {
+        for (char *p = ts; *p; p++) {
+            if (*p < '0' || *p > '9') { ts[0] = ' '; break; }
+        }
+    }
 
     BkEntry *ent = (BkEntry *)heap_caps_calloc(BK_MAX_ENTRIES, sizeof(BkEntry), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!ent) ent = (BkEntry *)calloc(BK_MAX_ENTRIES, sizeof(BkEntry));
@@ -628,9 +635,9 @@ static esp_err_t backup_get_handler(httpd_req_t *req)
     char hdr[300];
     int hl = snprintf(hdr, sizeof(hdr),
                       "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: %llu\r\n"
-                      "Content-Disposition: attachment; filename=\"musicplayer-backup%s.zip\"\r\n"
+                      "Content-Disposition: attachment; filename=\"musicplayer-backup%s%s%s.zip\"\r\n"
                       "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
-                      (unsigned long long)total, songs ? "" : "-settings");
+                      (unsigned long long)total, songs ? "-full" : "-settings", ts[0] ? "-" : "", ts);
     if (!bk_send(req, hdr, (size_t)hl)) { free(ent); return ESP_FAIL; }
     ESP_LOGI(TAG, "Backup: %d files, %llu bytes%s", n, (unsigned long long)total, songs ? " (with songs)" : "");
 

@@ -179,10 +179,11 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <label style="font-size:13px"><input type="checkbox" id="bk-songs" onchange="updateBackupEstimate()"> Include songs (WAV) <span id="bk-songs-info" style="color:#a78bfa"></span></label>
   <div id="bk-est" style="font-size:12px;color:#a78bfa;margin:6px 0"></div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a class="btn btn-sm btn-primary" id="bk-dl" href="/api/backup?songs=0" download>&#8595; Download backup</a>
+    <a class="btn btn-sm btn-primary" id="bk-dl" href="/api/backup?songs=0" onclick="this.href=backupUrl()" download>&#8595; Download backup</a>
     <button class="btn btn-sm btn-ghost" onclick="document.getElementById('bk-file').click()">&#8593; Restore from ZIP&hellip;</button>
     <input type="file" id="bk-file" accept=".zip,application/zip" style="display:none" onchange="restoreFromZip(this)">
   </div>
+  <div id="bk-status" style="display:none;margin-top:10px;padding:8px 10px;border-radius:6px;font-size:13px;border:1px solid #2a3a6a;background:#0d1230"></div>
   <div id="bk-prog" style="display:none;margin-top:10px">
     <div class="p-label"><span id="bk-prog-label"></span><span id="bk-prog-pct"></span></div>
     <div class="p-track"><div class="p-fill p-file" id="bk-prog-bar" style="width:0%"></div></div>
@@ -640,10 +641,15 @@ function fmtDur(s){
   if(m<90)return m+' min';
   return Math.floor(m/60)+' h '+(m%60)+' min';
 }
+function backupUrl(){
+  var d=new Date(),p=function(n){return (n<10?'0':'')+n;};
+  var ts=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes());
+  return '/api/backup?songs='+(document.getElementById('bk-songs').checked?1:0)+'&ts='+ts;
+}
 function updateBackupEstimate(){
   var cb=document.getElementById('bk-songs');if(!cb)return;
   var songs=cb.checked;
-  document.getElementById('bk-dl').href='/api/backup?songs='+(songs?1:0);
+  document.getElementById('bk-dl').href=backupUrl();
   var el=document.getElementById('bk-est');
   document.getElementById('bk-songs-info').textContent=g_wavBytes>0?'– '+fmtSize(g_wavBytes)+', ≈ '+fmtDur(g_wavBytes/BK_RATE)+' download':'';
   if(songs){
@@ -710,31 +716,69 @@ function zipEntryBlob(file,en){
     throw new Error('Unsupported compression in '+en.name+' (use a ZIP without compression)');
   });
 }
+function bkStatus(kind,html){
+  var el=document.getElementById('bk-status');
+  el.style.display='block';
+  el.style.borderColor=kind==='ok'?'#2e7d32':kind==='err'?'#c62828':'#2a3a6a';
+  el.style.color=kind==='ok'?'#81c784':kind==='err'?'#ef9a9a':'#c5cae9';
+  el.innerHTML=html;
+}
+function bkWaitForPlayer(done){
+  /* the player restarts after a restore: wait until it answers again */
+  var t0=Date.now(),wentDown=false;
+  (function poll(){
+    fetch('/api/about',{cache:'no-store'}).then(function(r){
+      if(r.ok&&(wentDown||Date.now()-t0>20000)){done(true);return;}
+      throw new Error('up');
+    }).catch(function(){
+      if(Date.now()-t0>1000)wentDown=true;
+      if(Date.now()-t0>90000){done(false);return;}
+      setTimeout(poll,2000);
+    });
+  })();
+}
 function restoreFromZip(inp){
   var file=inp.files&&inp.files[0];inp.value='';
-  if(!file)return;
+  if(!file){bkStatus('err','No file selected.');return;}
   var prog=document.getElementById('bk-prog'),lbl=document.getElementById('bk-prog-label'),
       pct=document.getElementById('bk-prog-pct'),bar=document.getElementById('bk-prog-bar');
+  prog.style.display='none';
+  bkStatus('info','Reading <b>'+esc(file.name)+'</b> ('+fmtSize(file.size)+')&hellip;');
+  var done=0,list=[];
   zipEntries(file).then(function(all){
-    var list=all.filter(function(en){
+    list=all.filter(function(en){
       var b=en.name.split('/').pop();
       en.base=b;
       return b&&en.name.slice(-1)!=='/'&&/\.(wav|json)$/i.test(b)&&b.indexOf('..')<0&&b.charAt(0)!=='.';
     });
     if(!list.length)throw new Error('No song or settings files found in this ZIP');
     var total=list.reduce(function(s,en){return s+en.usize;},0);
-    if(!confirm('Restore '+list.length+' file(s) ('+fmtSize(total)+') from "'+file.name+'"?\n\nExisting files with the same name are OVERWRITTEN and the player restarts afterwards.'))return;
-    prog.style.display='block';
-    var done=0,doneBytes=0;
+    var nwav=list.filter(function(en){return /\.wav$/i.test(en.base);}).length;
+    if(!confirm('Restore '+list.length+' file(s) ('+nwav+' song(s), '+fmtSize(total)+') from "'+file.name+'"?\n\nExisting files with the same name are OVERWRITTEN and the player restarts afterwards.')){
+      bkStatus('info','Restore cancelled.');
+      return;
+    }
+    bkStatus('info','Restoring '+list.length+' file(s)&hellip; do not close this page.');
+    prog.style.display='block';bar.style.width='0%';
+    var doneBytes=0;
     function step(){
       if(done>=list.length){
-        lbl.textContent='Restore complete \u2013 the player is restarting\u2026';pct.textContent='';bar.style.width='100%';
+        lbl.textContent='All files uploaded.';pct.textContent='';bar.style.width='100%';
+        bkStatus('info','Uploaded <b>'+done+'</b> file(s). Restarting the player&hellip;');
         return fetch('/api/restart',{method:'POST'}).catch(function(){}).then(function(){
-          setTimeout(function(){location.reload();},12000);
+          bkWaitForPlayer(function(back){
+            prog.style.display='none';
+            if(back){
+              bkStatus('ok','&#10004; Restore complete: <b>'+done+'</b> file(s) restored from '+esc(file.name)+'. The player has restarted. <a href="" style="color:#a78bfa">Reload page</a>');
+              loadFiles();
+            } else {
+              bkStatus('ok','&#10004; Restore complete: <b>'+done+'</b> file(s) restored. The player did not answer yet after the restart &ndash; check the WiFi connection and reload the page.');
+            }
+          });
         });
       }
       var en=list[done];
-      lbl.textContent=(done+1)+'/'+list.length+'  '+en.base;
+      lbl.textContent=(done+1)+'/'+list.length+'  '+en.base;pct.textContent='0%';
       return zipEntryBlob(file,en).then(function(blob){
         return uploadOne(blob,en.base,function(p){
           pct.textContent=p+'%';
@@ -744,10 +788,12 @@ function restoreFromZip(inp){
     }
     return step();
   }).catch(function(err){
-    prog.style.display='block';lbl.textContent='Restore failed: '+err.message;pct.textContent='';
+    prog.style.display='none';
+    bkStatus('err','&#10006; Restore failed'+(list.length&&done<list.length?' at <b>'+esc(list[done].base)+'</b> ('+done+' of '+list.length+' files restored)':'')+': '+esc(err.message||String(err)));
   });
 }
 
+window.restoreFromZip=restoreFromZip;window.backupUrl=backupUrl;window.updateBackupEstimate=updateBackupEstimate;
 function loadFiles(){
   fetch('/api/files').then(function(r){
     if(!r.ok)throw new Error('HTTP '+r.status);
