@@ -633,7 +633,7 @@ var g_playlists={active:'',playlists:[]};
 var g_playlistDirty=false;
 
 var g_wavBytes=0;
-var BK_RATE=1048576;   /* measured WiFi download rate, ~1 MB/s */
+var BK_RATE=524288;   /* realistic WiFi download rate, ~0.5 MB/s */
 function fmtDur(s){
   s=Math.max(1,Math.round(s));
   if(s<90)return s+' s';
@@ -653,7 +653,7 @@ function updateBackupEstimate(){
   var el=document.getElementById('bk-est');
   document.getElementById('bk-songs-info').textContent=g_wavBytes>0?'– '+fmtSize(g_wavBytes)+', ≈ '+fmtDur(g_wavBytes/BK_RATE)+' download':'';
   if(songs){
-    el.textContent='Backup size \u2248 '+fmtSize(g_wavBytes)+' \u2192 estimated download time \u2248 '+fmtDur(g_wavBytes/BK_RATE)+' (at ~1 MB/s). Stop playback meanwhile.';
+    el.textContent='Backup size \u2248 '+fmtSize(g_wavBytes)+' \u2192 estimated download time \u2248 '+fmtDur(g_wavBytes/BK_RATE)+' (at ~0.5 MB/s). Stop playback meanwhile.';
   } else {
     el.textContent='Settings only: a few KB, takes a few seconds.';
   }
