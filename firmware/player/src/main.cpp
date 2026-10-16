@@ -2403,8 +2403,37 @@ static void io_task(void *arg)
  * app_main
  * ====================================================================== */
 
+/* Heap trace: milestone lines during startup, plus a line whenever the lowest-ever free internal RAM drops
+ * by another KB (polled every 100 ms), with the free / largest-block values at that moment. */
+static void heap_mark(const char *what)
+{
+    ESP_LOGI("heap", "%-22s internal free %6u  min-ever %6u  largest block %6u  PSRAM free %u", what,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+static void heap_watch_cb(void *)
+{
+    static size_t last_min = (size_t)-1;
+    size_t m = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    if (m + 1024 <= last_min) {
+        last_min = m;
+        heap_mark("NEW LOW");
+    }
+}
+
 extern "C" void app_main(void)
 {
+    heap_mark("boot");
+    {
+        static esp_timer_handle_t hw;
+        const esp_timer_create_args_t a = { .callback = heap_watch_cb, .arg = nullptr,
+                                            .dispatch_method = ESP_TIMER_TASK, .name = "heapwatch",
+                                            .skip_unhandled_events = true };
+        if (esp_timer_create(&a, &hw) == ESP_OK) esp_timer_start_periodic(hw, 100 * 1000);
+    }
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -2427,19 +2456,24 @@ extern "C" void app_main(void)
     s_state_mutex = xSemaphoreCreateMutex();
     configASSERT(s_state_mutex);
 
+    heap_mark("before SD mount");
     mount_sd();
+    heap_mark("after SD mount");
     scan_playlist();
     crank_config_load();
     buttons_load();
+    heap_mark("after scan/config");
 
     //delay 2 seconds to allow the display to boot and send its SYNC command
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     web_server_init(player_rescan);
+    heap_mark("after web server");
     web_server_set_song_settings_callback(on_web_song_settings_saved);
 
 #ifdef HAVE_ADF
     create_pipeline();
+    heap_mark("after pipeline");
 #endif
 
     /* GPIO2: speed-lock switch input, active HIGH */
@@ -2493,4 +2527,5 @@ extern "C" void app_main(void)
     configASSERT(io_ok == pdPASS);
 
     ESP_LOGI(TAG, "All tasks launched");
+    heap_mark("all tasks launched");
 }

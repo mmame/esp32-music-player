@@ -5,7 +5,18 @@ Newest first.
 20261016
 --------
 Player (musicplayer-20261016.bin)
-  * Backup & Restore: the estimated download time now assumes ~0.5 MB/s (1 MB/s was too optimistic).
+  * WiFi/lwip buffers are now allocated in PSRAM first: internal RAM used to run down to a few bytes during fast
+    transfers (backup, upload); it now stays above ~40 KB. No measurable slowdown.
+  * Backup, song upload / restore and song download are double-buffered: the SD card and WiFi work in parallel
+    (two 16 KB halves, no extra RAM). A full backup now runs at ~1.7 MB/s (was < 1 MB/s); the estimated
+    download time assumes 1 MB/s.
+  * New live "WiFi speed test" (About page): measures HTTP download and upload speed over 5-20 s
+    (no SD card involved).
+  * Backup download reads the SD card with multi-sector DMA into internal RAM (like the audio reader) instead
+    of small stdio reads, which should make it noticeably faster.
+  * About page: the WiFi speed test also shows free internal RAM (and the lowest value during the test); the
+    player logs the heap after each backup / upload / download.
+  * Song upload / restore and song download use the same direct SD path (large aligned DMA transfers).
 
 Display (ESP32-8048S050C-full / ESP32-2432S032C-full 20261016)
   * Unchanged since 20261015 (rebuilt only).

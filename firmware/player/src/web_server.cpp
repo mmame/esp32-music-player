@@ -35,11 +35,15 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include <time.h>
 #include "esp_heap_caps.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"
+#include <fcntl.h>
+#include <unistd.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -67,7 +71,7 @@ static const char *TAG = "web_server";
 #define AP_CHANNEL     6
 #define AP_MAX_CONN    4
 #define MOUNT_POINT    "/sdcard"
-#define XFER_BUF_SIZE  16384   /* bytes per SD read/write chunk            */
+#define XFER_BUF_SIZE  32768   /* bytes per SD read/write chunk            */
 #define MAX_FNAME_LEN    128   /* max accepted filename length (bytes)     */
 #define MAX_BASENAME_LEN  44   /* max basename chars (excl. .wav extension) */
 #define PLAYLISTS_CFG_PATH MOUNT_POINT "/playlists.json"
@@ -80,7 +84,109 @@ static bool           s_running   = false;
 
 /* Reusable transfer buffer – lives in BSS; HTTP server is single-task so
  * it is never accessed from two handlers simultaneously.                 */
-static char s_xfer_buf[XFER_BUF_SIZE];
+/* internal RAM + aligned: the SDMMC host can DMA multi-sector reads straight into it (it cannot into PSRAM) */
+static char s_xfer_buf[XFER_BUF_SIZE] __attribute__((aligned(32)));
+static void log_heap(const char *what);
+
+/* ── Double-buffered SD transfer ─────────────────────────────────────────────
+ * The transfer buffer is split in two halves.  A helper task does the SD side (reads the file into one half /
+ * writes the other half to the file) while the HTTP handler does the network side with the other half, so SD and
+ * WiFi overlap instead of alternating.  Queues carry buffer indices: q_empty = free halves, q_full = filled ones.
+ * A chunk with len <= 0 ends the stream. */
+#define XFER_HALF  (XFER_BUF_SIZE / 2)
+static inline char *xfer_half(int idx) { return s_xfer_buf + idx * XFER_HALF; }
+
+struct XferChunk { int idx; int len; };
+
+struct XferPipe {
+    QueueHandle_t     q_full  = nullptr;
+    QueueHandle_t     q_empty = nullptr;
+    SemaphoreHandle_t done    = nullptr;
+    volatile bool     stop    = false;
+    volatile bool     err     = false;
+    int               fd      = -1;
+    uint32_t          left    = 0;
+    bool              pad     = false;
+};
+
+static void xfer_reader_task(void *arg)
+{
+    XferPipe *p = (XferPipe *)arg;
+    for (;;) {
+        int idx;
+        xQueueReceive(p->q_empty, &idx, portMAX_DELAY);
+        if (p->stop) break;
+        size_t want = p->left < (uint32_t)XFER_HALF ? p->left : (size_t)XFER_HALF;
+        size_t got = 0;
+        while (p->fd >= 0 && got < want) {
+            int r = read(p->fd, xfer_half(idx) + got, want - got);
+            if (r <= 0) break;
+            got += (size_t)r;
+        }
+        if (p->pad && got < want) { memset(xfer_half(idx) + got, 0, want - got); got = want; }   /* keep the length */
+        p->left -= (uint32_t)got;
+        XferChunk c = { idx, (int)got };
+        xQueueSend(p->q_full, &c, portMAX_DELAY);
+        if (got == 0) break;
+        if (p->left == 0) {
+            XferChunk end = { 0, 0 };
+            xQueueSend(p->q_full, &end, portMAX_DELAY);
+            break;
+        }
+    }
+    xSemaphoreGive(p->done);
+    vTaskDelete(nullptr);
+}
+
+static void xfer_writer_task(void *arg)
+{
+    XferPipe *p = (XferPipe *)arg;
+    for (;;) {
+        XferChunk c;
+        xQueueReceive(p->q_full, &c, portMAX_DELAY);
+        if (c.len <= 0) break;
+        int off = 0;
+        while (!p->err && off < c.len) {
+            int w = write(p->fd, xfer_half(c.idx) + off, (size_t)(c.len - off));
+            if (w <= 0) { ESP_LOGE(TAG, "SD write error"); p->err = true; break; }
+            off += w;
+        }
+        xQueueSend(p->q_empty, &c.idx, portMAX_DELAY);
+    }
+    xSemaphoreGive(p->done);
+    vTaskDelete(nullptr);
+}
+
+/* reader: SD -> halves (pad = zero-fill short reads so exactly `bytes` are delivered); writer: halves -> SD */
+static bool xfer_pipe_start(XferPipe *p, int fd, uint32_t bytes, bool pad, bool reader)
+{
+    p->fd = fd; p->left = bytes; p->pad = pad; p->stop = false; p->err = false;
+    p->q_full  = xQueueCreate(4, sizeof(XferChunk));
+    p->q_empty = xQueueCreate(4, sizeof(int));
+    p->done    = xSemaphoreCreateBinary();
+    if (!p->q_full || !p->q_empty || !p->done ||
+        xTaskCreate(reader ? xfer_reader_task : xfer_writer_task, "xfer", 4096, p, 5, nullptr) != pdPASS) {
+        if (p->q_full)  vQueueDelete(p->q_full);
+        if (p->q_empty) vQueueDelete(p->q_empty);
+        if (p->done)    vSemaphoreDelete(p->done);
+        p->q_full = p->q_empty = nullptr; p->done = nullptr;
+        return false;
+    }
+    for (int i = 0; i < 2; i++) xQueueSend(p->q_empty, &i, 0);
+    return true;
+}
+
+/* wait for the helper task to end (aborting it if it is still running) and free the queues */
+static void xfer_pipe_finish(XferPipe *p, bool reader)
+{
+    if (!p->q_full) return;
+    p->stop = true;
+    if (reader) { int dummy = 0; xQueueSend(p->q_empty, &dummy, 0); }                 /* wake a reader waiting for a free half */
+    else        { XferChunk end = { 0, 0 }; xQueueSend(p->q_full, &end, 0); }          /* end marker for the writer */
+    xSemaphoreTake(p->done, portMAX_DELAY);
+    vQueueDelete(p->q_full); vQueueDelete(p->q_empty); vSemaphoreDelete(p->done);
+    p->q_full = p->q_empty = nullptr; p->done = nullptr;
+}
 
 /* Transfer tracking: the WiFi auto-off timer must not cut a backup / restore / download / update.
  * A restore is a series of uploads with short gaps, so "active" also covers a grace period after the
@@ -500,9 +606,9 @@ static esp_err_t download_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "fopen(%s) failed: %d", path, errno);
+    int fd = open(path, O_RDONLY);   /* plain read(): multi-sector DMA into the internal buffer */
+    if (fd < 0) {
+        ESP_LOGE(TAG, "open(%s) failed: %d", path, errno);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot open file");
         return ESP_FAIL;
     }
@@ -516,15 +622,26 @@ static esp_err_t download_get_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Content-Length", cl);
 
     esp_err_t ret = ESP_OK;
-    size_t    rd;
-    while ((rd = fread(s_xfer_buf, 1, sizeof(s_xfer_buf), f)) > 0) {
-        if (httpd_resp_send_chunk(req, s_xfer_buf, (ssize_t)rd) != ESP_OK) {
+    XferPipe  pipe;
+    if (!xfer_pipe_start(&pipe, fd, (uint32_t)st.st_size, false, true)) {
+        close(fd);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    for (;;) {
+        XferChunk c;
+        xQueueReceive(pipe.q_full, &c, portMAX_DELAY);
+        if (c.len <= 0) break;
+        if (httpd_resp_send_chunk(req, xfer_half(c.idx), (ssize_t)c.len) != ESP_OK) {
             ESP_LOGW(TAG, "Download aborted: client disconnected");
             ret = ESP_FAIL;
             break;
         }
+        xQueueSend(pipe.q_empty, &c.idx, portMAX_DELAY);
     }
-    fclose(f);
+    xfer_pipe_finish(&pipe, true);
+    close(fd);
+    log_heap("download");
     if (ret == ESP_OK) httpd_resp_send_chunk(req, nullptr, 0);
     return ret;
 }
@@ -656,17 +773,22 @@ static esp_err_t backup_get_handler(httpd_req_t *req)
 
         char path[sizeof(MOUNT_POINT) + MAX_FNAME_LEN + 2];
         build_path(path, sizeof(path), e.name);
-        FILE *f = fopen(path, "rb");
-        uint32_t crc = 0, left = e.size;
-        while (left > 0 && ok) {
-            size_t want = left < sizeof(s_xfer_buf) ? left : sizeof(s_xfer_buf);
-            size_t got = f ? fread(s_xfer_buf, 1, want, f) : 0;
-            if (got < want) memset(s_xfer_buf + got, 0, want - got);   /* file shrank / unreadable: keep the length */
-            crc = esp_rom_crc32_le(crc, (const uint8_t *)s_xfer_buf, (uint32_t)want);
-            ok = bk_send(req, s_xfer_buf, want);
-            left -= (uint32_t)want;
+        int fd = open(path, O_RDONLY);   /* plain read(): no stdio copy, multi-sector DMA */
+        uint32_t crc = 0;
+        if (e.size > 0) {
+            XferPipe pipe;
+            if (!xfer_pipe_start(&pipe, fd, e.size, true, true)) ok = false;
+            while (ok) {
+                XferChunk c;
+                xQueueReceive(pipe.q_full, &c, portMAX_DELAY);
+                if (c.len <= 0) break;
+                crc = esp_rom_crc32_le(crc, (const uint8_t *)xfer_half(c.idx), (uint32_t)c.len);
+                ok = bk_send(req, xfer_half(c.idx), (size_t)c.len);
+                xQueueSend(pipe.q_empty, &c.idx, portMAX_DELAY);
+            }
+            xfer_pipe_finish(&pipe, true);
         }
-        if (f) fclose(f);
+        if (fd >= 0) close(fd);
         if (!ok) break;
         e.crc = crc;
         bk_p32(h, 0x08074b50); bk_p32(h + 4, crc); bk_p32(h + 8, e.size); bk_p32(h + 12, e.size);
@@ -710,6 +832,7 @@ static esp_err_t backup_get_handler(httpd_req_t *req)
     }
     free(ent);
     if (!ok) ESP_LOGW(TAG, "Backup aborted (client disconnected?)");
+    log_heap("backup");
     return ok ? ESP_OK : ESP_FAIL;
 }
 
@@ -726,6 +849,48 @@ static esp_err_t restart_post_handler(httpd_req_t *req)
     httpd_resp_sendstr(req, "OK");
     xTaskCreate(restart_task, "restart", 2048, nullptr, 5, nullptr);
     return ESP_OK;
+}
+
+/* ── WiFi / HTTP throughput benchmark (no SD access) ──────────────────────
+ * GET  /api/bench?kb=N   streams N KB (1..65536) of dummy data
+ * POST /api/bench        reads and discards the request body, replies with the byte count */
+
+static esp_err_t bench_get_handler(httpd_req_t *req)
+{
+    XferGuard xfer_guard;
+    size_t kb = 2048;
+    char q[32], v[12];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "kb", v, sizeof(v)) == ESP_OK) {
+        long n = atol(v);
+        if (n >= 1 && n <= 65536) kb = (size_t)n;
+    }
+    memset(s_xfer_buf, 0x55, sizeof(s_xfer_buf));
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    size_t left = kb * 1024;
+    while (left > 0) {
+        size_t n = left < sizeof(s_xfer_buf) ? left : sizeof(s_xfer_buf);
+        if (httpd_resp_send_chunk(req, s_xfer_buf, (ssize_t)n) != ESP_OK) return ESP_FAIL;
+        left -= n;
+    }
+    return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+static esp_err_t bench_post_handler(httpd_req_t *req)
+{
+    XferGuard xfer_guard;
+    int total = (int)req->content_len, received = 0;
+    while (received < total) {
+        int r = httpd_req_recv(req, s_xfer_buf, (size_t)MIN((int)sizeof(s_xfer_buf), total - received));
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) return ESP_FAIL;
+        received += r;
+    }
+    char out[24];
+    snprintf(out, sizeof(out), "%d", received);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, out);
 }
 
 /* ── POST /upload?name=<file.wav> ────────────────────────────────────── */
@@ -768,9 +933,9 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, resp);
     }
 
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "fopen(%s, wb) failed: %d", path, errno);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);   /* plain write(): multi-sector DMA from the internal buffer */
+    if (fd < 0) {
+        ESP_LOGE(TAG, "open(%s, wr) failed: %d", path, errno);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot create file");
         return ESP_FAIL;
     }
@@ -779,25 +944,39 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     esp_err_t ret      = ESP_OK;
     int       written  = 0;
 
-    int received = 0;
-    while (received < total) {
-        int to_read = MIN((int)sizeof(s_xfer_buf), total - received);
-        int r = httpd_req_recv(req, s_xfer_buf, (size_t)to_read);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
-        if (r <= 0) {
-            ESP_LOGE(TAG, "recv error %d after %d/%d bytes", r, received, total);
-            ret = ESP_FAIL;
-            break;
-        }
-        if ((int)fwrite(s_xfer_buf, 1, (size_t)r, f) != r) {
-            ESP_LOGE(TAG, "SD write error at byte %d", received);
-            ret = ESP_FAIL;
-            break;
-        }
-        received += r;
+    XferPipe pipe;
+    if (!xfer_pipe_start(&pipe, fd, 0, false, false)) {
+        close(fd);
+        remove(path);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
     }
+    int received = 0;
+    while (received < total && ret == ESP_OK) {
+        /* receive into a free half (full-size chunks, not TCP-segment-sized ones) while the SD task writes the other */
+        int idx;
+        xQueueReceive(pipe.q_empty, &idx, portMAX_DELAY);
+        if (pipe.err) { ret = ESP_FAIL; break; }
+        int fill = 0, want = MIN((int)XFER_HALF, total - received);
+        while (fill < want) {
+            int r = httpd_req_recv(req, xfer_half(idx) + fill, (size_t)(want - fill));
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            if (r <= 0) {
+                ESP_LOGE(TAG, "recv error %d after %d/%d bytes", r, received + fill, total);
+                ret = ESP_FAIL;
+                break;
+            }
+            fill += r;
+        }
+        if (ret != ESP_OK) break;
+        XferChunk c = { idx, fill };
+        xQueueSend(pipe.q_full, &c, portMAX_DELAY);
+        received += fill;
+    }
+    xfer_pipe_finish(&pipe, false);   /* the writer drains what is queued, then ends */
+    if (pipe.err) ret = ESP_FAIL;
     written = total;
-    fclose(f);
+    close(fd);
 
     if (ret != ESP_OK) {
         remove(path);   /* clean up partial file */
@@ -806,6 +985,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "Uploaded: %s (%d bytes)", fname, written);
+    log_heap("upload");
     if (s_rescan_cb && !is_json) s_rescan_cb();
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
@@ -1177,6 +1357,33 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (unsigned)g_crank_cfg.vol_range_db,
              (unsigned)g_crank_cfg.speed_min_x10,
              (unsigned)g_crank_cfg.speed_max_x10);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
+    return httpd_resp_sendstr(req, buf);
+}
+
+/* ── Heap statistics (internal RAM is what limits SD DMA buffers, WiFi and lwip) ── */
+
+static void log_heap(const char *what)
+{
+    ESP_LOGI(TAG, "heap after %s: internal free %u (min ever %u, largest block %u), PSRAM free %u",
+             what,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+static esp_err_t heap_get_handler(httpd_req_t *req)
+{
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "{\"int_free\":%u,\"int_min\":%u,\"int_block\":%u,\"int_total\":%u,\"psram_free\":%u}",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     return httpd_resp_sendstr(req, buf);
@@ -2053,6 +2260,9 @@ static httpd_handle_t start_webserver(void)
         { "/upload",             HTTP_POST,   upload_post_handler,           nullptr },
         { "/api/backup",         HTTP_GET,    backup_get_handler,            nullptr },
         { "/api/restart",        HTTP_POST,   restart_post_handler,          nullptr },
+        { "/api/heap",           HTTP_GET,    heap_get_handler,              nullptr },
+        { "/api/bench",          HTTP_GET,    bench_get_handler,             nullptr },
+        { "/api/bench",          HTTP_POST,   bench_post_handler,            nullptr },
         { "/rename",             HTTP_POST,   rename_post_handler,           nullptr },
         { "/delete",             HTTP_DELETE, delete_handler,                nullptr },
         { "/disp_update",        HTTP_POST,   disp_update_post_handler,      nullptr },

@@ -375,6 +375,21 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
     <button class="btn btn-ghost btn-sm" id="diag-raw-btn" onclick="runDiag('sdraw')" title="stop playback first">SD raw test (stop playback)</button>
     <pre id="diag-log" style="display:none;margin-top:8px;max-height:340px;overflow:auto;font-size:11px;color:#7cbb7c;white-space:pre-wrap"></pre>
   </div>
+  <div class="about-meta" id="bench-box" style="margin-top:10px">
+    <div class="about-meta-line" style="margin-bottom:6px"><b>WiFi speed test</b> &ndash; live HTTP throughput between this browser and the player (SD card not involved).
+      Stop playback for the cleanest numbers.</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-sm" id="bench-start" onclick="benchStart()">&#9889; Start</button>
+      <button class="btn btn-ghost btn-sm" id="bench-stop" onclick="benchStop()" disabled>Stop</button>
+      <label class="about-meta-line">Duration per direction
+        <select id="bench-secs"><option value="5">5 s</option><option value="10" selected>10 s</option><option value="20">20 s</option></select></label>
+    </div>
+    <div id="bench-now" style="font-size:22px;font-weight:700;color:#c5cae9;margin:8px 0 2px">&ndash;</div>
+    <div class="about-meta-line" id="bench-phase">Idle</div>
+    <canvas id="bench-cv" width="600" height="90" style="width:100%;max-width:600px;height:90px;margin-top:6px;border-radius:6px;background:#0d1230"></canvas>
+    <div class="about-meta-line" id="bench-res" style="margin-top:6px"></div>
+    <div class="about-meta-line" id="bench-heap" style="margin-top:6px"></div>
+  </div>
 </section>
 </div><!-- /tab-about -->
 
@@ -633,7 +648,8 @@ var g_playlists={active:'',playlists:[]};
 var g_playlistDirty=false;
 
 var g_wavBytes=0;
-var BK_RATE=524288;   /* realistic WiFi download rate, ~0.5 MB/s */
+var BK_MEASURED=false;
+var BK_RATE=1048576;   /* realistic backup download rate incl. SD read, ~1 MB/s */
 function fmtDur(s){
   s=Math.max(1,Math.round(s));
   if(s<90)return s+' s';
@@ -641,6 +657,98 @@ function fmtDur(s){
   if(m<90)return m+' min';
   return Math.floor(m/60)+' h '+(m%60)+' min';
 }
+var g_bench=null,g_heapMin=0;
+function benchHeap(final){
+  fetch('/api/heap',{cache:'no-store'}).then(function(r){return r.json();}).then(function(h){
+    var k=function(b){return (b/1024).toFixed(0)+' KB';};
+    if(!g_heapMin||h.int_free<g_heapMin)g_heapMin=h.int_free;
+    document.getElementById('bench-heap').textContent='Internal RAM free: '+k(h.int_free)+' (lowest during this test '+k(g_heapMin)+', lowest since boot '+k(h.int_min)+', largest block '+k(h.int_block)+', total '+k(h.int_total)+') – PSRAM free '+k(h.psram_free);
+  }).catch(function(){});
+}
+function benchDraw(pts,max){
+  var cv=document.getElementById('bench-cv'),c=cv.getContext('2d'),W=cv.width,H=cv.height;
+  c.clearRect(0,0,W,H);
+  if(!pts.length)return;
+  var m=Math.max(max,0.1);
+  c.strokeStyle='#2a3a6a';c.lineWidth=1;c.beginPath();c.moveTo(0,H-0.5);c.lineTo(W,H-0.5);c.stroke();
+  c.fillStyle='#a78bfa';c.font='11px sans-serif';c.fillText(m.toFixed(2)+' MB/s',4,12);
+  c.strokeStyle='#a78bfa';c.lineWidth=2;c.beginPath();
+  pts.forEach(function(p,i){
+    var x=p.t/g_bench.total*W,y=H-4-(H-20)*p.v/m;
+    if(i)c.lineTo(x,y);else c.moveTo(x,y);
+  });
+  c.stroke();
+}
+function benchUi(running){
+  document.getElementById('bench-start').disabled=running;
+  document.getElementById('bench-stop').disabled=!running;
+  document.getElementById('bench-secs').disabled=running;
+}
+function benchPhase(dir,secs){
+  /* resolves with {avg,min,max,bytes} when secs elapsed or the user stopped */
+  return new Promise(function(resolve){
+    var B=g_bench,t0=performance.now(),last=t0,lastB=0,bytes=0,pts=[],mn=1e9,mx=0,done=false,xhr=null,ctl=null;
+    B.total=secs;B.abort=finish;
+    function sample(){
+      var now=performance.now(),dt=(now-last)/1000;
+      if(dt<0.25)return;
+      var v=(bytes-lastB)/dt/1048576;last=now;lastB=bytes;
+      pts.push({t:(now-t0)/1000,v:v});
+      if(v<mn)mn=v;if(v>mx)mx=v;
+      document.getElementById('bench-now').textContent=v.toFixed(2)+' MB/s';
+      benchDraw(pts,Math.max(mx,0.5)*1.1);
+      if((now-t0)/1000>=secs)finish();
+    }
+    function finish(){
+      if(done)return;done=true;
+      try{if(xhr)xhr.abort();}catch(e){}
+      try{if(ctl)ctl.abort();}catch(e){}
+      clearInterval(tm);clearInterval(hm);
+      var el=(performance.now()-t0)/1000;
+      resolve({avg:el>0.3?bytes/el/1048576:0,min:pts.length?mn:0,max:mx,bytes:bytes});
+    }
+    var tm=setInterval(sample,250),hm=setInterval(benchHeap,1000);
+    if(dir==='down'){
+      ctl=new AbortController();
+      fetch('/api/bench?kb=65536',{cache:'no-store',signal:ctl.signal}).then(function(r){
+        var rd=r.body.getReader();
+        (function pump(){
+          rd.read().then(function(x){
+            if(x.done||done){finish();return;}
+            bytes+=x.value.length;pump();
+          }).catch(finish);
+        })();
+      }).catch(finish);
+    } else {
+      xhr=new XMLHttpRequest();
+      xhr.open('POST','/api/bench');
+      xhr.upload.onprogress=function(e){bytes=e.loaded;};
+      xhr.onload=xhr.onerror=xhr.onabort=finish;
+      xhr.send(new Blob([new Uint8Array(32*1048576)]));
+    }
+  });
+}
+function benchStart(){
+  var secs=parseInt(document.getElementById('bench-secs').value,10)||10;
+  var res=document.getElementById('bench-res'),ph=document.getElementById('bench-phase'),dl,ul;
+  g_bench={stopped:false,abort:null,total:secs};g_heapMin=0;benchHeap();
+  benchUi(true);res.textContent='';
+  ph.textContent='Download test ('+secs+' s)\u2026';
+  benchPhase('down',secs).then(function(r){
+    dl=r;
+    if(g_bench.stopped)return null;
+    ph.textContent='Upload test ('+secs+' s)\u2026';
+    return new Promise(function(ok){setTimeout(ok,600);}).then(function(){return benchPhase('up',secs);});
+  }).then(function(r){
+    ul=r;
+    var f=function(x){return x?x.avg.toFixed(2)+' MB/s (min '+x.min.toFixed(2)+', max '+x.max.toFixed(2)+')':'\u2013';};
+    ph.textContent=g_bench.stopped?'Stopped':'Done';
+    res.innerHTML='Download: <b>'+f(dl)+'</b><br>Upload: <b>'+f(ul)+'</b>';
+    document.getElementById('bench-now').textContent=dl&&dl.avg?(dl.avg.toFixed(2)+' MB/s \u2193'+(ul&&ul.avg?'  '+ul.avg.toFixed(2)+' MB/s \u2191':'')):'\u2013';
+    res.innerHTML+='<br>This is the pure WiFi speed; a backup is slower because every chunk is first read from the SD card.';
+  }).then(function(){benchHeap();}).catch(function(e){ph.textContent='Test failed: '+(e.message||e);}).then(function(){benchUi(false);g_bench=null;});
+}
+function benchStop(){if(g_bench){g_bench.stopped=true;if(g_bench.abort)g_bench.abort();}}
 function backupUrl(){
   var d=new Date(),p=function(n){return (n<10?'0':'')+n;};
   var ts=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes());
@@ -653,7 +761,7 @@ function updateBackupEstimate(){
   var el=document.getElementById('bk-est');
   document.getElementById('bk-songs-info').textContent=g_wavBytes>0?'– '+fmtSize(g_wavBytes)+', ≈ '+fmtDur(g_wavBytes/BK_RATE)+' download':'';
   if(songs){
-    el.textContent='Backup size \u2248 '+fmtSize(g_wavBytes)+' \u2192 estimated download time \u2248 '+fmtDur(g_wavBytes/BK_RATE)+' (at ~0.5 MB/s). Stop playback meanwhile.';
+    el.textContent='Backup size \u2248 '+fmtSize(g_wavBytes)+' \u2192 estimated download time \u2248 '+fmtDur(g_wavBytes/BK_RATE)+' (at '+(BK_RATE/1048576).toFixed(2)+' MB/s'+(BK_MEASURED?' measured':' assumed')+'). Stop playback meanwhile.';
   } else {
     el.textContent='Settings only: a few KB, takes a few seconds.';
   }
@@ -793,7 +901,7 @@ function restoreFromZip(inp){
   });
 }
 
-window.restoreFromZip=restoreFromZip;window.backupUrl=backupUrl;window.updateBackupEstimate=updateBackupEstimate;
+window.benchStart=benchStart;window.benchStop=benchStop;window.restoreFromZip=restoreFromZip;window.backupUrl=backupUrl;window.updateBackupEstimate=updateBackupEstimate;
 function loadFiles(){
   fetch('/api/files').then(function(r){
     if(!r.ok)throw new Error('HTTP '+r.status);
