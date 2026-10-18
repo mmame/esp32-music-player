@@ -263,7 +263,7 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Volume range (dB)</span><span class="cfg-val" id="vv-vol_range_db">40</span></div>
     <input type="range" class="cfg-slider" id="sl-vol_range_db" min="20" max="60" step="1" value="40" oninput="document.getElementById('vv-vol_range_db').textContent=this.value">
-    <p class="cfg-desc">How quiet the bottom of the volume knob is: the knob is linear in dB from this level up to full volume (0&nbsp;dB). A smaller range (e.g. 25) makes the whole knob louder and the volume rises earlier; a larger range gives finer control at low volumes. Has no effect with &ldquo;Always 100%&rdquo;. Applies at the next knob movement. Default: 40&thinsp;dB</p>
+    <p class="cfg-desc">How quiet the bottom of the volume knob is: the knob is linear in dB from this level up to full volume (0&nbsp;dB). A smaller range (e.g. 25) makes the whole knob louder and the volume rises earlier; a larger range gives finer control at low volumes. Has no effect with &ldquo;Always 100%&rdquo;. Applies immediately. Default: 40&thinsp;dB</p>
   </div>
   <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Output gain (dB)</span><span class="cfg-val" id="vv-gain_db">+6</span></div>

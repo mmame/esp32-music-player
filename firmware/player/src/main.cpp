@@ -615,14 +615,11 @@ static int8_t total_gain_db(void)
 static void apply_volume_locked(uint8_t vol)
 {
     /* Linear in dB (-range ... 0 dB over the knob travel, range from the web config) = roughly linear in
-     * perceived loudness, since the ear judges level logarithmically.  The bottom (0-2 %) is muted, 2-5 % ramps up from
-     * mute to the level the line reaches at 5 %. */
+     * perceived loudness, since the ear judges level logarithmically.  Only 0 % is muted; potis.cpp reports 0 for
+     * readings within a hair of the learned minimum. */
     const float range = (float)g_crank_cfg.vol_range_db;
     float pos = (float)vol / 100.0f;
-    float dbf;
-    if (vol <= 2)         dbf = -64.0f;                                          /* 0-2 %: mute */
-    else if (pos < 0.05f) dbf = -64.0f + (64.0f - 0.95f * range) * ((pos - 0.02f) / 0.03f);
-    else                  dbf = -range * (1.0f - pos);
+    float dbf = (vol == 0) ? -64.0f : -range * (1.0f - pos);
     int db = (int)lroundf(dbf);
     if (db < -64) db = -64;
     if (db >  63) db =  63;
@@ -767,6 +764,8 @@ static bool play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_do
             g_audio_pos_s  = 0.0f;
             g_wall_ref_us  = esp_timer_get_time() + lat_us;
             xSemaphoreGive(s_state_mutex);
+            /* A later pause / resume re-opens the file from the element's URI: it must name the new song */
+            audio_element_set_uri(g_fatfs_el, path);
             ESP_LOGI(TAG, "Crossfade [%u]: %s  (%u s, ~%d ms until audible)", idx, g_song_names[idx],
                      (unsigned)xfade_s, (int)(lat_us / 1000));
             return true;
@@ -926,6 +925,8 @@ static void do_resume(void)
     audio_element_getinfo(g_fatfs_el, &info);
     info.byte_pos = file_offset;
     audio_element_setinfo(g_fatfs_el, &info);
+    fatfs_dma_stream_set_unbounded_header(g_fatfs_el, true);
+    fatfs_dma_stream_set_limit(g_fatfs_el, WAV_HDR_BYTES + g_song_bytes);   /* end of this song's PCM (after a crossfade the limit may be stale) */
 
     /* Guard against the race where element tasks (fatfs, wav) processed a
      * queued RESUME→open→STOP→close cycle after pipeline_stop_and_reset()
@@ -1835,6 +1836,20 @@ static void io_task(void *arg)
             limiter_el_set_gain_db(g_lim_el, total_gain);
             ESP_LOGI(TAG, "Total gain set: %+d dB (global +%u, song %+d)",
                      (int)total_gain, (unsigned)g_crank_cfg.gain_db, (int)g_song_gain_db);
+        }
+
+        /* Volume range changed in the web config: re-apply the current volume with the new curve right away. */
+        {
+            static uint8_t s_applied_range_db = 0;
+            const uint8_t r = g_crank_cfg.vol_range_db;
+            if (s_applied_range_db == 0) {
+                s_applied_range_db = r;
+            } else if (r != s_applied_range_db) {
+                s_applied_range_db = r;
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                apply_volume_locked(g_volume);
+                xSemaphoreGive(s_state_mutex);
+            }
         }
 #endif
 

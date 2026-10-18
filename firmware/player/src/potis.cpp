@@ -87,7 +87,9 @@ static uint8_t raw_to_pct(uint32_t avg_raw)
     } else {
         pct = 50.0f + 50.0f * (raw - mid) / (hi - mid);
     }
-    if (pct <= 0.0f)   return 0;
+    /* the divider is hyperbolic: at the bottom of the travel the raw value moves only a few counts per percent, so
+     * the "almost zero" margin has to be applied on the linearized position, not on the raw value */
+    if (pct <= 2.0f)   return 0;
     if (pct >= 100.0f) return 100;
     return (uint8_t)(pct + 0.5f);
 }

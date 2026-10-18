@@ -2,6 +2,18 @@ ESP32 music player - release notes
 ==================================
 Newest first. 
 
+20261018
+--------
+Player (musicplayer-20261018.bin)
+  * Volume knob: the extra mute / ramp zone at the bottom is gone. Instead, a knob position within ~2 % of the learned
+    minimum counts as 0 (muted); everything above follows the dB-linear curve directly.
+  * Fixed: after a crossfade, stopping and restarting the crank (pause / resume) resumed the PREVIOUS song
+    instead of the current one.
+  * Changing "Volume range (dB)" in the web config takes effect immediately (no knob movement needed).
+
+Display (ESP32-8048S050C-full / ESP32-2432S032C-full 20261018)
+  * Unchanged since 20261015 (rebuilt only).
+
 20261016
 --------
 Player (musicplayer-20261016.bin)
