@@ -86,6 +86,9 @@ static float   s_cfg_stop_thresh   = ENC2_STOP_THRESH;
 static float   s_cfg_start_thresh  = ENC2_START_THRESH;
 static uint8_t s_cfg_release_ticks = ENC2_RELEASE_TICKS;
 static int8_t  s_cfg_crank_dir     = 0;  /* 0=any, +1=positive only, -1=negative only */
+static bool    s_cfg_reverse       = false;  /* reverse playback: the opposite direction is not filtered out */
+static bool    s_rev               = false;  /* current / last crank direction is reverse */
+static uint8_t s_opp_windows       = 0;      /* consecutive windows turning against the current direction */
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Public API
@@ -156,12 +159,48 @@ float encoder2_update(void)
     int delta   = s_delta_acc;
     s_delta_acc = 0;
 
-    /* Ignore delta that is in the unwanted direction */
-    if (s_cfg_crank_dir > 0 && delta < 0) delta = 0;
-    if (s_cfg_crank_dir < 0 && delta > 0) delta = 0;
-
-    /* Signed instant speed so direction reversals cancel in the filter. */
-    float instant_rps_signed = (float)delta / (ENC2_COUNTS_PER_REV * ENC2_DT);
+    float instant_rps_signed;
+    if (s_cfg_reverse) {
+        /* Reverse playback: both directions are valid.  Work with the magnitude in the current direction;
+         * a sustained turn against it re-latches the direction after a stop (pause) so the audio path can
+         * switch cleanly.  forward = crank_dir sign (positive counts if "any"). */
+        const int fwd = (s_cfg_crank_dir < 0) ? -1 : 1;
+        const int sd  = delta * fwd;                    /* > 0: forward */
+        const float m = fabsf((float)delta) / (ENC2_COUNTS_PER_REV * ENC2_DT);
+        if (!s_moving) {
+            if (sd != 0) s_rev = (sd < 0);
+            s_opp_windows = 0;
+            instant_rps_signed = m;
+        } else if (sd != 0 && ((sd < 0) != s_rev)) {
+            instant_rps_signed = 0.0f;                  /* turning against the current direction */
+            /* A real reversal is a deliberate, sustained turn (3 windows = 150 ms, at a speed clearly above the
+             * pause threshold); backlash / rocking of the crank must not stop playback. */
+            if (m > s_cfg_start_thresh * 0.7f) {
+                s_opp_windows++;
+            } else {
+                s_opp_windows = 0;
+            }
+            if (s_opp_windows >= 3) {
+                ESP_LOGI(TAG, "crank direction flip -> %s (%.2f RPS)", s_rev ? "forward" : "reverse", (double)m);
+                s_rev          = !s_rev;                /* flip: stop first, restart in the new direction */
+                s_opp_windows  = 0;
+                s_speed_smooth = 0.0f;
+                s_moving       = false;
+                s_zero_ticks   = 0;
+                s_instant_rps  = m;
+                return 0.0f;
+            }
+        } else {
+            s_opp_windows      = 0;
+            instant_rps_signed = m;
+        }
+    } else {
+        /* Ignore delta that is in the unwanted direction */
+        if (s_cfg_crank_dir > 0 && delta < 0) delta = 0;
+        if (s_cfg_crank_dir < 0 && delta > 0) delta = 0;
+        /* Signed instant speed so direction reversals cancel in the filter. */
+        instant_rps_signed = (float)delta / (ENC2_COUNTS_PER_REV * ENC2_DT);
+    }
     /* Store raw (unsmoothed) magnitude for consumers that want instant response
      * (e.g. DimmerLink – deliberately skips the heavy audio EMA). */
     s_instant_rps = fabsf(instant_rps_signed);
@@ -209,6 +248,17 @@ bool encoder2_is_moving(void)
 float encoder2_get_instant_rps(void)
 {
     return s_instant_rps;
+}
+
+void encoder2_set_reverse(bool enable)
+{
+    s_cfg_reverse = enable;
+    if (!enable) s_rev = false;
+}
+
+bool encoder2_is_reverse(void)
+{
+    return s_cfg_reverse && s_rev;
 }
 
 void encoder2_apply_config(float ema_attack, float ema_release,

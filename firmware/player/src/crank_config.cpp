@@ -43,6 +43,7 @@ void crank_config_defaults(crank_config_t *c)
     c->vol_range_db   = 40;
     c->speed_min_x10  = 7;
     c->speed_max_x10  = 14;
+    c->reverse_play   = 0;
 }
 
 /* ── load ──────────────────────────────────────────────────────────────── */
@@ -98,7 +99,7 @@ void crank_config_load(void)
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
             int v = (int)it->valuedouble;
-            if (v >= -1 && v <= 1) g_crank_cfg.crank_dir = (int8_t)v;
+            if (v >= -1 && v <= 1) g_crank_cfg.crank_dir = (int8_t)(v == 0 ? -1 : v);   /* "both directions" no longer exists */
         }
     }
     read_f (root, "lo_bass_weight", 1.0f, 200.0f, &g_crank_cfg.lo_bass_weight);
@@ -115,6 +116,7 @@ void crank_config_load(void)
     read_u8 (root, "vol_range_db",  20,  60, &g_crank_cfg.vol_range_db);
     read_u8 (root, "speed_min_x10", 2,   10, &g_crank_cfg.speed_min_x10);
     read_u8 (root, "speed_max_x10", 10,  20, &g_crank_cfg.speed_max_x10);
+    read_u8 (root, "reverse_play",  0,    1, &g_crank_cfg.reverse_play);
 
     cJSON_Delete(root);
     ESP_LOGI(TAG, "Loaded: attack=%.3f rel=%.1f stop=%.2f start=%.2f rt=%u fs=%u ds=%u de=%u",
@@ -156,6 +158,7 @@ void crank_config_save(void)
     cJSON_AddNumberToObject(root, "vol_range_db",    (double)g_crank_cfg.vol_range_db);
     cJSON_AddNumberToObject(root, "speed_min_x10",   (double)g_crank_cfg.speed_min_x10);
     cJSON_AddNumberToObject(root, "speed_max_x10",   (double)g_crank_cfg.speed_max_x10);
+    cJSON_AddNumberToObject(root, "reverse_play",    (double)g_crank_cfg.reverse_play);
 
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -176,5 +179,6 @@ void crank_config_apply(void)
     encoder2_apply_config(g_crank_cfg.ema_attack, g_crank_cfg.ema_release,
                           g_crank_cfg.stop_thresh, g_crank_cfg.start_thresh,
                           g_crank_cfg.release_ticks, g_crank_cfg.crank_dir);
+    encoder2_set_reverse(g_crank_cfg.reverse_play != 0);
     potis_set_cal(g_crank_cfg.pot_cal_lo, g_crank_cfg.pot_cal_mid, g_crank_cfg.pot_cal_hi);
 }

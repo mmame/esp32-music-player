@@ -54,6 +54,8 @@ typedef struct {
     int      buf_len;           /* the element's read size */
     bool     unbounded;         /* patch the data size in the stream's WAV header */
     uint32_t limit;             /* end of the PCM of the streamed file (0 = read to end of file) */
+    bool     reverse;           /* stream the PCM backwards (see fatfs_dma_stream_set_reverse) */
+    uint32_t frame;             /* bytes per sample frame, for the reverse mode */
 
     /* crossfade request (written by fatfs_dma_stream_crossfade, consumed in _read) */
     volatile bool xf_pending;
@@ -292,9 +294,50 @@ static void patch_unbounded_header(fatfs_dma_stream_t *fs, uint8_t *buffer, int 
     memcpy(buffer + 40, &data, 4);
 }
 
+/* reverse the order of the sample frames of a block in place */
+static void reverse_frames(uint8_t *b, int bytes, uint32_t fr)
+{
+    const int n = bytes / (int)fr;
+    if (fr == 4) {
+        uint32_t *w = (uint32_t *)b;
+        for (int i = 0, j = n - 1; i < j; i++, j--) { uint32_t t = w[i]; w[i] = w[j]; w[j] = t; }
+        return;
+    }
+    uint8_t tmp[16];
+    if (fr > sizeof(tmp)) return;
+    for (int i = 0, j = n - 1; i < j; i++, j--) {
+        memcpy(tmp, b + i * fr, fr); memcpy(b + i * fr, b + j * fr, fr); memcpy(b + j * fr, tmp, fr);
+    }
+}
+
+/* one block of the reverse playback: the block just below main_pos, frames reversed; 0 at the start of the PCM */
+static int reverse_read(audio_element_handle_t self, fatfs_dma_stream_t *fs, uint8_t *buffer, int len)
+{
+    const uint32_t fr = fs->frame ? fs->frame : 4u;
+    if (fs->main_pos <= WAV_HDR) return 0;
+    uint32_t avail = fs->main_pos - WAV_HDR;
+    avail -= avail % fr;
+    uint32_t n = (uint32_t)len - ((uint32_t)len % fr);
+    if (n > avail) n = avail;
+    if (n == 0) return 0;
+    const uint32_t start = fs->main_pos - n;
+    if (lseek(fs->file, start, SEEK_SET) < 0) {
+        ESP_LOGE(TAG, "reverse seek failed: %s", strerror(errno));
+        return -1;
+    }
+    int got = read_into(fs, fs->file, buffer, (int)n);
+    if (got <= 0) return got < 0 ? -1 : 0;
+    got -= got % (int)fr;
+    reverse_frames(buffer, got, fr);
+    fs->main_pos = start;
+    return got;
+}
+
 static int _read(audio_element_handle_t self, char *buffer, int len, TickType_t ticks_to_wait, void *context)
 {
     fatfs_dma_stream_t *fs = (fatfs_dma_stream_t *)audio_element_getdata(self);
+
+    if (fs->reverse && !fs->xf_active && !fs->xf_pending) return reverse_read(self, fs, (uint8_t *)buffer, len);
 
     if (fs->xf_pending && !fs->xf_active) xf_start(fs);
     if (fs->xf_active) return xf_read(self, fs, (uint8_t *)buffer, len);
@@ -411,6 +454,14 @@ void fatfs_dma_stream_set_unbounded_header(audio_element_handle_t el, bool on)
 {
     fatfs_dma_stream_t *fs = (fatfs_dma_stream_t *)audio_element_getdata(el);
     if (fs) fs->unbounded = on;
+}
+
+void fatfs_dma_stream_set_reverse(audio_element_handle_t el, bool on, uint32_t frame_bytes)
+{
+    fatfs_dma_stream_t *fs = (fatfs_dma_stream_t *)audio_element_getdata(el);
+    if (!fs) return;
+    fs->reverse = on;
+    fs->frame   = frame_bytes ? frame_bytes : 4u;
 }
 
 void fatfs_dma_stream_set_limit(audio_element_handle_t el, uint32_t end_off)

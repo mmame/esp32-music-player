@@ -49,6 +49,20 @@ bool  encoder2_is_moving(void);
 float encoder2_get_instant_rps(void);
 
 /**
+ * @brief Enable reverse-playback direction tracking.
+ *
+ * Off: unchanged behaviour (the crank_dir filter drops the unwanted direction).
+ * On : both directions count as movement; the crank_dir setting only defines which one is "forward"
+ *      (crank_dir == 0 -> positive counts are forward).  Turning the other way sets encoder2_is_reverse().
+ *      A direction change while moving first reports "stopped" (so playback pauses cleanly), then the new
+ *      direction starts like a fresh crank start.
+ */
+void  encoder2_set_reverse(bool enable);
+
+/** @return true while (or when last) the crank is turned in the reverse direction; always false if disabled. */
+bool  encoder2_is_reverse(void);
+
+/**
  * @brief Apply runtime-configurable tuning parameters.
  *
  * Replaces the compile-time #define defaults with caller-supplied values.

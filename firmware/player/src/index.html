@@ -287,11 +287,18 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <div class="cfg-row">
     <div class="cfg-label"><span class="cfg-name">Crank direction</span></div>
     <select class="cfg-slider" id="sl-crank_dir" style="padding:4px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
-      <option value="0">Both directions</option>
       <option value="1">Direction A only (positive counts, default)</option>
       <option value="-1" selected>Direction B only (negative counts)</option>
     </select>
-    <p class="cfg-desc">Filter out reverse cranking. &ldquo;Direction A&rdquo; and &ldquo;Direction B&rdquo; correspond to the two physical turn directions &mdash; try both to find which matches your normal cranking direction. Default: Direction B only</p>
+    <p class="cfg-desc">Which physical turn direction is the normal (forward) cranking direction; the other direction is ignored &mdash; or, with &ldquo;Reverse playback&rdquo; on, plays the song backwards. &ldquo;Direction A&rdquo; and &ldquo;Direction B&rdquo; correspond to the two physical turn directions &mdash; try both to find which matches your normal cranking direction. Default: Direction B only</p>
+  </div>
+  <div class="cfg-row">
+    <div class="cfg-label"><span class="cfg-name">Reverse playback</span></div>
+    <select class="cfg-slider" id="sl-reverse_play" style="padding:4px 8px;background:#0d1230;color:#e0e0ff;border:1px solid #2a3a6a;border-radius:4px">
+      <option value="0" selected>Off (default)</option>
+      <option value="1">On: cranking backwards plays the song in reverse</option>
+    </select>
+    <p class="cfg-desc">Crank mode only. When on, &ldquo;Crank direction&rdquo; above defines <b>forward</b>; turning the crank the other way plays the song backwards at the crank speed. At the start of the song it stops. Next / Previous switch songs without crossfade while playing in reverse. Default: Off</p>
   </div>
   <hr style="border-color:#1e2a52;margin:20px 0 14px">
   <h3 style="font-size:.7rem;color:#6d6d8a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px">Light Organ (FFT)</h3>
@@ -1455,6 +1462,7 @@ function loadConfig(){
     if(c.speed_min_x10!==undefined){document.getElementById('sl-speed_min_x10').value=c.speed_min_x10;document.getElementById('vv-speed_min_x10').textContent=(c.speed_min_x10/10).toFixed(1);}
     if(c.speed_max_x10!==undefined){document.getElementById('sl-speed_max_x10').value=c.speed_max_x10;document.getElementById('vv-speed_max_x10').textContent=(c.speed_max_x10/10).toFixed(1);}
     if(c.crank_dir!==undefined){document.getElementById('sl-crank_dir').value=String(c.crank_dir);}
+    if(c.reverse_play!==undefined){document.getElementById('sl-reverse_play').value=String(c.reverse_play);}
     if(c.lo_bass_weight!==undefined)setSlider('lo_bass_weight',c.lo_bass_weight,0);
     if(c.lo_mid_weight !==undefined)setSlider('lo_mid_weight', c.lo_mid_weight, 1);
     if(c.lo_decay_rate !==undefined)setSlider('lo_decay_rate', c.lo_decay_rate, 3);
@@ -1475,6 +1483,7 @@ function saveConfig(){
   var dso=parseInt(document.getElementById('sl-dimmer_stop_fade_ms').value);
   var gdb=parseInt(document.getElementById('sl-gain_db').value);
   var cd =parseInt(document.getElementById('sl-crank_dir').value);
+  var rvp=parseInt(document.getElementById('sl-reverse_play').value);
   var um =parseInt(document.getElementById('sl-ui_mode').value);
   var pea=parseInt(document.getElementById('sl-player_end_action').value);
   var vfl=parseInt(document.getElementById('sl-vol_full').value);
@@ -1489,7 +1498,7 @@ function saveConfig(){
   fetch('/api/crank_config',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,vol_full:vfl,vol_range_db:vrd,speed_min_x10:smin,speed_max_x10:smax,crank_dir:cd,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
+    body:JSON.stringify({ema_attack:att,ema_release:rel,stop_thresh:stp,start_thresh:sta,release_ticks:rt,vol_fade_step:fs,dimmer_start_fade_ms:dsf,dimmer_stop_fade_ms:dso,gain_db:gdb,ui_mode:um,player_end_action:pea,vol_full:vfl,vol_range_db:vrd,speed_min_x10:smin,speed_max_x10:smax,crank_dir:cd,reverse_play:rvp,lo_bass_weight:lbw,lo_mid_weight:lmw,lo_decay_rate:ldr,lo_lookahead_s:lla})
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){throw new Error(t||'HTTP '+r.status);});
     toast('Configuration saved');
@@ -1512,6 +1521,7 @@ function resetConfig(){
   document.getElementById('sl-speed_min_x10').value='7';document.getElementById('vv-speed_min_x10').textContent='0.7';
   document.getElementById('sl-speed_max_x10').value='14';document.getElementById('vv-speed_max_x10').textContent='1.4';
   document.getElementById('sl-crank_dir').value='-1';
+  document.getElementById('sl-reverse_play').value='0';
   setSlider('lo_bass_weight', 45,   0);
   setSlider('lo_mid_weight',  5,    1);
   setSlider('lo_decay_rate',  0.998,3);

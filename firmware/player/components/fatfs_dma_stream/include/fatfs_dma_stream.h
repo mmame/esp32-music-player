@@ -57,6 +57,16 @@ esp_err_t fatfs_dma_stream_crossfade(audio_element_handle_t el, const char *new_
                                      uint32_t old_end_off, uint32_t new_start_off, uint32_t new_end_off,
                                      uint8_t old_mode, uint8_t new_mode, bool stereo);
 
+/**
+ * @brief Reverse playback: stream the PCM data backwards, starting just below the element's byte position
+ *        (set with audio_element_setinfo before the pipeline starts) down to the start of the PCM (offset 44),
+ *        where the stream ends.  Every block is read from lower in the file and its sample frames are reversed.
+ *        Takes effect the next time the file is opened.  Not combined with a crossfade.
+ *
+ * @param frame_bytes  bytes per sample frame (channels * bytes per sample), e.g. 4 for 16-bit stereo
+ */
+void fatfs_dma_stream_set_reverse(audio_element_handle_t el, bool on, uint32_t frame_bytes);
+
 /** True while a requested crossfade has not finished yet. */
 bool fatfs_dma_stream_crossfade_busy(audio_element_handle_t el);
 

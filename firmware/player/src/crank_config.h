@@ -41,6 +41,7 @@ typedef struct {
     uint8_t  vol_range_db;   /**< volume knob range: level at the bottom of the knob = -vol_range_db [20-60 dB, def 40] */
     uint8_t  speed_min_x10;  /**< crank mode: lowest playback speed x10 [2-10 = 0.2-1.0, def 7] */
     uint8_t  speed_max_x10;  /**< crank mode: highest playback speed x10 [10-20 = 1.0-2.0, def 14] */
+    uint8_t  reverse_play;   /**< crank mode: 1 = cranking backwards plays the song in reverse [def 0 = off] */
 } crank_config_t;
 
 /** Globally shared config; written by crank_config_load() and the web POST handler. */

@@ -141,6 +141,13 @@ static uint8_t  g_bps          = 2;
 
 static float    g_audio_pos_s  = 0.0f;
 static int64_t  g_wall_ref_us  = 0;
+/* Reverse playback (crank mode, optional): s_play_rev = the pipeline currently streams the song backwards
+ * (the position then decreases); s_rev_req = direction wanted by the crank, applied at the next (re)start. */
+static bool          s_play_rev = false;
+static volatile bool s_rev_req  = false;
+/* Last speed values sent to the display (0-100); a volume-only update must repeat them, not reset the speed bar. */
+static uint8_t s_last_tempo_sent = 255;   /* 255 = force first send */
+static uint8_t s_last_live_sent  = 255;
 
 static volatile int16_t s_cmd_play_id       = -1;
 static volatile bool    s_cmd_stop          = false;
@@ -244,7 +251,7 @@ static void run_light_organ_fft(void)
     }
 
     uint32_t bps_total = g_sample_rate * (uint32_t)g_channels * (uint32_t)g_bps;
-    float read_pos_s = g_audio_pos_s + g_crank_cfg.lo_lookahead_s;
+    float read_pos_s = g_audio_pos_s + (s_play_rev ? -g_crank_cfg.lo_lookahead_s : g_crank_cfg.lo_lookahead_s);
     if (read_pos_s < 0.0f) return;
     uint32_t offset = WAV_HDR_BYTES + (uint32_t)(read_pos_s * (float)bps_total);
     
@@ -595,7 +602,8 @@ static float get_current_pos_s_locked(void)
     int64_t now = esp_timer_get_time();
     float eff_speed = g_bypass_active ? 1.0f : g_speed;
     if (now <= g_wall_ref_us) return g_audio_pos_s;   /* wall_ref in the future: crossfade latency */
-    return g_audio_pos_s + (float)(now - g_wall_ref_us) * 1e-6f * eff_speed;
+    float p = g_audio_pos_s + (float)(now - g_wall_ref_us) * 1e-6f * eff_speed * (s_play_rev ? -1.0f : 1.0f);
+    return p < 0.0f ? 0.0f : p;
 }
 
 #ifdef HAVE_ADF
@@ -636,7 +644,8 @@ static void apply_speed_locked(float speed)
     if (g_is_playing && !g_is_paused) {
         int64_t now   = esp_timer_get_time();
         float eff_speed = g_bypass_active ? 1.0f : g_speed;
-        g_audio_pos_s += (float)(now - g_wall_ref_us) * 1e-6f * eff_speed;
+        g_audio_pos_s += (float)(now - g_wall_ref_us) * 1e-6f * eff_speed * (s_play_rev ? -1.0f : 1.0f);
+        if (g_audio_pos_s < 0.0f) g_audio_pos_s = 0.0f;
         g_wall_ref_us  = now;
     }
     g_speed = speed;
@@ -781,6 +790,8 @@ static bool play_song_idx(uint16_t idx, bool start_pipeline = true, bool keep_do
     /* Unbounded header: the stream may change songs mid-way (crossfade); the reader stops at the end of the PCM. */
     fatfs_dma_stream_set_unbounded_header(g_fatfs_el, true);
     fatfs_dma_stream_set_limit(g_fatfs_el, WAV_HDR_BYTES + data_bytes);
+    s_play_rev = false; s_rev_req = false;                       /* a newly loaded song starts forward */
+    fatfs_dma_stream_set_reverse(g_fatfs_el, false, 4);
 
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     g_current_song = (int16_t)idx;
@@ -925,6 +936,12 @@ static void do_resume(void)
     audio_element_getinfo(g_fatfs_el, &info);
     info.byte_pos = file_offset;
     audio_element_setinfo(g_fatfs_el, &info);
+    {   /* reverse playback: stream the file backwards from the position (crank mode, optional) */
+        const bool rev = g_crank_cfg.reverse_play && !player_mode() && s_rev_req;
+        s_play_rev = rev;
+        fatfs_dma_stream_set_reverse(g_fatfs_el, rev, frame_sz);
+        if (rev) apply_downmix_to_soundtouch(false);   /* drop any downmix schedule left by an aborted crossfade */
+    }
     fatfs_dma_stream_set_unbounded_header(g_fatfs_el, true);
     fatfs_dma_stream_set_limit(g_fatfs_el, WAV_HDR_BYTES + g_song_bytes);   /* end of this song's PCM (after a crossfade the limit may be stale) */
 
@@ -1159,7 +1176,7 @@ static void audio_task(void *arg)
                  * which calls do_resume() and starts the pipeline. */
                 /* Next/Prev while playing: crossfade with the length set for the song being left. */
                 uint32_t xf = 0;
-                if (g_song_count > 1 && g_current_song >= 0 && g_is_playing && !g_is_paused &&
+                if (g_song_count > 1 && g_current_song >= 0 && g_is_playing && !g_is_paused && !s_play_rev &&   /* no crossfade while playing in reverse */
                     (play_id == (int16_t)((g_current_song + 1) % g_song_count) ||
                      play_id == (int16_t)((g_current_song + g_song_count - 1) % g_song_count))) {
                     char cur[8 + UM_MAX_SONG_NAME + 5];
@@ -1255,7 +1272,16 @@ static void audio_task(void *arg)
                 const bool eff_loop = player_mode() ? (g_crank_cfg.player_end_action == 2u) : g_song_loop;
                 const bool eff_next = player_mode() ? (g_crank_cfg.player_end_action == 1u) : g_song_autoplay_next;
 
-                if (eff_loop && g_current_song >= 0) {
+                if (s_play_rev && g_current_song >= 0) {
+                    /* Reverse playback reached the start of the song: hold there (paused at 0).  Cranking
+                     * forward resumes from the start; no loop / next in this direction. */
+                    ESP_LOGI(TAG, "Reverse playback reached the start");
+                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                    g_is_playing  = false;
+                    g_is_paused   = true;
+                    g_audio_pos_s = 0.0f;
+                    xSemaphoreGive(s_state_mutex);
+                } else if (eff_loop && g_current_song >= 0) {
                     /* Loop: reload song at position 0 then resume immediately.
                      * Do NOT set g_is_playing/g_is_paused to false here – that
                      * would briefly signal "stopped" to the io_task state sender
@@ -1866,7 +1892,9 @@ static void io_task(void *arg)
                 apply_volume_locked(vol);
                 xSemaphoreGive(s_state_mutex);
 #endif
-                uart_master_send_poti_update(vol, 0, 0,
+                uart_master_send_poti_update(vol,
+                                             s_last_tempo_sent <= 100 ? s_last_tempo_sent : 0,
+                                             s_last_live_sent  <= 100 ? s_last_live_sent  : 0,
                                              g_crank_cfg.speed_min_x10,
                                              g_crank_cfg.speed_max_x10);
             }
@@ -1888,8 +1916,6 @@ static void io_task(void *arg)
         {
             static bool       s_enc2_was_moving  = false;
             static bool       s_enc2_pause_sent  = false;
-            static uint8_t    s_last_tempo_sent  = 255; /* 255 = force first send */
-            static uint8_t    s_last_live_sent   = 255; /* 255 = force first send */
             static TickType_t s_last_tempo_tick  = 0;
 
             /* New song loaded (e.g. Next button) – force a rising edge so resume
@@ -2165,6 +2191,23 @@ static void io_task(void *arg)
                     apply_volume_locked(0);
                     xSemaphoreGive(s_state_mutex);
 #endif
+                    s_rev_req = g_crank_cfg.reverse_play && !player_mode() && encoder2_is_reverse();
+                    s_cmd_resume = true;
+                } else if (g_crank_cfg.reverse_play && !player_mode() && g_current_song >= 0 &&
+                           (g_is_playing || g_is_paused) && encoder2_is_reverse() != s_rev_req) {
+                    /* Crank direction changed (also while a crossfade is still running: it is aborted by the
+                     * pause): restart the song in the new direction from the current position, fading in. */
+                    s_rev_req    = encoder2_is_reverse();
+                    s_vol_fading = false;
+                    s_vol_fadein = true;
+                    s_fadein_vol = 0;
+#ifdef HAVE_ADF
+                    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                    apply_volume_locked(0);
+                    xSemaphoreGive(s_state_mutex);
+#endif
+                    if (g_is_playing && !g_is_paused) s_cmd_pause = true;
+                    s_enc2_pause_sent = false;
                     s_cmd_resume = true;
                 }
                 /* Update speed target while song is active and speed not locked */
@@ -2242,7 +2285,16 @@ static void io_task(void *arg)
                     : speed_target);
             if (disp_speed < SPEED_MIN) disp_speed = SPEED_MIN;   /* fixed speed may be outside the crank range: pin the bar */
             if (disp_speed > SPEED_MAX) disp_speed = SPEED_MAX;
-            float live_speed = enc2_spd;
+            /* Live speed for the display: a crank with a dead spot loses the pulses of one or two 50 ms windows
+             * and enc2_spd collapses to 0 for a moment while the audio speed (speed_target) carries on.  Hold the
+             * last value for a short time so the bar does not flicker; a real stop still shows after the hold. */
+            static float    s_live_hold      = 0.0f;
+            static TickType_t s_live_hold_tick = 0;
+            if (enc2_spd > 0.0f) {
+                s_live_hold      = enc2_spd;
+                s_live_hold_tick = now;
+            }
+            float live_speed = (enc2_spd > 0.0f || (now - s_live_hold_tick) > pdMS_TO_TICKS(400)) ? enc2_spd : s_live_hold;
             if (live_speed < SPEED_MIN) live_speed = SPEED_MIN;
             if (live_speed > SPEED_MAX) live_speed = SPEED_MAX;
             uint8_t tb = (uint8_t)(((disp_speed - SPEED_MIN) /

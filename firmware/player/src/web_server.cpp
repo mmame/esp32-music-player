@@ -1333,7 +1333,7 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              "\"dimmer_start_fade_ms\":%u,\"dimmer_stop_fade_ms\":%u,\"crank_dir\":%d,"
              "\"lo_bass_weight\":%.1f,\"lo_mid_weight\":%.1f,"
              "\"lo_decay_rate\":%.4f,\"lo_lookahead_s\":%.3f,"
-             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u,\"vol_full\":%u,\"vol_range_db\":%u,\"speed_min_x10\":%u,\"speed_max_x10\":%u}",
+             "\"pot_cal_lo\":%u,\"pot_cal_mid\":%u,\"pot_cal_hi\":%u,\"gain_db\":%u,\"ui_mode\":%u,\"player_end_action\":%u,\"vol_full\":%u,\"vol_range_db\":%u,\"speed_min_x10\":%u,\"speed_max_x10\":%u,\"reverse_play\":%u}",
              (double)g_crank_cfg.ema_attack,
              (double)g_crank_cfg.ema_release,
              (double)g_crank_cfg.stop_thresh,
@@ -1356,7 +1356,8 @@ static esp_err_t crank_config_get_handler(httpd_req_t *req)
              (unsigned)g_crank_cfg.vol_full,
              (unsigned)g_crank_cfg.vol_range_db,
              (unsigned)g_crank_cfg.speed_min_x10,
-             (unsigned)g_crank_cfg.speed_max_x10);
+             (unsigned)g_crank_cfg.speed_max_x10,
+             (unsigned)g_crank_cfg.reverse_play);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store");
     return httpd_resp_sendstr(req, buf);
@@ -1505,11 +1506,12 @@ static esp_err_t crank_config_post_handler(httpd_req_t *req)
     read_u8(root, "vol_range_db", 20, 60, &nc.vol_range_db);
     read_u8(root, "speed_min_x10", 2, 10, &nc.speed_min_x10);
     read_u8(root, "speed_max_x10", 10, 20, &nc.speed_max_x10);
+    read_u8(root, "reverse_play", 0, 1, &nc.reverse_play);
     {
         cJSON *it = cJSON_GetObjectItemCaseSensitive(root, "crank_dir");
         if (cJSON_IsNumber(it)) {
             int v = (int)it->valuedouble;
-            if (v >= -1 && v <= 1) nc.crank_dir = (int8_t)v;
+            if (v >= -1 && v <= 1) nc.crank_dir = (int8_t)(v == 0 ? -1 : v);
         }
     }
     read_f (root, "lo_bass_weight", 1.0f, 200.0f, &nc.lo_bass_weight);

@@ -14,6 +14,14 @@ Player (musicplayer-20261019.bin) + 5" display (ESP32-8048S050C-full-20261019.bi
     32 samples at 10 ms -> less jitter; the change threshold was reduced, so the volume moves in 1 % steps.
   * Web interface, Backup: Chrome / Edge may block the ZIP download as "unsafe" because the player is served over
     plain HTTP. A warning box now explains how to keep the download. "Restore from ZIP" renamed "Restore backup".
+  * NEW, crank mode: optional reverse playback (web config "Reverse playback", off by default). Cranking backwards
+    plays the song backwards at the crank speed; a change of direction pauses and restarts cleanly with the volume
+    fade-in. At the start of the song playback stops (paused at 0); cranking forward continues from there. Crossfade
+    is not used while playing in reverse (Next / Previous switch songs normally).
+  * "Crank direction" now only offers Direction A or Direction B (it defines "forward"); "Both directions" was
+    removed, a stored "both" setting becomes Direction B.
+  * 5" display: the speed slider no longer flickers to its minimum when the volume knob moves (the volume update
+    reset the speed values); the live crank speed shown is held for 0.4 s through short pulse gaps.
 
 3.2" display: unchanged since 20261015 (rebuilt only)
 
