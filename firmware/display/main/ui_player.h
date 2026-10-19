@@ -121,10 +121,11 @@ void ui_player_press_button_async(uint8_t target);
  *        Called every state tick; cheap when nothing changed.  Safe from any task / core.
  *
  * @param player_mode  true = player mode, false = crank mode (default).
+ * @param vol_visible  true = show the VOL slider in player mode ("Volume control" = potentiometer).
  * @param paused       true while the current song is paused.
  * @param end_action   0 = stop, 1 = play next, 2 = repeat.
  */
-void ui_player_update_mode_async(bool player_mode, bool paused, uint8_t end_action);
+void ui_player_update_mode_async(bool player_mode, bool paused, uint8_t end_action, bool vol_visible);
 
 /**
  * @brief Update the speed-lock ("HOLD") indicator.

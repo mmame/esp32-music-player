@@ -508,10 +508,11 @@ static void handle_packet(uint8_t cmd, const uint8_t *payload, uint8_t len)
         ui_songlist_update_bt_enabled_async(!!(flags_byte & 0x02u));
         ui_songlist_update_wifi_enabled_async(!!(flags_byte & 0x04u));
         {
-            /* flags: bit3 = paused, bit4 = player mode, bits 5-6 = end-of-song action */
+            /* flags: bit3 = paused, bit4 = player mode, bits 5-6 = end-of-song action, bit7 = volume fixed at 100 % */
             uint8_t end_action = (uint8_t)((flags_byte >> 5) & 0x03u);
             if (end_action > 2u) end_action = 0u;
-            ui_player_update_mode_async(!!(flags_byte & 0x10u), !!(flags_byte & 0x08u), end_action);
+            ui_player_update_mode_async(!!(flags_byte & 0x10u), !!(flags_byte & 0x08u), end_action,
+                                        !(flags_byte & 0x80u));
         }
 
         ESP_LOGD(TAG, "State: song='%s'  vol=%u  tempo=%u  playing=%u  pos=%u%%  dur=%us",

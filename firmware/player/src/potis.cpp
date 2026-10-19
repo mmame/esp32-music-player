@@ -17,6 +17,7 @@
 
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -29,9 +30,8 @@ static adc_oneshot_unit_handle_t s_adc_handle = nullptr;
 
 static adc_channel_t s_vol_ch = ADC_CHANNEL_0;
 
-static uint16_t s_vol_buf[POT_AVG_SAMPLES];
-static uint8_t  s_buf_idx  = 0;
-static bool     s_buf_full = false;
+static volatile uint16_t s_vol_buf[POT_AVG_SAMPLES];   /* written by the sampling timer, read by potis_read() */
+static volatile uint32_t s_buf_cnt = 0;                /* total samples taken (index = cnt % N) */
 
 static uint8_t s_last_volume = 0xFF;
 
@@ -89,17 +89,31 @@ static uint8_t raw_to_pct(uint32_t avg_raw)
     }
     /* the divider is hyperbolic: at the bottom of the travel the raw value moves only a few counts per percent, so
      * the "almost zero" margin has to be applied on the linearized position, not on the raw value */
-    if (pct <= 2.0f)   return 0;
+    const float dead = 3.5f;                       /* dead window at the bottom: reads 0 (mute) */
+    if (pct <= dead)   return 0;
     if (pct >= 100.0f) return 100;
+    /* compress the live range so it starts at 1 % right after the dead window (no jump from 0 to 3-4 %) */
+    pct = 1.0f + (pct - dead) * (99.0f / (100.0f - dead));
     return (uint8_t)(pct + 0.5f);
 }
 
 static uint32_t buf_raw_avg(void)
 {
-    uint8_t n = s_buf_full ? POT_AVG_SAMPLES : (s_buf_idx == 0 ? 1u : s_buf_idx);
+    const uint32_t cnt = s_buf_cnt;
+    const uint32_t n   = cnt < POT_AVG_SAMPLES ? cnt : POT_AVG_SAMPLES;
     uint32_t sum = 0;
-    for (uint8_t i = 0; i < n; i++) sum += s_vol_buf[i];
+    for (uint32_t i = 0; i < n; i++) sum += s_vol_buf[i];
     return (n > 0) ? (sum / n) : 0u;
+}
+
+/* esp_timer callback (esp_timer task): one ADC sample into the ring */
+static void sample_cb(void *)
+{
+    int raw = 0;
+    if (adc_oneshot_read(s_adc_handle, s_vol_ch, &raw) != ESP_OK) return;
+    const uint32_t c = s_buf_cnt;
+    s_vol_buf[c % POT_AVG_SAMPLES] = (uint16_t)raw;
+    s_buf_cnt = c + 1;
 }
 
 static uint8_t buf_average(void)
@@ -135,20 +149,19 @@ void potis_init(void)
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc_handle, s_vol_ch, &chan_cfg));
 
-    memset(s_vol_buf, 0, sizeof(s_vol_buf));
+    for (int i = 0; i < 16; i++) sample_cb(nullptr);    /* valid average from the first potis_read() */
+
+    const esp_timer_create_args_t targs = { .callback = sample_cb, .arg = nullptr,
+                                            .dispatch_method = ESP_TIMER_TASK, .name = "pot_adc" };
+    esp_timer_handle_t th = nullptr;
+    ESP_ERROR_CHECK(esp_timer_create(&targs, &th));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(th, POT_SAMPLE_US));
 
     ESP_LOGI(TAG, "Potis ready");
 }
 
 bool potis_read(uint8_t *out_volume)
 {
-    int raw_vol = 0;
-    adc_oneshot_read(s_adc_handle, s_vol_ch, &raw_vol);
-
-    s_vol_buf[s_buf_idx] = (uint16_t)raw_vol;
-    s_buf_idx = (uint8_t)((s_buf_idx + 1) % POT_AVG_SAMPLES);
-    if (s_buf_idx == 0) s_buf_full = true;
-
     uint8_t vol = buf_average();
 
     if (out_volume) *out_volume = vol;

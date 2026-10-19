@@ -2406,6 +2406,7 @@ static void io_task(void *arg)
             if (web_server_is_running())   state_flags |= 0x04u;
             if (g_is_paused)               state_flags |= 0x08u;
             if (player_mode())             state_flags |= 0x10u;
+            if (g_crank_cfg.vol_full)      state_flags |= 0x80u;   /* display hides the volume slider */
             state_flags |= (uint8_t)((g_crank_cfg.player_end_action & 0x03u) << 5);
             uint16_t state_id    = (song >= 0) ? (uint16_t)((uint16_t)song + 1u) : 0u;
             uart_master_send_state(name, (uint8_t)(playing ? 1 : 0),

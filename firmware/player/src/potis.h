@@ -20,11 +20,13 @@
 extern "C" {
 #endif
 
-/* Moving-average window size (power of 2 recommended for cheap division) */
-#define POT_AVG_SAMPLES  32
+/* Moving-average window: samples are taken in the background every POT_SAMPLE_US, so the window spans
+ * POT_AVG_SAMPLES * POT_SAMPLE_US = 128 * 2 ms = ~256 ms (4x more samples than the old 32 x 10 ms). */
+#define POT_AVG_SAMPLES  128
+#define POT_SAMPLE_US    2000
 
 /* Minimum change (0–100 scale) before a new value is considered "changed" */
-#define POT_CHANGE_THRESHOLD  2
+#define POT_CHANGE_THRESHOLD  0
 
 /* ── API ──────────────────────────────────────────────────────────────────── */
 
@@ -35,8 +37,8 @@ extern "C" {
 void potis_init(void);
 
 /**
- * @brief Sample the volume potentiometer and update the moving-average filter.
- *        Call this periodically (e.g. every 10 ms from Core 0 task).
+ * @brief Read the filtered volume potentiometer.  The ADC is sampled by a background timer
+ *        (see POT_SAMPLE_US); this only averages the collected samples, so call it at any rate.
  *
  * @param[out] volume  Filtered volume value 0–100 (or NULL to ignore).
  * @return true if the value changed by more than POT_CHANGE_THRESHOLD

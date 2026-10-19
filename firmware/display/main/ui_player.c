@@ -201,6 +201,7 @@ static bool      s_prog_anim_active = false;
 
 /* Operating mode (from the player's state flags): crank mode is the default. */
 static bool      s_player_mode    = false;
+static bool      s_vol_visible    = true;   /* "Volume control" = potentiometer (else the slider is hidden in player mode) */
 static bool      s_paused         = false;  /* player mode: song loaded but paused */
 static uint8_t   s_end_action     = 0u;     /* player mode: 0=stop, 1=next, 2=repeat */
 static bool      s_pp_tap_active  = false;  /* local tap pending player confirmation */
@@ -430,11 +431,12 @@ static void apply_panel_layout(void)
     if (L.compact) return;
 
     const bool    pm     = s_player_mode;
-    const int32_t w      = pm ? (L.split_x + L.right_w) : L.split_x;   /* content width */
+    const bool    panel  = !pm || s_vol_visible;   /* right panel = VOL (and TMP in crank mode) bars */
+    const int32_t w      = panel ? L.split_x : (L.split_x + L.right_w);   /* content width */
     const int32_t inner  = w - 2 * PROGRESS_PAD_X;
 
-    set_hidden(s_right_panel, pm);
-    set_hidden(s_sep,         pm);
+    set_hidden(s_right_panel, !panel);
+    set_hidden(s_sep,         !panel);
 
     if (s_left_panel)     lv_obj_set_width(s_left_panel, w);
     if (s_title_lbl)      lv_obj_set_width(s_title_lbl, inner);
@@ -449,11 +451,11 @@ static void apply_panel_layout(void)
 
     /* Player-mode button row: centered in the content area; end-of-song toggle right-aligned to it */
     const int32_t row_w  = 3 * PM_SIDE_W + PM_PP_W + 3 * PM_GAP;
-    const int32_t prev_x = pm ? (w - row_w) / 2 : PM_PREV_X;
+    const int32_t prev_x = (pm && !panel) ? (w - row_w) / 2 : PM_PREV_X;
     const int32_t pp_x   = prev_x + PM_SIDE_W + PM_GAP;
     const int32_t next_x = pp_x + PM_PP_W + PM_GAP;
     const int32_t stop_x = next_x + PM_SIDE_W + PM_GAP;
-    const int32_t end_x  = pm ? (prev_x + row_w - PM_END_BTN_W) : PM_END_X;
+    const int32_t end_x  = (pm && !panel) ? (prev_x + row_w - PM_END_BTN_W) : PM_END_X;
     if (s_pm_prev)    lv_obj_set_x(s_pm_prev, prev_x);
     if (s_pm_pp)      lv_obj_set_x(s_pm_pp,   pp_x);
     if (s_pm_next)    lv_obj_set_x(s_pm_next, next_x);
@@ -1226,6 +1228,7 @@ typedef struct {
     bool    player_mode;
     bool    paused;
     uint8_t end_action;
+    bool    vol_visible;
 } async_mode_payload_t;
 
 static void async_cb_update_mode(void *user_data)
@@ -1234,9 +1237,12 @@ static void async_cb_update_mode(void *user_data)
 
     bool changed = false;
 
-    if (p->player_mode != s_player_mode) {
+    if (p->player_mode != s_player_mode || p->vol_visible != s_vol_visible) {
+        const bool mode_changed = (p->player_mode != s_player_mode);
         s_player_mode = p->player_mode;
+        s_vol_visible = p->vol_visible;
         apply_mode_visibility();
+        if (!mode_changed) { refresh_pm_widgets(); free(p); return; }
         /* Back in crank mode: request the song settings again so the LOOP / FIX indicators return. */
         if (!s_player_mode && s_current_song_id != 0) {
             uart_comm_send_song_settings_req(s_current_song_id);
@@ -1260,13 +1266,14 @@ static void async_cb_update_mode(void *user_data)
     free(p);
 }
 
-void ui_player_update_mode_async(bool player_mode, bool paused, uint8_t end_action)
+void ui_player_update_mode_async(bool player_mode, bool paused, uint8_t end_action, bool vol_visible)
 {
     if (!s_screen) return;
 
     async_mode_payload_t *p = malloc(sizeof(async_mode_payload_t));
     if (!p) { ESP_LOGE(TAG, "OOM in update_mode_async"); return; }
     p->player_mode = player_mode;
+    p->vol_visible = vol_visible;
     p->paused      = paused;
     p->end_action  = (end_action <= 2u) ? end_action : 0u;
     lv_lock();

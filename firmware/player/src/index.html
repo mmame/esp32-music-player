@@ -179,9 +179,13 @@ input[type=range].cfg-slider{width:100%;cursor:pointer;accent-color:#7c3aed}
   <label style="font-size:13px"><input type="checkbox" id="bk-songs" onchange="updateBackupEstimate()"> Include songs (WAV) <span id="bk-songs-info" style="color:#a78bfa"></span></label>
   <div id="bk-est" style="font-size:12px;color:#a78bfa;margin:6px 0"></div>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <a class="btn btn-sm btn-primary" id="bk-dl" href="/api/backup?songs=0" onclick="this.href=backupUrl()" download>&#8595; Download backup</a>
-    <button class="btn btn-sm btn-ghost" onclick="document.getElementById('bk-file').click()">&#8593; Restore from ZIP&hellip;</button>
+    <a class="btn btn-sm btn-primary" id="bk-dl" href="/api/backup?songs=0" onclick="return backupClick(this)" download>&#8595; Download backup</a>
+    <button class="btn btn-sm btn-ghost" onclick="document.getElementById('bk-file').click()">&#8593; Restore backup&hellip;</button>
     <input type="file" id="bk-file" accept=".zip,application/zip" style="display:none" onchange="restoreFromZip(this)">
+  </div>
+  <div id="bk-hint" style="display:none;margin-top:10px;padding:10px 12px;border-radius:6px;font-size:13px;border:2px solid #f5a623;background:#2a1e05;color:#ffd58a">
+    <b>&#9888; Browser shows &ldquo;Unsafe download blocked&rdquo;?</b><br>
+    The player is reached via plain HTTP (no certificate), so Chrome / Edge may block the ZIP. The file is safe &ndash; open the browser&rsquo;s download list (arrow icon in the toolbar, or <code>Ctrl+J</code>) and choose <b>Keep</b> (&ldquo;Behalten&rdquo;) on the blocked download; if only a menu is offered, use <b>&#8942; &rarr; Keep</b> / &ldquo;Download unsafe file&rdquo;.
   </div>
   <div id="bk-status" style="display:none;margin-top:10px;padding:8px 10px;border-radius:6px;font-size:13px;border:1px solid #2a3a6a;background:#0d1230"></div>
   <div id="bk-prog" style="display:none;margin-top:10px">
@@ -754,6 +758,12 @@ function backupUrl(){
   var ts=''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes());
   return '/api/backup?songs='+(document.getElementById('bk-songs').checked?1:0)+'&ts='+ts;
 }
+/* Chrome blocks plain-HTTP ZIP downloads as "unsafe": show the user what to do (the player has no HTTPS) */
+function backupClick(a){
+  a.href=backupUrl();
+  var h=document.getElementById('bk-hint');if(h)h.style.display='block';
+  return true;
+}
 function updateBackupEstimate(){
   var cb=document.getElementById('bk-songs');if(!cb)return;
   var songs=cb.checked;
@@ -901,7 +911,7 @@ function restoreFromZip(inp){
   });
 }
 
-window.benchStart=benchStart;window.benchStop=benchStop;window.restoreFromZip=restoreFromZip;window.backupUrl=backupUrl;window.updateBackupEstimate=updateBackupEstimate;
+window.benchStart=benchStart;window.benchStop=benchStop;window.restoreFromZip=restoreFromZip;window.backupUrl=backupUrl;window.backupClick=backupClick;window.updateBackupEstimate=updateBackupEstimate;
 function loadFiles(){
   fetch('/api/files').then(function(r){
     if(!r.ok)throw new Error('HTTP '+r.status);
