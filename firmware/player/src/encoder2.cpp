@@ -89,6 +89,7 @@ static int8_t  s_cfg_crank_dir     = 0;  /* 0=any, +1=positive only, -1=negative
 static bool    s_cfg_reverse       = false;  /* reverse playback: the opposite direction is not filtered out */
 static bool    s_rev               = false;  /* current / last crank direction is reverse */
 static uint8_t s_opp_windows       = 0;      /* consecutive windows turning against the current direction */
+static uint8_t s_fast_windows      = 0;      /* windows left with the fast filter after a direction flip */
 
 /* ══════════════════════════════════════════════════════════════════════════════
  * Public API
@@ -160,6 +161,7 @@ float encoder2_update(void)
     s_delta_acc = 0;
 
     float instant_rps_signed;
+    bool  opposing = false;   /* reverse mode: window turned against the current direction (jitter) -> counts as "no movement" */
     if (s_cfg_reverse) {
         /* Reverse playback: both directions are valid.  Work with the magnitude in the current direction;
          * a sustained turn against it re-latches the direction after a stop (pause) so the audio path can
@@ -179,16 +181,19 @@ float encoder2_update(void)
                 s_opp_windows++;
             } else {
                 s_opp_windows = 0;
+                opposing      = true;                   /* slow counts the other way = stopping jitter, not a reversal */
             }
             if (s_opp_windows >= 3) {
                 ESP_LOGI(TAG, "crank direction flip -> %s (%.2f RPS)", s_rev ? "forward" : "reverse", (double)m);
-                s_rev          = !s_rev;                /* flip: stop first, restart in the new direction */
-                s_opp_windows  = 0;
-                s_speed_smooth = 0.0f;
-                s_moving       = false;
-                s_zero_ticks   = 0;
-                s_instant_rps  = m;
-                return 0.0f;
+                /* Flip without a stop: carry on at the speed just measured in the new direction.  (Restarting from
+                 * zero would run through the fast start-up filter, which overshoots.)  The player restarts the
+                 * audio in the new direction when it sees encoder2_is_reverse() change. */
+                s_rev              = !s_rev;
+                s_opp_windows      = 0;
+                s_speed_smooth     = m;
+                s_zero_ticks       = 0;
+                s_fast_windows     = 12;               /* 0.6 s: settle quickly on the real speed of the new direction */
+                instant_rps_signed = m;
             }
         } else {
             s_opp_windows      = 0;
@@ -208,7 +213,7 @@ float encoder2_update(void)
     /* Asymmetric EMA: slow attack (organ feel), fast release (crank stopped).
      * Release only engages after ENC2_RELEASE_TICKS consecutive zero-count
      * windows (5 × 50 ms = 250 ms), so brief pauses mid-crank are ignored. */
-    if (delta == 0) {
+    if (delta == 0 || opposing) {
         if (s_zero_ticks < s_cfg_release_ticks) s_zero_ticks++;
     } else {
         s_zero_ticks = 0;
@@ -223,7 +228,8 @@ float encoder2_update(void)
     } else if (!s_moving) {
         alpha = ENC2_EMA_ALPHA_STARTUP;  /* startup is not user-configurable */
     } else {
-        alpha = s_cfg_ema_attack;
+        if (s_fast_windows > 0) { s_fast_windows--; alpha = 0.35f; }   /* after a flip: converge on the real speed */
+        else                    alpha = s_cfg_ema_attack;
     }
     s_speed_smooth = alpha * instant_rps_signed
                    + (1.0f - alpha) * s_speed_smooth;

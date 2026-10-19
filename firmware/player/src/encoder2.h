@@ -54,8 +54,8 @@ float encoder2_get_instant_rps(void);
  * Off: unchanged behaviour (the crank_dir filter drops the unwanted direction).
  * On : both directions count as movement; the crank_dir setting only defines which one is "forward"
  *      (crank_dir == 0 -> positive counts are forward).  Turning the other way sets encoder2_is_reverse().
- *      A direction change while moving first reports "stopped" (so playback pauses cleanly), then the new
- *      direction starts like a fresh crank start.
+ *      A direction change while moving keeps the measured speed (no stop in between); the player restarts the
+ *      audio in the new direction when encoder2_is_reverse() changes.
  */
 void  encoder2_set_reverse(bool enable);
 

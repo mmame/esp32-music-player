@@ -4,7 +4,7 @@ Newest first.
 
 20261019
 --------
-Player (musicplayer-20261019.bin) + 5" display (ESP32-8048S050C-full-20261019.bin)
+Player (musicplayer-20261019.bin) + both displays (ESP32-8048S050C-full-20261019.bin, ESP32-2432S032C-full-20261019.bin)
   * 5" display, player mode: the volume slider is now shown or hidden according to the "Volume control" setting
     (Potentiometer = shown, Always 100% = hidden) instead of always being hidden in player mode. The 3.2" display
     is unchanged (no room for the slider).
@@ -22,8 +22,11 @@ Player (musicplayer-20261019.bin) + 5" display (ESP32-8048S050C-full-20261019.bi
     removed, a stored "both" setting becomes Direction B.
   * 5" display: the speed slider no longer flickers to its minimum when the volume knob moves (the volume update
     reset the speed values); the live crank speed shown is held for 0.4 s through short pulse gaps.
-
-3.2" display: unchanged since 20261015 (rebuilt only)
+  * Speed bar shows its minimum when the crank is stopped (it used to keep showing the last speed).
+  * Reverse playback: changing the crank direction without stopping no longer makes the speed overshoot (it settles
+    on the real speed within ~0.6 s); stopping detection is as fast as without reverse playback.
+  * Both displays: the VOL / TMP bars, the numeric labels and the elapsed / total time are only redrawn when their
+    value changes (no animation restarts) -> less flickering; the song title scrolls ~10 % slower.
 
 20261018
 --------

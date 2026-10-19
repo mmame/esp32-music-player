@@ -583,6 +583,7 @@ void ui_player_create(void)
     s_title_lbl = lv_label_create(left);
     lv_label_set_text(s_title_lbl, LV_SYMBOL_AUDIO "  ---");
     lv_label_set_long_mode(s_title_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_duration(s_title_lbl, lv_anim_speed_clamped(36, 300, 10000), 0);   /* scroll speed 36 px/s (LVGL default: 40) */
     lv_obj_set_width(s_title_lbl, SPLIT_X - 2 * PROGRESS_PAD_X);
     lv_obj_set_style_text_font(s_title_lbl, L.f_title, 0);
     lv_obj_set_style_text_color(s_title_lbl, lv_color_hex(COLOR_TEXT), 0);
@@ -959,15 +960,26 @@ typedef struct {
     uint16_t dur_s;
 } async_progress_payload_t;
 
+/* Set a label only when its text really changes: lv_label_set_text() redraws the label every time, and the
+ * VOL / TMP updates arrive several times a second. */
+static void set_label_if_changed(lv_obj_t *lbl, const char *txt)
+{
+    if (!lbl) return;
+    const char *cur = lv_label_get_text(lbl);
+    if (cur && strcmp(cur, txt) == 0) return;
+    lv_label_set_text(lbl, txt);
+}
+
 static void async_cb_update_potis(void *user_data)
 {
     async_poti_payload_t *p = (async_poti_payload_t *)user_data;
     char buf[12];
 
     if (s_bar[0]) {
-        lv_bar_set_value(s_bar[0], p->volume, LV_ANIM_ON);
+        /* no animation: fast updates would restart it constantly and redraw the whole bar every frame */
+        if (lv_bar_get_value(s_bar[0]) != (int32_t)p->volume) lv_bar_set_value(s_bar[0], p->volume, LV_ANIM_OFF);
         snprintf(buf, sizeof(buf), "%3u", p->volume);
-        lv_label_set_text(s_val_lbl[0], buf);
+        set_label_if_changed(s_val_lbl[0], buf);
     }
     if (s_bar[1]) {
         /* Always cache the latest speed range for the multiplier label. */
@@ -984,7 +996,7 @@ static void async_cb_update_potis(void *user_data)
         }
         uint8_t display_tempo = s_locked_tempo; /* frozen or just refreshed */
 
-        lv_bar_set_value(s_bar[1], display_tempo, LV_ANIM_ON);
+        if (lv_bar_get_value(s_bar[1]) != (int32_t)display_tempo) lv_bar_set_value(s_bar[1], display_tempo, LV_ANIM_OFF);
 
         /* In HOLD/fixed mode, keep showing the live incoming tempo on a slim
          * secondary bar so both effective and live values are visible. */
@@ -992,7 +1004,7 @@ static void async_cb_update_potis(void *user_data)
             bool show_live = (s_tempo_locked || s_bypass_active) && !s_player_mode;
             if (show_live) {
                 lv_obj_clear_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
-                lv_bar_set_value(s_tmp_live_bar, p->live_tempo, LV_ANIM_ON);
+                if (lv_bar_get_value(s_tmp_live_bar) != (int32_t)p->live_tempo) lv_bar_set_value(s_tmp_live_bar, p->live_tempo, LV_ANIM_OFF);
             } else {
                 lv_obj_add_flag(s_tmp_live_bar, LV_OBJ_FLAG_HIDDEN);
             }
@@ -1002,7 +1014,7 @@ static void async_cb_update_potis(void *user_data)
         uint32_t speed_x100 = (uint32_t)p->speed_min_x10 * 10
                             + ((uint32_t)(p->speed_max_x10 - p->speed_min_x10) * 10 * display_tempo + 50) / 100;
         snprintf(buf, sizeof(buf), "%u.%02u", (unsigned)(speed_x100 / 100), (unsigned)(speed_x100 % 100));
-        lv_label_set_text(s_val_lbl[1], buf);
+        set_label_if_changed(s_val_lbl[1], buf);
     }
     free(p);
 }
@@ -1015,7 +1027,7 @@ static void async_cb_update_progress(void *user_data)
     stop_progress_anim();
 
     if (s_progress_bar) {
-        lv_bar_set_value(s_progress_bar, p->pct, LV_ANIM_OFF);
+        if (lv_bar_get_value(s_progress_bar) != (int32_t)p->pct) lv_bar_set_value(s_progress_bar, p->pct, LV_ANIM_OFF);
     }
     if (s_time_lbl) {
         uint16_t elapsed_s = (uint16_t)((uint32_t)p->dur_s * p->pct / 100);
@@ -1023,7 +1035,7 @@ static void async_cb_update_progress(void *user_data)
         snprintf(buf, sizeof(buf), "%u:%02u / %u:%02u",
                  elapsed_s / 60, elapsed_s % 60,
                  p->dur_s  / 60, p->dur_s  % 60);
-        lv_label_set_text(s_time_lbl, buf);
+        set_label_if_changed(s_time_lbl, buf);
     }
 
     free(p);

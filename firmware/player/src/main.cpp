@@ -2282,7 +2282,7 @@ static void io_task(void *arg)
                 ? g_song_fixed_speed
                 : (g_tempo_locked
                     ? (SPEED_MIN + ((float)g_locked_tempo_raw / 100.0f) * (SPEED_MAX - SPEED_MIN))
-                    : speed_target);
+                    : (enc2_move ? speed_target : SPEED_MIN));   /* crank stopped: bar at its minimum, not the last speed */
             if (disp_speed < SPEED_MIN) disp_speed = SPEED_MIN;   /* fixed speed may be outside the crank range: pin the bar */
             if (disp_speed > SPEED_MAX) disp_speed = SPEED_MAX;
             /* Live speed for the display: a crank with a dead spot loses the pulses of one or two 50 ms windows
