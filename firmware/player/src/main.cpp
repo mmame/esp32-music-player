@@ -209,15 +209,15 @@ static void send_song_and_playlist_lists_to_display(void)
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     count = g_song_count;
     for (uint8_t i = 0; i < count; ++i) {
-        strncpy(s_tx_song_names[i], g_song_names[i], UM_MAX_SONG_NAME - 1);
+        strlcpy(s_tx_song_names[i], g_song_names[i], UM_MAX_SONG_NAME);
         s_tx_song_names[i][UM_MAX_SONG_NAME - 1] = '\0';
     }
     pl_count = g_playlist_count;
     for (uint8_t i = 0; i < pl_count; ++i) {
-        strncpy(s_tx_playlist_names[i], g_playlist_names[i], UM_MAX_SONG_NAME - 1);
+        strlcpy(s_tx_playlist_names[i], g_playlist_names[i], UM_MAX_SONG_NAME);
         s_tx_playlist_names[i][UM_MAX_SONG_NAME - 1] = '\0';
     }
-    strncpy(s_tx_active_playlist, g_active_playlist, UM_MAX_SONG_NAME - 1);
+    strlcpy(s_tx_active_playlist, g_active_playlist, UM_MAX_SONG_NAME);
     s_tx_active_playlist[UM_MAX_SONG_NAME - 1] = '\0';
     xSemaphoreGive(s_state_mutex);
 
@@ -461,7 +461,7 @@ static void scan_playlist(void)
     uint8_t resolved_count = 0;
 
     for (uint8_t i = 0; i < all_count && resolved_count < MAX_SONGS; ++i) {
-        strncpy(s_scan_resolved[resolved_count], s_scan_all_songs[i], UM_MAX_SONG_NAME - 1);
+        strlcpy(s_scan_resolved[resolved_count], s_scan_all_songs[i], UM_MAX_SONG_NAME);
         s_scan_resolved[resolved_count][UM_MAX_SONG_NAME - 1] = '\0';
         resolved_count++;
     }
@@ -485,14 +485,14 @@ static void scan_playlist(void)
                             if (playlist_count >= MAX_PLAYLISTS) break;
                             const cJSON *nm = cJSON_GetObjectItemCaseSensitive(pl, "name");
                             if (!cJSON_IsString(nm) || !nm->valuestring || nm->valuestring[0] == '\0') continue;
-                            strncpy(s_scan_playlist_names[playlist_count], nm->valuestring, UM_MAX_SONG_NAME - 1);
+                            strlcpy(s_scan_playlist_names[playlist_count], nm->valuestring, UM_MAX_SONG_NAME);
                             s_scan_playlist_names[playlist_count][UM_MAX_SONG_NAME - 1] = '\0';
                             playlist_count++;
                         }
                     }
 
                     if (cJSON_IsString(active_item) && active_item->valuestring) {
-                        strncpy(s_scan_active_playlist, active_item->valuestring, UM_MAX_SONG_NAME - 1);
+                        strlcpy(s_scan_active_playlist, active_item->valuestring, UM_MAX_SONG_NAME);
                         s_scan_active_playlist[UM_MAX_SONG_NAME - 1] = '\0';
                     }
 
@@ -513,7 +513,7 @@ static void scan_playlist(void)
                                     char base[UM_MAX_SONG_NAME] = {};
                                     strip_wav_ext_copy(se->valuestring, base, sizeof(base));
                                     if (find_song_name(s_scan_all_songs, all_count, base) >= 0) {
-                                        strncpy(s_scan_resolved[resolved_count], base, UM_MAX_SONG_NAME - 1);
+                                        strlcpy(s_scan_resolved[resolved_count], base, UM_MAX_SONG_NAME);
                                         s_scan_resolved[resolved_count][UM_MAX_SONG_NAME - 1] = '\0';
                                         resolved_count++;
                                     }
@@ -535,15 +535,15 @@ static void scan_playlist(void)
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     g_song_count = resolved_count;
     for (uint8_t i = 0; i < g_song_count; ++i) {
-        strncpy(g_song_names[i], s_scan_resolved[i], UM_MAX_SONG_NAME - 1);
+        strlcpy(g_song_names[i], s_scan_resolved[i], UM_MAX_SONG_NAME);
         g_song_names[i][UM_MAX_SONG_NAME - 1] = '\0';
     }
     g_playlist_count = playlist_count;
     for (uint8_t i = 0; i < g_playlist_count; ++i) {
-        strncpy(g_playlist_names[i], s_scan_playlist_names[i], UM_MAX_SONG_NAME - 1);
+        strlcpy(g_playlist_names[i], s_scan_playlist_names[i], UM_MAX_SONG_NAME);
         g_playlist_names[i][UM_MAX_SONG_NAME - 1] = '\0';
     }
-    strncpy(g_active_playlist, s_scan_active_playlist, UM_MAX_SONG_NAME - 1);
+    strlcpy(g_active_playlist, s_scan_active_playlist, UM_MAX_SONG_NAME);
     g_active_playlist[UM_MAX_SONG_NAME - 1] = '\0';
     xSemaphoreGive(s_state_mutex);
 
@@ -565,7 +565,7 @@ static void player_rescan(void)
 
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     if (g_current_song >= 0 && (uint8_t)g_current_song < g_song_count) {
-        strncpy(old_song, g_song_names[(uint8_t)g_current_song], UM_MAX_SONG_NAME - 1);
+        strlcpy(old_song, g_song_names[(uint8_t)g_current_song], UM_MAX_SONG_NAME);
         old_song[UM_MAX_SONG_NAME - 1] = '\0';
         had_current = true;
     }
@@ -579,7 +579,7 @@ static void player_rescan(void)
         if (idx >= 0) {
             g_current_song = (int16_t)idx;
         } else if ((g_is_playing || g_is_paused) && g_song_count < MAX_SONGS) {
-            strncpy(g_song_names[g_song_count], old_song, UM_MAX_SONG_NAME - 1);
+            strlcpy(g_song_names[g_song_count], old_song, UM_MAX_SONG_NAME);
             g_song_names[g_song_count][UM_MAX_SONG_NAME - 1] = '\0';
             g_current_song = (int16_t)g_song_count;
             g_song_count++;

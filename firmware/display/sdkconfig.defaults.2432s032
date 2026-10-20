@@ -23,3 +23,7 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_36=y
 
 CONFIG_LV_OS_FREERTOS=y
+
+# Optimisation: -O2 (default was -Og, the debug-friendly level); assertions silent to save code size
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y

@@ -2,6 +2,14 @@ ESP32 music player - release notes
 ==================================
 Newest first. 
 
+20261020
+--------
+Player (musicplayer-20261020.bin) + both displays (ESP32-8048S050C-full-20261020.bin, ESP32-2432S032C-full-20261020.bin)
+  * Firmware is now compiled with -O2 (was -Og, the debug-friendly level) and with silent assertions: the audio
+    processing (SoundTouch, limiter) and the display drawing (LVGL) run faster, and the images are smaller
+    (player 1.29 -> 1.20 MB, 5" display 0.79 -> 0.78 MB). No functional change intended; small code changes were
+    needed so the stricter -O2 warnings (string truncation) are clean.
+
 20261019
 --------
 Player (musicplayer-20261019.bin) + both displays (ESP32-8048S050C-full-20261019.bin, ESP32-2432S032C-full-20261019.bin)

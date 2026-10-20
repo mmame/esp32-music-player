@@ -282,9 +282,9 @@ static void on_playlist_btn_clicked(lv_event_t *e)
     for (uint8_t i = 0; i < s_playlist_count; ++i) {
         char txt[SONGLIST_PLAYLIST_NAME_LEN + 6];
         if (strcmp(s_playlist_names[i], s_active_playlist) == 0) {
-            snprintf(txt, sizeof(txt), "%s *", s_playlist_names[i]);
+            snprintf(txt, sizeof(txt), "%.*s *", SONGLIST_PLAYLIST_NAME_LEN, s_playlist_names[i]);
         } else {
-            snprintf(txt, sizeof(txt), "%s", s_playlist_names[i]);
+            snprintf(txt, sizeof(txt), "%.*s", SONGLIST_PLAYLIST_NAME_LEN, s_playlist_names[i]);
         }
         lv_obj_t *b = lv_list_add_button(lst, LV_SYMBOL_AUDIO, txt);
         lv_obj_add_event_cb(b, on_playlist_pick_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)(i + 1u));
